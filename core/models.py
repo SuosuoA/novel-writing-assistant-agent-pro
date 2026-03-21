@@ -1,7 +1,7 @@
 """
 数据模型定义 - Pydantic v2模型
 
-V1.2版本（最终修订版）
+V1.3版本（最终修订版）
 创建日期：2026-03-21
 """
 
@@ -12,8 +12,9 @@ from pydantic import BaseModel, Field, ConfigDict
 
 class Event(BaseModel):
     """事件模型"""
+
     model_config = ConfigDict(frozen=False)
-    
+
     type: str = Field(..., description="事件类型")
     data: Any = Field(None, description="事件数据")
     source: Optional[str] = Field(None, description="事件来源")
@@ -23,8 +24,9 @@ class Event(BaseModel):
 
 class HandlerInfo(BaseModel):
     """处理器信息"""
+
     model_config = ConfigDict(frozen=False)
-    
+
     id: str = Field(..., description="处理器ID")
     handler: Any = Field(..., description="处理器函数")
     priority: int = Field(20, description="优先级（数值越小越高）")
@@ -33,30 +35,39 @@ class HandlerInfo(BaseModel):
 
 
 class PluginMetadata(BaseModel):
-    """插件元数据"""
+    """插件元数据 - Pydantic版本
+
+    注意：此模型用于PluginInfo和JSON序列化
+    字段与plugin_interface.py中的dataclass版本保持一致
+    """
+
     model_config = ConfigDict(frozen=False)
-    
+
     id: str = Field(..., description="插件ID")
     name: str = Field(..., description="插件名称")
-    version: str = Field(..., description="版本号")
+    version: str = Field("1.0.0", description="版本号")
     description: str = Field("", description="描述")
     author: str = Field("", description="作者")
-    plugin_type: str = Field("TOOL", description="插件类型")
+    plugin_type: str = Field("tool", description="插件类型")
     api_version: str = Field("1.0", description="API版本")
-    priority: int = Field(50, description="优先级")
+    priority: int = Field(100, description="优先级")
     enabled: bool = Field(True, description="是否启用")
     dependencies: List[str] = Field(default_factory=list, description="依赖")
     conflicts: List[str] = Field(default_factory=list, description="冲突")
     permissions: List[str] = Field(default_factory=list, description="权限")
-    min_platform_version: str = Field("1.0.0", description="最低平台版本")
+    min_platform_version: str = Field("6.0.0", description="最低平台版本")
+    entry_class: str = Field("", description="入口类名")
 
 
 class PluginInfo(BaseModel):
     """插件信息"""
+
     model_config = ConfigDict(frozen=False)
-    
+
     metadata: PluginMetadata = Field(..., description="插件元数据")
-    state: str = Field("LOADED", description="插件状态")
+    state: str = Field(
+        "loaded", description="插件状态"
+    )  # 使用小写，与PluginState枚举值一致
     instance: Optional[Any] = Field(None, description="插件实例")
     slot: Optional[str] = Field(None, description="插槽ID")
     error_message: Optional[str] = Field(None, description="错误信息")
@@ -67,8 +78,9 @@ class PluginInfo(BaseModel):
 
 class ValidationScores(BaseModel):
     """验证评分"""
+
     model_config = ConfigDict(frozen=False)
-    
+
     word_count_score: float = Field(0.0, ge=0, le=1, description="字数评分")
     outline_score: float = Field(0.0, ge=0, le=1, description="大纲评分")
     style_score: float = Field(0.0, ge=0, le=1, description="风格评分")
@@ -77,24 +89,25 @@ class ValidationScores(BaseModel):
     naturalness_score: float = Field(0.0, ge=0, le=1, description="自然度评分")
     total_score: float = Field(0.0, ge=0, le=1, description="总分")
     has_chapter_end: bool = Field(False, description="是否包含章节结束标记")
-    
+
     def calculate_total(self) -> float:
         """计算总分（6维度加权）"""
         self.total_score = (
-            self.word_count_score * 0.10 +
-            self.outline_score * 0.15 +
-            self.style_score * 0.25 +
-            self.character_score * 0.25 +
-            self.worldview_score * 0.20 +
-            self.naturalness_score * 0.05
+            self.word_count_score * 0.10
+            + self.outline_score * 0.15
+            + self.style_score * 0.25
+            + self.character_score * 0.25
+            + self.worldview_score * 0.20
+            + self.naturalness_score * 0.05
         )
         return self.total_score
 
 
 class GenerationRequest(BaseModel):
     """生成请求"""
+
     model_config = ConfigDict(frozen=False)
-    
+
     request_id: str = Field(..., description="请求ID")
     title: str = Field(..., description="章节标题")
     outline: str = Field(..., description="章节大纲")
@@ -108,8 +121,9 @@ class GenerationRequest(BaseModel):
 
 class GenerationResult(BaseModel):
     """生成结果"""
+
     model_config = ConfigDict(frozen=False)
-    
+
     request_id: str = Field(..., description="请求ID")
     content: str = Field(..., description="生成内容")
     word_count: int = Field(0, description="实际字数")
@@ -121,8 +135,9 @@ class GenerationResult(BaseModel):
 
 class PluginEvent(BaseModel):
     """插件事件"""
+
     model_config = ConfigDict(frozen=False)
-    
+
     event_type: str = Field(..., description="事件类型")
     plugin_id: str = Field(..., description="插件ID")
     data: Dict[str, Any] = Field(default_factory=dict, description="事件数据")
