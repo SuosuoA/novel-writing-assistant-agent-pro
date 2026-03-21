@@ -1,0 +1,20 @@
+# 分支保护规则配置（作为文档记录）
+# 实际规则需要在 GitHub 仓库设置中手动配置
+
+# Settings -> Branches -> Add branch protection rule
+
+# main 分支保护规则:
+# - Require a pull request before merging
+# - Require approvals: 1
+# - Require status checks to pass before merging
+#   - lint (代码格式检查)
+#   - test (单元测试)
+# - Require branches to be up to date before merging
+# - Do not allow bypassing the above settings
+
+# develop 分支保护规则:
+# - Require a pull request before merging
+# - Require approvals: 0 (可选，开发分支允许快速合并)
+# - Require status checks to pass before merging
+#   - lint
+#   - test
