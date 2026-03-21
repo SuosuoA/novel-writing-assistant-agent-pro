@@ -11,6 +11,7 @@ V1.2新增模块
 """
 
 import hashlib
+import hmac
 import json
 import logging
 from pathlib import Path
