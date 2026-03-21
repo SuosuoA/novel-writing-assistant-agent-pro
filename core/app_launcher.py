@@ -378,6 +378,10 @@ class OptimizedLauncher:
     def shutdown(self) -> None:
         """关闭启动器"""
         self._lazy_loader.shutdown()
+        # 清理回调引用
+        self._start_callbacks.clear()
+        self._complete_callbacks.clear()
+        self._root_window = None
         logger.info("OptimizedLauncher shutdown")
 
 
