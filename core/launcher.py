@@ -351,7 +351,12 @@ class LazyLoader:
     
     def shutdown(self) -> None:
         """关闭加载器"""
-        self._executor.shutdown(wait=True)
+        # Python 3.9+支持cancel_futures参数
+        try:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+        except TypeError:
+            # Python 3.8及以下版本不支持cancel_futures
+            self._executor.shutdown(wait=True)
         logger.info("LazyLoader shutdown")
 
 

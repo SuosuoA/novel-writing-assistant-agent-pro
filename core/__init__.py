@@ -38,6 +38,7 @@ from .plugin_loader import (
     PluginLoadResult,
     DependencyResolver,
     HotSwapPermission,
+    PluginSignatureVerifier,
     get_plugin_loader,
 )
 

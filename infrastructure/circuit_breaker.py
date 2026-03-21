@@ -14,7 +14,7 @@ import time
 import threading
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Dict
 from functools import wraps
 
 

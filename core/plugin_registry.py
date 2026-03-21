@@ -23,7 +23,7 @@ V1.3新增：
 import threading
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from .models import PluginMetadata as PydanticPluginMetadata, PluginInfo
 
@@ -597,6 +597,84 @@ class PluginRegistry:
             raise PluginProtectionError(f"禁止禁用V5保护模块: {plugin_id}")
 
         return self.deactivate(plugin_id)
+
+    # ========================================================================
+    # 运行时加载/卸载接口（V2.0新增：集成PluginLoader）
+    # ========================================================================
+
+    def load_plugin_runtime(
+        self, plugin_id: str, loader: Optional[Any] = None
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        运行时加载插件
+
+        Args:
+            plugin_id: 插件ID
+            loader: 插件加载器实例（可选）
+
+        Returns:
+            (是否成功, 错误信息)
+        """
+        from .plugin_loader import get_plugin_loader
+
+        _loader = loader or get_plugin_loader()
+        result = _loader.load_plugin(plugin_id)
+
+        if result.success:
+            return True, None
+        return False, result.error
+
+    def unload_plugin_runtime(
+        self, plugin_id: str, loader: Optional[Any] = None
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        运行时卸载插件
+
+        Args:
+            plugin_id: 插件ID
+            loader: 插件加载器实例（可选）
+
+        Returns:
+            (是否成功, 错误信息)
+        """
+        from .plugin_loader import get_plugin_loader
+
+        # V5保护模块检查
+        if plugin_id in V5_PROTECTED_MODULES:
+            return False, f"禁止卸载V5保护模块: {plugin_id}"
+
+        _loader = loader or get_plugin_loader()
+        success = _loader.unload_plugin(plugin_id)
+
+        if success:
+            return True, None
+        return False, "卸载失败"
+
+    def reload_plugin_runtime(
+        self, plugin_id: str, loader: Optional[Any] = None
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        运行时重载插件
+
+        Args:
+            plugin_id: 插件ID
+            loader: 插件加载器实例（可选）
+
+        Returns:
+            (是否成功, 错误信息)
+        """
+        from .plugin_loader import get_plugin_loader
+
+        # V5保护模块检查
+        if plugin_id in V5_PROTECTED_MODULES:
+            return False, f"禁止重载V5保护模块: {plugin_id}"
+
+        _loader = loader or get_plugin_loader()
+        result = _loader.reload_plugin(plugin_id)
+
+        if result.success:
+            return True, None
+        return False, result.error
 
 
 # 全局单例
