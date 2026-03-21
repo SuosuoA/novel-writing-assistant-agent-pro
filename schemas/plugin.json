@@ -1,0 +1,122 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://novel-writing-assistant-agent-pro.local/schemas/plugin.json",
+    "title": "Plugin Manifest Schema",
+    "description": "Novel Writing Assistant-Agent Pro 插件清单JSON Schema - V2.0最终版",
+    "type": "object",
+    "required": ["id", "name", "version", "plugin_type", "entry_class"],
+    "properties": {
+        "id": {
+            "type": "string",
+            "description": "插件唯一标识符",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "minLength": 1,
+            "maxLength": 64,
+            "examples": ["outline-parser-v3", "style-learner-v2", "novel-generator"]
+        },
+        "name": {
+            "type": "string",
+            "description": "插件显示名称",
+            "minLength": 1,
+            "maxLength": 128
+        },
+        "version": {
+            "type": "string",
+            "description": "版本号（语义化版本，遵循semver.org）",
+            "pattern": "^\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9]+)?$",
+            "examples": ["1.0.0", "2.1.0-beta", "3.0.0-rc1"]
+        },
+        "description": {
+            "type": "string",
+            "description": "插件功能描述",
+            "default": "",
+            "maxLength": 512
+        },
+        "author": {
+            "type": "string",
+            "description": "插件作者",
+            "default": "",
+            "maxLength": 64
+        },
+        "plugin_type": {
+            "type": "string",
+            "description": "插件类型",
+            "enum": ["protocol", "ai", "storage", "analyzer", "generator", "validator", "tool"],
+            "enumDescriptions": {
+                "protocol": "协议插件 - 用于导入导出格式转换",
+                "ai": "AI插件 - 用于LLM调用封装",
+                "storage": "存储插件 - 用于数据持久化",
+                "analyzer": "分析器插件 - 用于大纲解析/风格学习/人物管理/世界观解析",
+                "generator": "生成器插件 - 用于上下文构建/小说生成",
+                "validator": "验证器插件 - 用于内容质量评分验证",
+                "tool": "工具插件 - 用于通用工具功能"
+            }
+        },
+        "api_version": {
+            "type": "string",
+            "description": "API版本",
+            "default": "1.0",
+            "pattern": "^\\d+\\.\\d+$"
+        },
+        "priority": {
+            "type": "integer",
+            "description": "加载优先级（数值越小越先加载，1-1000）",
+            "default": 100,
+            "minimum": 1,
+            "maximum": 1000
+        },
+        "enabled": {
+            "type": "boolean",
+            "description": "是否启用",
+            "default": true
+        },
+        "dependencies": {
+            "type": "array",
+            "description": "依赖插件ID列表（按加载顺序）",
+            "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+            },
+            "default": []
+        },
+        "conflicts": {
+            "type": "array",
+            "description": "冲突插件ID列表",
+            "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+            },
+            "default": []
+        },
+        "permissions": {
+            "type": "array",
+            "description": "所需权限列表",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "file.read",
+                    "file.write", 
+                    "network.request",
+                    "database.read",
+                    "database.write",
+                    "system.execute",
+                    "ai.call"
+                ]
+            },
+            "default": []
+        },
+        "min_platform_version": {
+            "type": "string",
+            "description": "最低平台版本要求",
+            "default": "6.0.0",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "entry_class": {
+            "type": "string",
+            "description": "入口类名（相对于__init__.py）",
+            "minLength": 1,
+            "maxLength": 128
+        }
+    },
+    "additionalProperties": false
+}

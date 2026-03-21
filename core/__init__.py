@@ -8,18 +8,13 @@ V1.2版本（最终修订版）
 """
 
 # 核心类
-from .event_bus import (
-    EventBus,
-    EventPriority,
-    DeadLetterQueue,
-    get_event_bus
-)
+from .event_bus import EventBus, EventPriority, DeadLetterQueue, get_event_bus
 
 from .plugin_registry import (
     PluginRegistry,
     PluginState,
     PluginType,
-    get_plugin_registry
+    get_plugin_registry,
 )
 
 from .service_locator import (
@@ -28,14 +23,14 @@ from .service_locator import (
     ServiceScopeManager,
     CircularDependencyError,
     ServiceNotFoundError,
-    get_service_locator
+    get_service_locator,
 )
 
 from .config_manager import (
     ConfigManager,
     ConfigValidationError,
     ConfigKeyError,
-    get_config_manager
+    get_config_manager,
 )
 
 from .plugin_loader import (
@@ -43,7 +38,7 @@ from .plugin_loader import (
     PluginLoadResult,
     DependencyResolver,
     HotSwapPermission,
-    get_plugin_loader
+    get_plugin_loader,
 )
 
 from .plugin_interface import (
@@ -54,7 +49,7 @@ from .plugin_interface import (
     StoragePlugin,
     AIPlugin,
     ToolPlugin,
-    ProtocolPlugin
+    ProtocolPlugin,
 )
 
 from .models import (
@@ -65,7 +60,7 @@ from .models import (
     ValidationScores,
     GenerationRequest,
     GenerationResult,
-    PluginEvent
+    PluginEvent,
 )
 
 # V1.2新增模块
@@ -73,26 +68,14 @@ from .circuit_breaker import (
     CircuitBreaker,
     CircuitState,
     CircuitBreakerManager,
-    get_circuit_breaker_manager
+    get_circuit_breaker_manager,
 )
 
-from .secure_config import (
-    SecureConfig,
-    SecureConfigError,
-    get_secure_config
-)
+from .secure_config import SecureConfig, SecureConfigError, get_secure_config
 
-from .log_sanitizer import (
-    LogSanitizer,
-    SanitizingFormatter,
-    get_log_sanitizer
-)
+from .log_sanitizer import LogSanitizer, SanitizingFormatter, get_log_sanitizer
 
-from .plugin_signer import (
-    PluginSigner,
-    PluginSignatureError,
-    get_plugin_signer
-)
+from .plugin_signer import PluginSigner, PluginSignatureError, get_plugin_signer
 
 # UI层API
 from .ui_api import (
@@ -100,9 +83,20 @@ from .ui_api import (
     GenerationServiceProxy,
     PluginServiceProxy,
     ConfigServiceProxy,
-    EventServiceProxy
+    EventServiceProxy,
 )
 
+# Database（V1.0新增）
+from .database import (
+    ConnectionPool,
+    DatabaseMigration,
+    AgentStateStore,
+    GenerationHistoryStore,
+    get_database,
+    get_agent_state_store,
+    get_generation_history_store,
+    close_database,
+)
 
 __all__ = [
     # EventBus
@@ -110,13 +104,11 @@ __all__ = [
     "EventPriority",
     "DeadLetterQueue",
     "get_event_bus",
-    
     # PluginRegistry
     "PluginRegistry",
     "PluginState",
     "PluginType",
     "get_plugin_registry",
-    
     # ServiceLocator
     "ServiceLocator",
     "ServiceScope",
@@ -124,20 +116,17 @@ __all__ = [
     "CircularDependencyError",
     "ServiceNotFoundError",
     "get_service_locator",
-    
     # ConfigManager
     "ConfigManager",
     "ConfigValidationError",
     "ConfigKeyError",
     "get_config_manager",
-    
     # PluginLoader
     "PluginLoader",
     "PluginLoadResult",
     "DependencyResolver",
     "HotSwapPermission",
     "get_plugin_loader",
-    
     # PluginInterface
     "BasePlugin",
     "AnalyzerPlugin",
@@ -147,7 +136,6 @@ __all__ = [
     "AIPlugin",
     "ToolPlugin",
     "ProtocolPlugin",
-    
     # Models
     "Event",
     "HandlerInfo",
@@ -157,7 +145,6 @@ __all__ = [
     "GenerationRequest",
     "GenerationResult",
     "PluginEvent",
-    
     # V1.2新增
     "CircuitBreaker",
     "CircuitState",
@@ -172,13 +159,21 @@ __all__ = [
     "PluginSigner",
     "PluginSignatureError",
     "get_plugin_signer",
-    
     # UI层API
     "CoreServiceManager",
     "GenerationServiceProxy",
     "PluginServiceProxy",
     "ConfigServiceProxy",
     "EventServiceProxy",
+    # Database
+    "ConnectionPool",
+    "DatabaseMigration",
+    "AgentStateStore",
+    "GenerationHistoryStore",
+    "get_database",
+    "get_agent_state_store",
+    "get_generation_history_store",
+    "close_database",
 ]
 
 
