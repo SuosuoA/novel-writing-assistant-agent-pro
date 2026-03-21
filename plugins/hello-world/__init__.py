@@ -6,11 +6,7 @@ Hello World插件包
 
 from .plugin import HelloWorldPlugin, get_plugin_class, register_plugin
 
-__all__ = [
-    "HelloWorldPlugin",
-    "get_plugin_class",
-    "register_plugin"
-]
+__all__ = ["HelloWorldPlugin", "get_plugin_class", "register_plugin"]
 
 # 插件版本
 __version__ = "1.0.0"
