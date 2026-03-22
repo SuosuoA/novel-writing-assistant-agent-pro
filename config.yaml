@@ -1,0 +1,11 @@
+ai_learning: true
+api_key: ''
+auto_save: true
+backup_interval: '30'
+font_size: '14'
+model: deepseek-chat
+provider: DeepSeek
+save_path: E:\WorkBuddyworkspace\Novel Writing Assistant-Agent Pro
+service_mode: local
+temperature: 0.7
+theme: light
