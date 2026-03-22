@@ -14,12 +14,44 @@ from typing import Dict, Any, Optional, List
 from enum import Enum
 import logging
 import time
+import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from core.circuit_breaker import CircuitBreaker
 from agents.retry_manager import RetryManager, RetryConfig, RetryPolicy
 
 logger = logging.getLogger(__name__)
+
+
+class LRUCache:
+    """带容量限制的LRU缓存"""
+    
+    def __init__(self, max_size: int = 1000):
+        self._cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        self._max_size = max_size
+        self._lock = threading.Lock()
+    
+    def get(self, key: str) -> Optional[Any]:
+        with self._lock:
+            if key not in self._cache:
+                return None
+            # LRU: 移到最后
+            self._cache.move_to_end(key)
+            return self._cache[key]
+    
+    def set(self, key: str, value: Any) -> None:
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            else:
+                if len(self._cache) >= self._max_size:
+                    self._cache.popitem(last=False)  # 移除最旧
+            self._cache[key] = value
+    
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
 
 
 class LLMProvider(Enum):
@@ -73,8 +105,8 @@ class LLMClientWithResilience:
         # 备用模型列表（降级策略）
         self._fallback_models = self._get_fallback_models()
 
-        # 请求缓存
-        self._cache: Dict[str, Dict[str, Any]] = {}
+        # 请求缓存（使用LRU缓存，容量限制1000）
+        self._cache = LRUCache(max_size=1000)
         self._cache_ttl = 3600  # 1小时
 
         # 实际客户端（延迟初始化）
@@ -227,10 +259,10 @@ class LLMClientWithResilience:
         import hashlib
 
         cache_key = hashlib.md5(prompt.encode()).hexdigest()
-        self._cache[cache_key] = {
+        self._cache.set(cache_key, {
             "result": result,
             "timestamp": datetime.now(timezone.utc),
-        }
+        })
 
     def _get_cached_result(self, prompt: str) -> Optional[str]:
         """获取缓存结果"""
@@ -238,16 +270,15 @@ class LLMClientWithResilience:
         import hashlib
 
         cache_key = hashlib.md5(prompt.encode()).hexdigest()
-
-        if cache_key not in self._cache:
+        cached = self._cache.get(cache_key)
+        
+        if cached is None:
             return None
 
-        cached = self._cache[cache_key]
         age = (datetime.now(timezone.utc) - cached["timestamp"]).total_seconds()
 
-        # 检查是否过期
+        # 检查是否过期（这里不再手动删除，由LRU自动管理）
         if age > self._cache_ttl:
-            del self._cache[cache_key]
             return None
 
         return cached["result"]
@@ -269,7 +300,7 @@ class LLMClientWithResilience:
                 "status": "healthy",
                 "circuit_breaker": {
                     "state": self._circuit_breaker.state.value,
-                    "failure_count": self._circuit_breaker.failure_count,
+                    "failure_count": self._circuit_breaker.stats.consecutive_failures,
                 },
             }
         except Exception as e:
@@ -280,7 +311,7 @@ class LLMClientWithResilience:
                 "error": str(e),
                 "circuit_breaker": {
                     "state": self._circuit_breaker.state.value,
-                    "failure_count": self._circuit_breaker.failure_count,
+                    "failure_count": self._circuit_breaker.stats.consecutive_failures,
                 },
             }
 

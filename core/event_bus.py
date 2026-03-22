@@ -418,10 +418,10 @@ class EventBus:
 
     def shutdown(self) -> None:
         """优雅关闭线程池"""
-        try:
+        import sys
+        if sys.version_info >= (3, 9):
             self._executor.shutdown(wait=True, cancel_futures=False)
-        except Exception:
-            # Python 3.8 不支持 cancel_futures 参数
+        else:
             self._executor.shutdown(wait=True)
 
 

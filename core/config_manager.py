@@ -467,8 +467,8 @@ class ConfigManager:
         for observer in self._observers:
             try:
                 observer(key_path, old_value, new_value)
-            except Exception:
-                pass  # 观察者异常不影响主流程
+            except Exception as e:
+                logger.warning(f"Observer callback failed: {e}, observer={observer}")
 
 
 # 全局单例

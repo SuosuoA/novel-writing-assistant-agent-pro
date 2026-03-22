@@ -76,6 +76,22 @@ class DependencyState:
             self._failed.add(task_id)
             return True
 
+    def mark_pending(self, task_id: str) -> bool:
+        """
+        标记任务为待执行（用于重试任务重新入队）
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            是否标记成功
+        """
+        with self._lock:
+            # 从in_progress移除，改为pending状态
+            self._in_progress.discard(task_id)
+            # 不加入任何集合，pending是默认状态
+            return True
+
     def is_ready(self, task_id: str, dependencies: List[str]) -> bool:
         """
         检查任务是否可执行(所有依赖已完成)

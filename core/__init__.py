@@ -133,6 +133,20 @@ from .app_launcher import (
     get_optimized_launcher,
 )
 
+# ConfigService（V1.3新增）
+from .config_service import ConfigService, AppConfig, get_config_service
+
+# LoggingService（V1.3新增）
+from .logging_service import LoggingService, get_logging_service
+
+# BootstrapService（V1.3新增）
+from .bootstrap import (
+    BootstrapService,
+    get_bootstrap_service,
+    initialize_core_services,
+    dispose_core_services,
+)
+
 __all__ = [
     # EventBus
     "EventBus",
@@ -233,8 +247,20 @@ __all__ = [
     "OptimizedLauncher",
     "StartupConfig",
     "get_optimized_launcher",
+    # ConfigService
+    "ConfigService",
+    "AppConfig",
+    "get_config_service",
+    # LoggingService
+    "LoggingService",
+    "get_logging_service",
+    # BootstrapService
+    "BootstrapService",
+    "get_bootstrap_service",
+    "initialize_core_services",
+    "dispose_core_services",
 ]
 
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __author__ = "Novel Assistant Team"
