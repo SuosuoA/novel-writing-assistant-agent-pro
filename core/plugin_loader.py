@@ -377,7 +377,7 @@ class PluginLoader:
 
     def load_plugin(self, plugin_id: str) -> PluginLoadResult:
         """
-        加载单个插件
+        加载单个插件（带签名验证）
 
         Args:
             plugin_id: 插件ID
@@ -396,27 +396,49 @@ class PluginLoader:
 
             metadata = self._discovered_plugins[plugin_id]
 
-            # 磀查权限（含签名验证）
-            permission = HotSwapPermission(
-                plugin_id=plugin_id,
-                signature_verified=self._verify_plugin_signature(plugin_id, plugin_path),
-                is_official=plugin_id in HotSwapPermission.OFFICIAL_PLUGINS,
-            )
-
-            if not permission.can_load():
-                return PluginLoadResult(
-                    success=False,
-                    plugin_id=plugin_id,
-                    error=f"Plugin {plugin_id} is blocked (L3)",
-                )
-
-            # 查找插件目录
+            # 查找插件目录（必须在签名验证之前）
             plugin_path = self._find_plugin_path(plugin_id)
             if not plugin_path:
                 return PluginLoadResult(
                     success=False,
                     plugin_id=plugin_id,
                     error=f"Plugin path not found for {plugin_id}",
+                )
+
+            # 签名验证
+            is_official = plugin_id in HotSwapPermission.OFFICIAL_PLUGINS
+            sig_verified, sig_error = PluginSignatureVerifier.verify_plugin_signature(
+                plugin_path, plugin_id
+            )
+
+            # 记录签名验证结果
+            if sig_verified:
+                logger.info(f"Plugin {plugin_id} signature verified")
+            else:
+                logger.warning(
+                    f"Plugin {plugin_id} signature verification failed: {sig_error}"
+                )
+
+            # 官方插件必须签名验证通过
+            if is_official and not sig_verified:
+                return PluginLoadResult(
+                    success=False,
+                    plugin_id=plugin_id,
+                    error=f"Official plugin {plugin_id} signature verification failed: {sig_error}",
+                )
+
+            # 检查权限（基于签名验证结果）
+            permission = HotSwapPermission(
+                plugin_id=plugin_id,
+                signature_verified=sig_verified,
+                is_official=is_official,
+            )
+
+            if not permission.can_load():
+                return PluginLoadResult(
+                    success=False,
+                    plugin_id=plugin_id,
+                    error=f"Plugin {plugin_id} is blocked (L3) - signature verification failed",
                 )
 
             # 动态导入

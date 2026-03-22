@@ -1,13 +1,15 @@
 """
 LLM客户端容错模块
 
-V2.0版本
+V2.1版本（安全增强）
 创建日期: 2026-03-21
+最后更新: 2026-03-23
 
 特性:
 - 四级容错机制（重试→熔断→降级→缓存回退）
 - 多模型回退
 - 请求缓存
+- API密钥安全存储（SecureString）
 """
 
 from typing import Dict, Any, Optional, List
@@ -23,6 +25,55 @@ from core.circuit_breaker import CircuitBreaker
 from agents.retry_manager import RetryManager, RetryConfig, RetryPolicy
 
 logger = logging.getLogger(__name__)
+
+
+class SecureString:
+    """
+    安全字符串 - 防止敏感信息意外泄露
+
+    用于包装API密钥等敏感字符串，防止在日志、调试、异常堆栈中泄露
+    """
+
+    def __init__(self, value: str):
+        """
+        初始化安全字符串
+
+        Args:
+            value: 实际字符串值
+
+        Raises:
+            ValueError: 值为空或长度不足
+        """
+        if not value or len(value) < 10:
+            raise ValueError("Invalid secret: must be at least 10 characters")
+        self._value = value
+
+    def __str__(self) -> str:
+        """字符串表示：返回脱敏值"""
+        return "***REDACTED***"
+
+    def __repr__(self) -> str:
+        """对象表示：返回脱敏值"""
+        return "SecureString(***)"
+
+    def get(self) -> str:
+        """
+        获取实际值
+
+        Returns:
+            实际字符串值
+        """
+        return self._value
+
+    def __eq__(self, other) -> bool:
+        """相等比较"""
+        if isinstance(other, SecureString):
+            return self._value == other._value
+        return False
+
+    def __len__(self) -> int:
+        """长度：返回实际长度（不泄露内容）"""
+        return len(self._value)
 
 
 class LRUCache:
@@ -77,17 +128,20 @@ class LLMClientWithResilience:
 
     def __init__(self, provider: str, model: str, api_key: str, base_url: str = None):
         """
-        初始化LLM客户端
+        初始化LLM客户端（带API密钥安全保护）
 
         Args:
             provider: 提供商（deepseek/openai/anthropic/ollama）
             model: 模型名称
-            api_key: API密钥
+            api_key: API密钥（将被SecureString包装）
             base_url: 基础URL（可选）
+
+        Raises:
+            ValueError: API密钥格式无效
         """
         self._provider = provider
         self._model = model
-        self._api_key = api_key
+        self._api_key = SecureString(api_key)  # 安全包装API密钥
         self._base_url = base_url
 
         # 初始化容错组件
@@ -248,10 +302,16 @@ class LLMClientWithResilience:
         return response.choices[0].message.content
 
     def _create_client(self):
-        """创建OpenAI兼容客户端"""
+        """
+        创建OpenAI兼容客户端（安全获取API密钥）
+        
+        Returns:
+            OpenAI客户端实例
+        """
         from openai import OpenAI
 
-        client_kwargs = {"api_key": self._api_key}
+        # 安全获取API密钥
+        client_kwargs = {"api_key": self._api_key.get()}
         if self._base_url:
             client_kwargs["base_url"] = self._base_url
 
