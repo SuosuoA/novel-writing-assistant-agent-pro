@@ -286,5 +286,10 @@ class LLMClientWithResilience:
 
     def cleanup(self) -> None:
         """清理资源"""
-        self._executor.shutdown(wait=True, cancel_futures=False)
+        # Python 3.9+支持cancel_futures参数
+        try:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+        except TypeError:
+            # Python 3.8及以下版本不支持cancel_futures
+            self._executor.shutdown(wait=True)
         self._cache.clear()

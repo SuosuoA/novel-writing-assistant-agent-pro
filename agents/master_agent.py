@@ -121,7 +121,12 @@ class MasterAgent:
         if self._scheduler_thread:
             self._scheduler_thread.join(timeout=5.0)
 
-        self._executor.shutdown(wait=True, cancel_futures=False)
+        # Python 3.9+支持cancel_futures参数
+        try:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+        except TypeError:
+            # Python 3.8及以下版本不支持cancel_futures
+            self._executor.shutdown(wait=True)
         self._agent_pool.cleanup_all()
 
         logger.info("MasterAgent调度器已停止")

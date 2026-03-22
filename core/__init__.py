@@ -38,7 +38,17 @@ from .plugin_loader import (
     PluginLoadResult,
     DependencyResolver,
     HotSwapPermission,
+    PluginSignatureVerifier,
     get_plugin_loader,
+)
+
+from .hot_swap_manager import (
+    HotSwapManager,
+    HotSwapAction,
+    HotSwapState,
+    HotSwapEvent,
+    PluginStateInfo,
+    get_hot_swap_manager,
 )
 
 from .plugin_interface import (
@@ -98,6 +108,31 @@ from .database import (
     close_database,
 )
 
+# AsyncHandler（V1.0新增）
+from .async_handler import (
+    AsyncHandler,
+    Task,
+    TaskPriority,
+    TaskState,
+    PriorityTaskQueue,
+    get_async_handler,
+    init_async_handler,
+)
+
+# Launcher（V1.0新增）
+from .launcher import (
+    LazyLoader,
+    LoadPriority,
+    ModuleInfo,
+    get_lazy_loader,
+)
+
+from .app_launcher import (
+    OptimizedLauncher,
+    StartupConfig,
+    get_optimized_launcher,
+)
+
 __all__ = [
     # EventBus
     "EventBus",
@@ -126,7 +161,15 @@ __all__ = [
     "PluginLoadResult",
     "DependencyResolver",
     "HotSwapPermission",
+    "PluginSignatureVerifier",
     "get_plugin_loader",
+    # HotSwapManager
+    "HotSwapManager",
+    "HotSwapAction",
+    "HotSwapState",
+    "HotSwapEvent",
+    "PluginStateInfo",
+    "get_hot_swap_manager",
     # PluginInterface
     "BasePlugin",
     "AnalyzerPlugin",
@@ -174,6 +217,22 @@ __all__ = [
     "get_agent_state_store",
     "get_generation_history_store",
     "close_database",
+    # AsyncHandler
+    "AsyncHandler",
+    "Task",
+    "TaskPriority",
+    "TaskState",
+    "PriorityTaskQueue",
+    "get_async_handler",
+    "init_async_handler",
+    # Launcher
+    "LazyLoader",
+    "LoadPriority",
+    "ModuleInfo",
+    "get_lazy_loader",
+    "OptimizedLauncher",
+    "StartupConfig",
+    "get_optimized_launcher",
 ]
 
 

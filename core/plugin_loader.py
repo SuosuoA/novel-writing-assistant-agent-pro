@@ -1,22 +1,24 @@
 """
-插件加载器 - 动态导入 + 热插拔 + 依赖解析
+插件加载器 - 动态导入 + 依赖解析
 
-V1.2版本（最终修订版）
+V1.3版本（热插拔解耦版）
 创建日期：2026-03-21
 
-V1.1修正：
-- 增加独立的DependencyResolver类
-- 增加Discovered_plugins缓存
-- 热插拔权限控制（L0-L3安全分级）
+V1.3修订：
+- 热插拔逻辑独立到 hot_swap_manager.py
+- 集成 HotSwapManager
+- 简化接口
 
-特性：
+V1.2特性：
 - importlib动态导入
 - 拓扑排序依赖解析
-- watchdog热插拔监控
-- 插件沙箱隔离
+- 依赖检查
+- 权限控制
 """
 
+import hashlib
 import importlib.util
+import json
 import logging
 import sys
 import threading
@@ -29,8 +31,101 @@ from .event_bus import EventBus, get_event_bus
 from .models import PluginMetadata
 from .plugin_interface import BasePlugin
 from .plugin_registry import PluginRegistry, PluginState, get_plugin_registry
+from .hot_swap_manager import HotSwapManager, HotSwapPermission
 
-logger = logging.getLogger(__name__)
+# 尝试导入结构化日志器
+try:
+    from infrastructure.logger import get_logger
+    logger = get_logger("plugin_loader")
+except ImportError:
+    logger = logging.getLogger(__name__)
+
+
+class PluginSignatureVerifier:
+    """插件签名验证器
+    
+    使用SHA256哈希验证插件完整性。
+    支持在plugin.json中配置signature字段。
+    """
+    
+    @staticmethod
+    def verify_plugin_signature(plugin_path: Path, plugin_id: str, plugin_json: Optional[Dict] = None) -> Tuple[bool, Optional[str]]:
+        """验证插件签名
+        
+        Args:
+            plugin_path: 插件目录路径
+            plugin_id: 插件ID
+            plugin_json: plugin.json内容（如果已解析）
+        
+        Returns:
+            (验证是否通过, 错误信息)
+        """
+        # 读取plugin.json
+        if plugin_json is None:
+            plugin_json_path = plugin_path / "plugin.json"
+            if not plugin_json_path.exists():
+                # 没有plugin.json，视为未签名（L2级别）
+                return False, None
+            
+            try:
+                with open(plugin_json_path, "r", encoding="utf-8") as f:
+                    plugin_json = json.load(f)
+            except Exception as e:
+                return False, f"Failed to read plugin.json: {e}"
+        
+        # 检查签名字段
+        if "signature" not in plugin_json:
+            # 没有签名字段，视为未签名（L2级别）
+            return False, "No signature field in plugin.json"
+        
+        stored_signature = plugin_json.get("signature")
+        if not stored_signature or not isinstance(stored_signature, str):
+            return False, "Invalid signature format in plugin.json"
+        
+        # 计算实际哈希
+        actual_signature = PluginSignatureVerifier._calculate_directory_hash(plugin_path)
+        
+        # 比较签名
+        if actual_signature != stored_signature:
+            return False, f"Signature mismatch for plugin {plugin_id}"
+        
+        return True, None
+    
+    @staticmethod
+    def _calculate_directory_hash(directory: Path) -> str:
+        """计算目录的SHA256哈希
+        
+        用于验证插件完整性。
+        逽略__pycache__等缓存目录。
+        
+        Args:
+            directory: 插件目录路径
+        
+        Returns:
+            SHA256哈希值
+        """
+        hasher = hashlib.sha256()
+        
+        for root in Path(directory).iterdir():
+            for file_path in root.rglob("*"):
+                # 跳过__pycache__
+                if file_path.name == "__pycache__":
+                    continue
+                
+                
+                # 跳过.pyc文件（编译缓存)
+                if file_path.suffix == ".pyc":
+                    continue
+                
+                
+                try:
+                    with open(file_path, "rb") as f:
+                        hasher.update(f.read())
+                except Exception:
+                    # 忽略无法读取的文件
+                    continue
+        
+        return hasher.hexdigest()
 
 
 class PluginLoadResult:
@@ -65,6 +160,7 @@ class DependencyResolver:
     - 拓扑排序算法（Kahn算法）
     - 循环依赖检测
     - 缺失依赖报告
+    - 版本冲突检查
     """
 
     @staticmethod
@@ -144,132 +240,49 @@ class DependencyResolver:
 
         return sorted_plugins, errors
 
-
-class HotSwapPermission:
-    """
-    热插拔权限控制（V1.2新增）
-
-    安全分级策略：
-    - L0-信任：官方插件，完全信任
-    - L1-受限：第三方签名插件，受限操作
-    - L2-隔离：未知来源插件，进程隔离
-    - L3-禁止：风险插件，禁止加载
-    """
-
-    SECURITY_LEVELS = {
-        "L0": {
-            "can_reload": True,
-            "can_load": True,
-            "can_unload": True,
-            "process_isolation": False,
-        },
-        "L1": {
-            "can_reload": True,
-            "can_load": True,
-            "can_unload": False,
-            "process_isolation": False,
-        },
-        "L2": {
-            "can_reload": False,
-            "can_load": True,
-            "can_unload": False,
-            "process_isolation": True,
-        },
-        "L3": {
-            "can_reload": False,
-            "can_load": False,
-            "can_unload": False,
-            "process_isolation": False,
-        },
-    }
-
-    # 官方插件白名单
-    OFFICIAL_PLUGINS = {
-        "novel-generator",
-        "novel-analyzer",
-        "novel-validator",
-        "style-learner",
-        "character-manager",
-        "worldview-parser",
-    }
-
-    def __init__(
-        self,
-        plugin_id: str,
-        signature_verified: bool = False,
-        is_official: bool = False,
-    ):
+    @staticmethod
+    def check_conflicts(
+        plugins: List[PluginMetadata],
+    ) -> List[Dict[str, Any]]:
         """
-        初始化权限控制
+        检查插件冲突
 
         Args:
-            plugin_id: 插件ID
-            signature_verified: 签名是否验证通过
-            is_official: 是否为官方插件
-        """
-        self.plugin_id = plugin_id
-        self._security_level = self._determine_level(
-            signature_verified, is_official or self.is_official_plugin()
-        )
-
-    def is_official_plugin(self) -> bool:
-        """判断是否为官方插件"""
-        return self.plugin_id in self.OFFICIAL_PLUGINS
-
-    def _determine_level(
-        self, signature_verified: bool, is_official: bool = False
-    ) -> str:
-        """
-        确定插件安全等级
-
-        Args:
-            signature_verified: 签名是否验证通过
-            is_official: 是否为官方插件
+            plugins: 插件元数据列表
 
         Returns:
-            安全等级：L0/L1/L2/L3
+            冲突列表
         """
-        # 未签名插件禁止加载
-        if not signature_verified:
-            return "L3"
+        conflicts: List[Dict[str, Any]] = []
+        plugin_ids = {p.id for p in plugins}
 
-        # 官方插件获得最高信任级别
-        if is_official:
-            return "L0"
+        for plugin in plugins:
+            for conflict_id in plugin.conflicts:
+                if conflict_id in plugin_ids:
+                    conflicts.append(
+                        {
+                            "type": "conflict",
+                            "plugin_id": plugin.id,
+                            "conflicts_with": conflict_id,
+                            "message": f"Plugin {plugin.id} conflicts with {conflict_id}",
+                        }
+                    )
 
-        # 第三方签名插件为受限级别
-        return "L1"
-
-    def can_reload(self) -> bool:
-        """是否允许热重载"""
-        return self.SECURITY_LEVELS[self._security_level]["can_reload"]
-
-    def can_load(self) -> bool:
-        """是否允许加载"""
-        return self.SECURITY_LEVELS[self._security_level]["can_load"]
-
-    def can_unload(self) -> bool:
-        """是否允许卸载"""
-        return self.SECURITY_LEVELS[self._security_level]["can_unload"]
-
-    def requires_isolation(self) -> bool:
-        """是否需要进程隔离"""
-        return self.SECURITY_LEVELS[self._security_level]["process_isolation"]
-
-    @property
-    def security_level(self) -> str:
-        """获取安全等级"""
-        return self._security_level
+        return conflicts
 
 
 class PluginLoader:
     """
     插件加载器
 
-    V1.1修正：
-    - 增加DependencyResolver依赖
-    - 增加discovered_plugins缓存
-    - 支持热插拔权限控制
+    V1.3修订：
+    - 集成 HotSwapManager（热插拔委托）
+    - 简化接口
+
+    V1.2特性：
+    - 动态导入
+    - 依赖解析
+    - 权限控制
     """
 
     def __init__(
@@ -299,26 +312,22 @@ class PluginLoader:
         self._loaded_modules: Dict[str, Any] = {}
         self._module_cache: Dict[str, Any] = {}
 
-        # V1.1新增：发现阶段缓存（不注册到Registry）
+        # 发现阶段缓存（不注册到Registry）
         self._discovered_plugins: Dict[str, PluginMetadata] = {}
 
-        # 热插拔
+        # 热插拔管理器（V1.3新增）
+        self._hot_swap_manager: Optional[HotSwapManager] = None
         self._hot_swap_enabled = hot_swap_enabled
-        self._debounce_timers: Dict[str, threading.Timer] = {}
-        self._debounce_delay: float = 1.0  # 防抖延迟（秒）
 
         # 沙箱
         self._sandbox_enabled = sandbox_enabled
 
-        # V1.1新增：依赖解析器
+        # 依赖解析器
         self._dependency_resolver = DependencyResolver()
-
-        # watchdog观察者
-        self._observer: Optional[Any] = None
 
     def discover_plugins(self) -> List[str]:
         """
-        发现插件（V1.1修正：存储到_discovered_plugins，不注册到Registry）
+        发现插件
 
         Returns:
             发现的插件ID列表
@@ -345,8 +354,6 @@ class PluginLoader:
                                 meta_dict = json.load(f)
 
                             metadata = PluginMetadata(**meta_dict)
-
-                            # V1.1修正：存储到_discovered_plugins
                             self._discovered_plugins[metadata.id] = metadata
                             discovered_ids.append(metadata.id)
 
@@ -363,8 +370,6 @@ class PluginLoader:
                             name=plugin_id.replace("_", " ").title(),
                             version="1.0.0",
                         )
-
-                        # V1.1修正：存储到_discovered_plugins
                         self._discovered_plugins[metadata.id] = metadata
                         discovered_ids.append(metadata.id)
 
@@ -381,7 +386,7 @@ class PluginLoader:
             加载结果
         """
         with self._lock:
-            # V1.1修正：从_discovered_plugins获取元数据
+            # 从_discovered_plugins获取元数据
             if plugin_id not in self._discovered_plugins:
                 return PluginLoadResult(
                     success=False,
@@ -391,10 +396,10 @@ class PluginLoader:
 
             metadata = self._discovered_plugins[plugin_id]
 
-            # 检查权限（V1.2新增）
+            # 磀查权限（含签名验证）
             permission = HotSwapPermission(
                 plugin_id=plugin_id,
-                signature_verified=True,  # TODO: 实际签名验证
+                signature_verified=self._verify_plugin_signature(plugin_id, plugin_path),
                 is_official=plugin_id in HotSwapPermission.OFFICIAL_PLUGINS,
             )
 
@@ -533,14 +538,13 @@ class PluginLoader:
 
     def load_all(self) -> Dict[str, PluginLoadResult]:
         """
-        加载所有已发现的插件（V1.1修正：从_discovered_plugins获取）
+        加载所有已发现的插件
 
         Returns:
             加载结果字典 {plugin_id: PluginLoadResult}
         """
         results: Dict[str, PluginLoadResult] = {}
 
-        # V1.1修正：从_discovered_plugins获取插件列表
         plugins = list(self._discovered_plugins.values())
 
         if not plugins:
@@ -555,66 +559,55 @@ class PluginLoader:
         for error in errors:
             logger.warning(f"Dependency resolution error: {error}")
 
+        # 检查冲突
+        conflicts = DependencyResolver.check_conflicts(plugins)
+        for conflict in conflicts:
+            logger.error(f"Plugin conflict: {conflict}")
+
         # 按顺序加载
         for plugin_id in sorted_ids:
             results[plugin_id] = self.load_plugin(plugin_id)
 
         return results
 
-    def enable_hot_swap(self, debounce_delay: float = 1.0) -> None:
+    def enable_hot_swap(self, debounce_delay: float = 1.0) -> bool:
         """
-        启用热插拔监控
+        启用热插拔监控（V1.3修订：委托给HotSwapManager）
 
         Args:
             debounce_delay: 防抖延迟（秒）
+
+        Returns:
+            是否启用成功
         """
-        if self._hot_swap_enabled:
-            return
+        if not self._hot_swap_enabled:
+            return False
 
-        try:
-            from watchdog.observers import Observer
-            from watchdog.events import FileSystemEventHandler, FileModifiedEvent
+        if self._hot_swap_manager is None:
+            self._hot_swap_manager = HotSwapManager(
+                plugin_loader=self,
+                event_bus=self._event_bus,
+                registry=self._registry,
+                debounce_delay=debounce_delay,
+            )
 
-            class PluginFileHandler(FileSystemEventHandler):
-                def __init__(self, loader: "PluginLoader"):
-                    self.loader = loader
+        success = self._hot_swap_manager.start_watch(self._plugin_directories)
 
-                def on_modified(self, event: FileModifiedEvent):
-                    if event.is_directory:
-                        return
+        if success:
+            logger.info("Hot swap monitoring enabled via HotSwapManager")
 
-                    # 处理文件变更
-                    self.loader._handle_file_change(event.src_path)
-
-            self._debounce_delay = debounce_delay
-            self._observer = Observer()
-            handler = PluginFileHandler(self)
-
-            for directory in self._plugin_directories:
-                dir_path = Path(directory)
-                if dir_path.exists():
-                    self._observer.schedule(handler, str(dir_path), recursive=True)
-
-            self._observer.start()
-            self._hot_swap_enabled = True
-
-            logger.info("Hot swap monitoring enabled")
-
-        except ImportError:
-            logger.warning("watchdog not installed, hot swap disabled")
-            self._hot_swap_enabled = False
+        return success
 
     def disable_hot_swap(self) -> None:
         """禁用热插拔监控"""
-        if not self._hot_swap_enabled or not self._observer:
-            return
+        if self._hot_swap_manager:
+            self._hot_swap_manager.stop_watch()
+            logger.info("Hot swap monitoring disabled")
 
-        self._observer.stop()
-        self._observer.join()
-        self._observer = None
-        self._hot_swap_enabled = False
-
-        logger.info("Hot swap monitoring disabled")
+    @property
+    def hot_swap_manager(self) -> Optional[HotSwapManager]:
+        """获取热插拔管理器"""
+        return self._hot_swap_manager
 
     def _find_plugin_path(self, plugin_id: str) -> Optional[Path]:
         """
@@ -691,77 +684,24 @@ class PluginLoader:
 
         return instance
 
-    def _handle_file_change(self, file_path: str) -> None:
-        """
-        处理文件变更（热插拔）
+    def get_discovered_plugins(self) -> Dict[str, PluginMetadata]:
+        """获取已发现的插件"""
+        return dict(self._discovered_plugins)
 
-        Args:
-            file_path: 变更文件路径
-        """
-        # 提取插件ID
-        plugin_id = self._extract_plugin_id(file_path)
-        if not plugin_id:
-            return
+    def get_loaded_modules(self) -> Dict[str, Any]:
+        """获取已加载的模块"""
+        return dict(self._loaded_modules)
 
-        # 检查权限
-        permission = HotSwapPermission(
-            plugin_id=plugin_id,
-            signature_verified=True,
-            is_official=plugin_id in HotSwapPermission.OFFICIAL_PLUGINS,
-        )
 
-        if not permission.can_reload():
-            logger.debug(f"Plugin {plugin_id} hot reload not allowed (L2/L3)")
-            return
-
-        # 防抖：取消之前的定时器
-        if plugin_id in self._debounce_timers:
-            self._debounce_timers[plugin_id].cancel()
-
-        # 设置新定时器
-        timer = threading.Timer(
-            self._debounce_delay, self._reload_plugin, args=(plugin_id,)
-        )
-        self._debounce_timers[plugin_id] = timer
-        timer.start()
-
-    def _extract_plugin_id(self, file_path: str) -> Optional[str]:
-        """
-        从文件路径提取插件ID
-
-        Args:
-            file_path: 文件路径
-
-        Returns:
-            插件ID
-        """
-        path = Path(file_path)
-
-        # 查找plugins目录
-        parts = path.parts
-        if "plugins" in parts:
-            idx = parts.index("plugins")
-            if idx + 1 < len(parts):
-                return parts[idx + 1]
-
-        return None
-
-    def _reload_plugin(self, plugin_id: str) -> None:
-        """
-        重载插件（内部方法）
-
-        Args:
-            plugin_id: 插件ID
-        """
-        logger.info(f"Reloading plugin {plugin_id}")
-
-        result = self.reload_plugin(plugin_id)
-
-        if result.success:
-            self._event_bus.publish("plugin.reloaded", {"plugin_id": plugin_id})
-        else:
-            logger.error(f"Failed to reload plugin {plugin_id}: {result.error}")
-
+# 导出HotSwapPermission供外部使用（兼容性）
+__all__ = [
+    "PluginLoader",
+    "PluginLoadResult",
+    "DependencyResolver",
+    "HotSwapPermission",
+    "CircularDependencyError",
+    "get_plugin_loader",
+]
 
 # 全局单例
 _loader_instance: Optional[PluginLoader] = None
