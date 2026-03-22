@@ -41,30 +41,72 @@ class AgentPool:
         self._initialized = False
         self._lock = threading.RLock()
 
-    def initialize(self) -> None:
-        """初始化Agent池"""
+    def initialize(self) -> Dict[str, bool]:
+        """
+        初始化Agent池
+
+        Returns:
+            各Agent初始化结果 {agent_type: success}
+
+        P1-6修复：增强部分失败时的状态一致性处理
+        """
         if self._initialized:
-            return
+            return {"already_initialized": True}
+
+        results: Dict[str, bool] = {}
+        failed_agents: List[str] = []
+        partial_success = False  # P1-6修复：标记是否有部分成功
 
         with self._lock:
             # 初始化所有已注册的Agent
             for agent_type, agent in self._agents.items():
                 if not agent.is_initialized:
                     try:
-                        agent.initialize()
-                        logger.info(f"Agent初始化成功: {agent_type}")
+                        success = agent.initialize()
+                        results[agent_type] = success
+                        if success:
+                            logger.info(f"Agent初始化成功: {agent_type}")
+                            partial_success = True  # P1-6修复：有成功案例
+                        else:
+                            failed_agents.append(agent_type)
+                            logger.error(f"Agent初始化失败 {agent_type}: 返回False")
                     except Exception as e:
-                        logger.error(f"Agent初始化失败 {agent_type}: {e}")
+                        results[agent_type] = False
+                        failed_agents.append(agent_type)
+                        logger.error(f"Agent初始化异常 {agent_type}: {e}", exc_info=True)
 
-            # 发布Agent池就绪事件
-            self._event_bus.publish(
-                "agent.pool.ready",
-                {"agents": list(self._agents.keys())},
-                source="AgentPool",
-            )
+            # P1-6修复：只有全部成功才标记为已初始化
+            # 但即使部分失败，已成功的Agent仍可使用
+            self._initialized = len(failed_agents) == 0
 
-            self._initialized = True
-            logger.info(f"Agent池初始化完成，共 {len(self._agents)} 个Agent")
+            if failed_agents:
+                # P1-6修复：发布部分失败事件
+                self._event_bus.publish(
+                    "agent.pool.partial_failure",
+                    {
+                        "failed_agents": failed_agents,
+                        "successful_agents": [
+                                a for a in self._agents.keys() 
+                                if a not in failed_agents
+                            ],
+                        "can_continue": partial_success,  # 是否可以继续运行
+                    },
+                    source="AgentPool",
+                )
+                logger.warning(
+                    f"部分Agent初始化失败: {failed_agents}, "
+                    f"可用Agent: {[a for a in self._agents.keys() if a not in failed_agents]}"
+                )
+            else:
+                # 发布Agent池就绪事件
+                self._event_bus.publish(
+                    "agent.pool.ready",
+                    {"agents": list(self._agents.keys())},
+                    source="AgentPool",
+                )
+                logger.info(f"Agent池初始化完成，共 {len(self._agents)} 个Agent")
+
+        return results
 
     def register_agent(self, agent: BaseAgent) -> bool:
         """

@@ -36,6 +36,8 @@ class AgentTask:
     retry_count: int = 0  # 重试次数
     max_retries: int = 3  # 最大重试次数
     timeout_seconds: int = 300  # 超时时间(秒)
+    version: str = "1.0.0"  # 任务版本
+    dependency_versions: Dict[str, str] = field(default_factory=dict)  # 依赖版本要求
 
     def __post_init__(self):
         if self.created_at is None:

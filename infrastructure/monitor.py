@@ -30,15 +30,30 @@ class MetricValue:
 
 @dataclass
 class HistogramData:
-    """直方图数据"""
+    """
+    直方图数据
+
+    P1-9修复：添加容量限制，防止内存无界增长
+    """
     values: List[float] = field(default_factory=list)
-    count: int = 0
+    max_size: int = 10000  # P1-9修复：最大保留样本数
+    count: int = 0  # 总计数（包含已清理的样本）
     sum: float = 0.0
     min: float = float('inf')
     max: float = float('-inf')
-    
+
     def add(self, value: float) -> None:
-        """添加值"""
+        """
+        添加值
+
+        P1-9修复：超过max_size时使用滑动窗口清理最老的10%数据
+        """
+        # P1-9修复：容量限制检查
+        if len(self.values) >= self.max_size:
+            # 滑动窗口：移除最老的10%
+            trim_count = self.max_size // 10
+            self.values = self.values[trim_count:]
+
         self.values.append(value)
         self.count += 1
         self.sum += value
@@ -167,29 +182,40 @@ class MetricsCollector:
 class PerformanceMonitor:
     """
     性能监控器
-    
+
     提供以下功能：
     - 方法执行时间监控
     - 吞吐量监控
     - 慢操作告警
+    - P1-10修复：慢操作频繁告警升级机制
     """
-    
+
+    # P1-10修复：慢操作频繁阈值
+    SLOW_OPERATION_ALERT_THRESHOLD = 10
+
     def __init__(
         self,
         metrics_collector: Optional[MetricsCollector] = None,
         slow_threshold: float = 1.0,  # 秒
+        event_bus: Optional[Any] = None,  # P1-10修复：添加event_bus参数
     ):
         """
         初始化性能监控器
-        
+
         Args:
             metrics_collector: 指标采集器
             slow_threshold: 慢操作阈值（秒）
+            event_bus: 事件总线实例（用于告警升级）
         """
         self._metrics = metrics_collector or MetricsCollector()
         self._slow_threshold = slow_threshold
+        self._event_bus = event_bus  # P1-10修复
         self._active_operations: Dict[str, float] = {}
         self._lock = threading.Lock()
+        # P1-10修复：慢操作计数器
+        self._slow_operation_count: Dict[str, int] = defaultdict(int)
+        # P1-10修复：慢操作平均耗时
+        self._slow_operation_total: Dict[str, float] = defaultdict(float)
     
     def start_operation(self, operation_name: str) -> str:
         """
@@ -241,6 +267,49 @@ class PerformanceMonitor:
         # 慢操作告警
         if duration > self._slow_threshold:
             self._metrics.increment(f"slow_operations_{operation_name}")
+
+            # P1-10修复：慢操作频繁告警升级
+            with self._lock:
+                self._slow_operation_count[operation_name] += 1
+                self._slow_operation_total[operation_name] += duration
+                count = self._slow_operation_count[operation_name]
+
+                # 达到频繁阈值时发布告警事件
+                if count >= self.SLOW_OPERATION_ALERT_THRESHOLD:
+                    avg_duration = self._slow_operation_total[operation_name] / count
+
+                    # 记录ERROR级别日志
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(
+                        f"慢操作频繁: {operation_name} 已连续 {count} 次超时, "
+                        f"平均耗时 {avg_duration:.2f}s, 阈值 {self._slow_threshold}s"
+                    )
+
+                    # 发布告警事件
+                    if self._event_bus:
+                        try:
+                            self._event_bus.publish(
+                                "performance.slow_operation_frequent",
+                                {
+                                    "operation": operation_name,
+                                    "count": count,
+                                    "avg_duration": avg_duration,
+                                    "threshold": self._slow_threshold,
+                                    "last_duration": duration,
+                                },
+                                source="PerformanceMonitor"
+                            )
+                        except Exception as e:
+                            logger.warning(f"发布慢操作告警事件失败: {e}")
+                else:
+                    # 未达阈值时记录WARNING日志
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"慢操作检测: {operation_name}, 耗时 {duration:.2f}s "
+                        f"({count}/{self.SLOW_OPERATION_ALERT_THRESHOLD})"
+                    )
         
         return duration
     

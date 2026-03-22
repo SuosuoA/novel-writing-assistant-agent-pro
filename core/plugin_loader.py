@@ -91,12 +91,20 @@ class PluginSignatureVerifier:
         
         return True, None
     
-    @staticmethod
-    def _calculate_directory_hash(directory: Path) -> str:
+    # P1-3修复：最大遍历深度
+    MAX_TRAVERSAL_DEPTH = 20
+    
+    @classmethod
+    def _calculate_directory_hash(cls, directory: Path) -> str:
         """计算目录的SHA256哈希
         
         用于验证插件完整性。
-        逽略__pycache__等缓存目录。
+        忽略__pycache__等缓存目录。
+        
+        P1-3修复：
+        - 添加符号链接检测，避免无限循环
+        - 添加遍历深度限制
+        - 添加文件大小限制
         
         Args:
             directory: 插件目录路径
@@ -105,25 +113,77 @@ class PluginSignatureVerifier:
             SHA256哈希值
         """
         hasher = hashlib.sha256()
+        file_count = 0
+        total_size = 0
+        max_file_size = 10 * 1024 * 1024  # 10MB
+        max_total_size = 100 * 1024 * 1024  # 100MB
         
-        for root in Path(directory).iterdir():
-            for file_path in root.rglob("*"):
-                # 跳过__pycache__
-                if file_path.name == "__pycache__":
-                    continue
-                
-                
-                # 跳过.pyc文件（编译缓存)
-                if file_path.suffix == ".pyc":
-                    continue
-                
-                
-                try:
-                    with open(file_path, "rb") as f:
-                        hasher.update(f.read())
-                except Exception:
-                    # 忽略无法读取的文件
-                    continue
+        # P1-3修复：使用安全的遍历方法
+        def safe_walk(current_dir: Path, depth: int = 0):
+            """安全遍历目录，带深度和符号链接检测"""
+            nonlocal file_count, total_size
+            
+            if depth > cls.MAX_TRAVERSAL_DEPTH:
+                logger.warning(f"Max traversal depth reached: {current_dir}")
+                return
+            
+            try:
+                for item in current_dir.iterdir():
+                    # 跳过__pycache__目录
+                    if item.name == "__pycache__":
+                        continue
+                    
+                    # P1-3修复：检测符号链接，避免无限循环
+                    try:
+                        if item.is_symlink():
+                            logger.debug(f"Skipping symlink: {item}")
+                            continue
+                        
+                        # 检测是否为目录外链接
+                        if item.is_dir():
+                            # 确保解析后的路径仍在原目录内
+                            resolved = item.resolve()
+                            try:
+                                resolved.relative_to(directory.resolve())
+                            except ValueError:
+                                logger.warning(f"Skipping external path: {item}")
+                                continue
+                            safe_walk(item, depth + 1)
+                        elif item.is_file():
+                            # 跳过.pyc文件
+                            if item.suffix == ".pyc":
+                                continue
+                            
+                            # P1-3修复：文件大小检查
+                            file_size = item.stat().st_size
+                            if file_size > max_file_size:
+                                logger.warning(f"Skipping large file: {item} ({file_size} bytes)")
+                                continue
+                            
+                            total_size += file_size
+                            if total_size > max_total_size:
+                                logger.warning(f"Total size limit reached, stopping traversal")
+                                return
+                            
+                            try:
+                                with open(item, "rb") as f:
+                                    hasher.update(f.read())
+                                    file_count += 1
+                            except Exception as e:
+                                logger.debug(f"Failed to read file {item}: {e}")
+                                continue
+                    except OSError as e:
+                        logger.debug(f"Cannot access {item}: {e}")
+                        continue
+            except PermissionError as e:
+                logger.debug(f"Permission denied: {current_dir}: {e}")
+            except Exception as e:
+                logger.debug(f"Error traversing {current_dir}: {e}")
+        
+        safe_walk(directory)
+        
+        if file_count == 0:
+            logger.warning(f"No files hashed in {directory}")
         
         return hasher.hexdigest()
 

@@ -77,33 +77,133 @@ class SecureString:
 
 
 class LRUCache:
-    """带容量限制的LRU缓存"""
-    
+    """
+    带容量限制的LRU缓存
+
+    P1-5修复：增加碰撞检测和安全哈希
+    """
+
+    # P1-5修复：缓存命名空间，防止不同类型数据碰撞
+    CACHE_NAMESPACE = "llm_cache_v1"
+
     def __init__(self, max_size: int = 1000):
         self._cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._max_size = max_size
         self._lock = threading.Lock()
-    
-    def get(self, key: str) -> Optional[Any]:
+        # P1-5修复：碰撞检测计数器
+        self._collision_count = 0
+        self._total_access = 0
+
+    @classmethod
+    def generate_safe_key(cls, prompt: str, model: str = "", extra: str = "") -> str:
+        """
+        P1-5修复：生成安全的缓存键
+
+        使用SHA256替代MD5，并添加命名空间前缀
+
+        Args:
+            prompt: 提示文本
+            model: 模型名称
+            extra: 额外参数
+
+        Returns:
+            安全的缓存键
+        """
+        import hashlib
+
+        # 组合所有参数
+        combined = f"{cls.CACHE_NAMESPACE}:{model}:{prompt}:{extra}"
+
+        # 使用SHA256替代MD5（更安全）
+        return hashlib.sha256(combined.encode('utf-8')).hexdigest()
+
+    def get(self, key: str, verify_value: Optional[Any] = None) -> Optional[Any]:
+        """
+        获取缓存值
+
+        Args:
+            key: 缓存键
+            verify_value: 可选的验证值，用于碰撞检测
+
+        Returns:
+            缓存值或None
+        """
         with self._lock:
+            self._total_access += 1
             if key not in self._cache:
                 return None
+
             # LRU: 移到最后
             self._cache.move_to_end(key)
-            return self._cache[key]
-    
-    def set(self, key: str, value: Any) -> None:
+            cached = self._cache[key]
+
+            # P1-5修复：碰撞检测
+            if verify_value is not None:
+                if "value_hash" in cached:
+                    import hashlib
+                    actual_hash = hashlib.sha256(
+                        str(verify_value).encode('utf-8')
+                    ).hexdigest()[:16]
+                    if cached.get("value_hash") != actual_hash:
+                        # 碰撞检测：移除冲突的缓存项
+                        self._collision_count += 1
+                        del self._cache[key]
+                        return None
+
+            return cached
+
+    def set(
+        self,
+        key: str,
+        value: Any,
+        value_hash: Optional[str] = None
+    ) -> None:
+        """
+        设置缓存值
+
+        Args:
+            key: 缓存键
+            value: 缓存值
+            value_hash: 可选的值哈希，用于碰撞检测
+        """
         with self._lock:
             if key in self._cache:
                 self._cache.move_to_end(key)
             else:
                 if len(self._cache) >= self._max_size:
                     self._cache.popitem(last=False)  # 移除最旧
-            self._cache[key] = value
-    
+
+            # P1-5修复：存储值哈希
+            cache_entry = {
+                "value": value,
+                "value_hash": value_hash,
+            }
+            self._cache[key] = cache_entry
+
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        P1-5修复：获取缓存统计信息
+
+        Returns:
+            统计信息字典
+        """
+        with self._lock:
+            return {
+                "size": len(self._cache),
+                "max_size": self._max_size,
+                "collision_count": self._collision_count,
+                "total_access": self._total_access,
+                "collision_rate": (
+                    self._collision_count / self._total_access
+                    if self._total_access > 0 else 0
+                ),
+            }
+
     def clear(self) -> None:
         with self._lock:
             self._cache.clear()
+            self._collision_count = 0
+            self._total_access = 0
 
 
 class LLMProvider(Enum):
@@ -317,35 +417,82 @@ class LLMClientWithResilience:
 
         return OpenAI(**client_kwargs)
 
-    def _cache_result(self, prompt: str, result: str) -> None:
-        """缓存结果"""
+    def _cache_result(self, result: str, prompt: str, model: str = "") -> None:
+        """
+        缓存结果
+
+        P1-5修复：使用安全的缓存键生成方法
+
+        Args:
+            result: 生成的结果
+            prompt: 提示词
+            model: 模型名称
+        """
         from datetime import datetime, timezone
         import hashlib
 
-        cache_key = hashlib.md5(prompt.encode()).hexdigest()
-        self._cache.set(cache_key, {
-            "result": result,
-            "timestamp": datetime.now(timezone.utc),
-        })
+        # P1-5修复：使用安全的缓存键
+        cache_key = LRUCache.generate_safe_key(prompt, model)
 
-    def _get_cached_result(self, prompt: str) -> Optional[str]:
-        """获取缓存结果"""
+        # P1-5修复：计算结果哈希用于碰撞检测
+        result_hash = hashlib.sha256(result.encode('utf-8')).hexdigest()[:16]
+
+        self._cache.set(
+            cache_key,
+            {
+                "result": result,
+                "timestamp": datetime.now(timezone.utc),
+            },
+            value_hash=result_hash
+        )
+
+    def _get_cached_result(self, prompt: str, model: str = "") -> Optional[str]:
+        """
+        获取缓存结果
+
+        P1-5修复：使用安全的缓存键生成方法
+
+        Args:
+            prompt: 提示词
+            model: 模型名称
+
+        Returns:
+            缓存的结果或None
+        """
         from datetime import datetime, timezone
-        import hashlib
 
-        cache_key = hashlib.md5(prompt.encode()).hexdigest()
+        # P1-5修复：使用安全的缓存键
+        cache_key = LRUCache.generate_safe_key(prompt, model)
         cached = self._cache.get(cache_key)
-        
+
         if cached is None:
             return None
 
-        age = (datetime.now(timezone.utc) - cached["timestamp"]).total_seconds()
+        # cached现在是字典格式 {"value": {...}, "value_hash": ...}
+        cache_data = cached.get("value") if isinstance(cached, dict) and "value" in cached else cached
+        if not isinstance(cache_data, dict):
+            return None
 
-        # 检查是否过期（这里不再手动删除，由LRU自动管理）
+        timestamp = cache_data.get("timestamp")
+        if timestamp is None:
+            return None
+
+        age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+
+        # 检查是否过期
         if age > self._cache_ttl:
             return None
 
-        return cached["result"]
+        return cache_data.get("result")
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """
+        P1-5修复：获取缓存统计信息
+
+        Returns:
+            缓存统计信息
+        """
+        return self._cache.get_stats()
 
     def health_check(self) -> Dict[str, Any]:
         """

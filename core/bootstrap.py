@@ -44,6 +44,8 @@ class BootstrapService:
         """
         初始化核心服务
 
+        P1-7修复：关键服务失败时终止初始化，保持状态一致性
+
         Returns:
             初始化结果 {service_name: bool}
         """
@@ -53,7 +55,7 @@ class BootstrapService:
 
             results: Dict[str, bool] = {}
 
-            # 1. 初始化并注册 ConfigService
+            # 1. 初始化并注册 ConfigService（必需服务）
             try:
                 config_service = get_config_service()
                 self._service_locator.register(
@@ -68,10 +70,12 @@ class BootstrapService:
 
             except Exception as e:
                 results["ConfigService"] = False
-                logging.error(f"Failed to initialize ConfigService: {e}")
-                log_level = "INFO"
+                logging.error(f"ConfigService初始化失败，终止启动: {e}", exc_info=True)
+                # P1-7修复：关键服务失败，不继续初始化依赖服务
+                self._initialized = False
+                return results
 
-            # 2. 初始化并注册 LoggingService
+            # 2. 初始化并注册 LoggingService（依赖ConfigService）
             try:
                 logging_service = get_logging_service()
                 self._service_locator.register(
@@ -89,9 +93,11 @@ class BootstrapService:
 
             except Exception as e:
                 results["LoggingService"] = False
-                logging.error(f"Failed to initialize LoggingService: {e}")
+                logging.error(f"LoggingService初始化失败: {e}", exc_info=True)
+                # LoggingService失败不影响核心功能，继续标记为已初始化
 
-            self._initialized = True
+            # P1-7修复：只有ConfigService成功才标记为已初始化
+            self._initialized = results.get("ConfigService", False)
             return results
 
     def dispose(self) -> Dict[str, bool]:

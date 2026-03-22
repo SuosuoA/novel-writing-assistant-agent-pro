@@ -581,28 +581,51 @@ class ResponsiveButton(ttk.Button):
             self._execute_sync()
     
     def _execute_sync(self) -> None:
+        """P1-8修复：按异常类型分类处理"""
         try:
             self._set_loading(True)
             self._original_command()
+        except ValueError as e:
+            logger.warning(f"输入验证失败: {e}")
+            messagebox.showwarning("输入错误", f"请检查输入：{e}")
+        except PermissionError as e:
+            logger.error(f"权限不足: {e}")
+            messagebox.showerror("权限错误", "您没有执行此操作的权限")
+        except FileNotFoundError as e:
+            logger.error(f"文件不存在: {e}")
+            messagebox.showerror("文件错误", f"找不到文件：{e}")
         except Exception as e:
-            logger.error(f"Button command error: {e}")
-            messagebox.showerror("错误", f"执行失败：{e}")
+            logger.error(f"执行失败: {e}", exc_info=True)
+            messagebox.showerror(
+                "执行失败",
+                f"操作失败：{type(e).__name__}\n详情：{str(e)[:200]}"
+            )
         finally:
             self._set_loading(False)
-    
+
     def _execute_async(self) -> None:
         self._set_loading(True)
-        
+
         def task():
             return self._original_command()
-        
+
         def on_success(result):
             self._set_loading(False)
-        
+
         def on_error(error):
             self._set_loading(False)
-            messagebox.showerror("错误", f"执行失败：{error}")
-        
+            # P1-8修复：按异常类型分类处理
+            error_str = str(error)
+            if "permission" in error_str.lower():
+                messagebox.showerror("权限错误", "您没有执行此操作的权限")
+            elif "not found" in error_str.lower() or "找不到" in error_str:
+                messagebox.showerror("文件错误", f"找不到资源：{error}")
+            else:
+                messagebox.showerror(
+                    "执行失败",
+                    f"操作失败\n详情：{error_str[:200]}"
+                )
+
         self._async_handler.submit(
             func=task,
             callback=on_success,
@@ -4491,8 +4514,37 @@ class MainWindow:
 
 # ============== 入口 ==============
 
+def _global_exception_handler(exc_type, exc_value, exc_tb):
+    """
+    P1-12修复：全局异常处理器
+
+    捕获未处理的异常，记录日志并显示友好的错误提示。
+    """
+    # 记录完整的异常信息
+    logger.critical(
+        "未捕获的异常",
+        exc_info=(exc_type, exc_value, exc_tb)
+    )
+
+    # 显示友好的错误提示
+    try:
+        messagebox.showerror(
+            "程序错误",
+            f"发生未预期的错误：{exc_type.__name__}\n"
+            f"详情：{str(exc_value)[:200]}\n\n"
+            "请查看日志文件获取更多信息。"
+        )
+    except Exception:
+        # 如果messagebox也失败了，打印到控制台
+        print(f"CRITICAL ERROR: {exc_type.__name__}: {exc_value}")
+
+
 def main():
     """主入口"""
+    # P1-12修复：注册全局异常处理器
+    import sys
+    sys.excepthook = _global_exception_handler
+
     # 初始化核心服务（配置和日志）
     if CORE_AVAILABLE:
         try:

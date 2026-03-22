@@ -13,11 +13,15 @@ V1.2版本（最终修订版）
 """
 
 import json
+import logging
 import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 try:
     import yaml
@@ -98,9 +102,33 @@ class ConfigHistory:
 class ConfigValidator:
     """配置验证器"""
 
+    # P1-2修复：内置验证规则
+    BUILTIN_VALIDATORS = {
+        "llm.api_key": lambda v: isinstance(v, str) and len(v) >= 10,
+        "llm.model": lambda v: isinstance(v, str) and len(v) > 0,
+        "llm.temperature": lambda v: isinstance(v, (int, float)) and 0 <= v <= 2,
+        "llm.max_tokens": lambda v: isinstance(v, int) and v > 0,
+        "database.pool_size": lambda v: isinstance(v, int) and 1 <= v <= 100,
+        "database.timeout": lambda v: isinstance(v, (int, float)) and v > 0,
+        "agent.max_workers": lambda v: isinstance(v, int) and 1 <= v <= 50,
+        "agent.timeout": lambda v: isinstance(v, (int, float)) and v > 0,
+    }
+
+    # P1-2修复：危险键名黑名单
+    DANGEROUS_KEYS = {
+        "eval", "exec", "compile", "__import__", "__class__", "__bases__",
+        "__subclasses__", "__globals__", "__code__", "__builtins__",
+    }
+
+    # P1-2修复：键名格式验证正则
+    KEY_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$')
+
     def __init__(self):
         """初始化验证器"""
         self._validators: Dict[str, Callable[[Any], bool]] = {}
+        # P1-2修复：加载内置验证器
+        for key, validator in self.BUILTIN_VALIDATORS.items():
+            self._validators[key] = validator
 
     def register(self, key_path: str, validator: Callable[[Any], bool]) -> None:
         """
@@ -111,6 +139,78 @@ class ConfigValidator:
             validator: 验证函数（返回True表示验证通过）
         """
         self._validators[key_path] = validator
+
+    def validate_key(self, key_path: str) -> bool:
+        """
+        P1-2修复：验证键名安全性
+
+        Args:
+            key_path: 配置路径
+
+        Returns:
+            是否是安全的键名
+        """
+        # 检查格式
+        if not self.KEY_PATTERN.match(key_path):
+            return False
+
+        # 检查危险键
+        parts = key_path.lower().split(".")
+        for part in parts:
+            if part in self.DANGEROUS_KEYS:
+                return False
+
+        return True
+
+    def validate_value(self, value: Any) -> Tuple[bool, Optional[str]]:
+        """
+        P1-2修复：验证值的类型和安全性
+
+        Args:
+            value: 配置值
+
+        Returns:
+            (是否有效, 错误信息)
+        """
+        # 允许的基本类型
+        allowed_types = (str, int, float, bool, list, dict, type(None))
+
+        if not isinstance(value, allowed_types):
+            return False, f"Invalid type: {type(value).__name__}"
+
+        # 检查字符串长度限制
+        if isinstance(value, str) and len(value) > 100000:
+            return False, "String value exceeds maximum length (100000)"
+
+        # 检查列表/字典深度
+        if isinstance(value, (list, dict)):
+            depth = self._get_depth(value)
+            if depth > 10:
+                return False, f"Nested depth exceeds limit (10): {depth}"
+
+        # 检查字典键
+        if isinstance(value, dict):
+            for key in value.keys():
+                if not isinstance(key, str):
+                    return False, f"Dictionary key must be string, got {type(key).__name__}"
+                if key.lower() in self.DANGEROUS_KEYS:
+                    return False, f"Dangerous dictionary key: {key}"
+
+        return True, None
+
+    def _get_depth(self, obj: Any, current: int = 0) -> int:
+        """计算嵌套深度"""
+        if current > 10:
+            return current
+        if isinstance(obj, dict):
+            if not obj:
+                return current + 1
+            return max(self._get_depth(v, current + 1) for v in obj.values())
+        if isinstance(obj, list):
+            if not obj:
+                return current + 1
+            return max(self._get_depth(item, current + 1) for item in obj)
+        return current
 
     def validate(self, key_path: str, value: Any) -> bool:
         """
@@ -123,8 +223,21 @@ class ConfigValidator:
         Returns:
             是否验证通过
         """
+        # P1-2修复：先验证键名
+        if not self.validate_key(key_path):
+            return False
+
+        # P1-2修复：验证值的基本安全性
+        is_valid, error = self.validate_value(value)
+        if not is_valid:
+            return False
+
+        # 使用自定义验证器
         if key_path in self._validators:
-            return self._validators[key_path](value)
+            try:
+                return self._validators[key_path](value)
+            except Exception:
+                return False
         return True  # 无验证器默认通过
 
 
@@ -202,11 +315,33 @@ class ConfigManager:
             key_path: 配置路径
             value: 配置值
             source: 变更来源
+
+        Raises:
+            ConfigValidationError: 验证失败
+            ConfigKeyError: 键名不安全
         """
         with self._write_lock:
-            # 验证
+            # P1-2修复：增强验证逻辑
+            # 1. 验证键名安全性
+            if not self._validator.validate_key(key_path):
+                raise ConfigKeyError(
+                    f"Invalid or dangerous key path: {key_path}. "
+                    f"Key must match pattern: a.b.c and cannot contain dangerous names."
+                )
+
+            # 2. 验证值的基本安全性
+            is_valid, error = self._validator.validate_value(value)
+            if not is_valid:
+                raise ConfigValidationError(
+                    f"Invalid value for {key_path}: {error}"
+                )
+
+            # 3. 使用自定义验证器
             if not self._validator.validate(key_path, value):
-                raise ConfigValidationError(f"Validation failed for {key_path}")
+                raise ConfigValidationError(
+                    f"Validation failed for {key_path}. "
+                    f"Value does not meet the required constraints."
+                )
 
             # 获取旧值
             old_value = self.get(key_path)
@@ -364,9 +499,7 @@ class ConfigManager:
                     else:
                         self._config = {}
         except Exception as e:
-            import logging
-
-            logging.error(f"Failed to load config: {e}")
+            logger.error(f"Failed to load config: {e}")
             self._config = {}
 
     def _save_config(self) -> None:
@@ -385,9 +518,7 @@ class ConfigManager:
 
             self._config_path.write_text(content, encoding="utf-8")
         except Exception as e:
-            import logging
-
-            logging.error(f"Failed to save config: {e}")
+            logger.error(f"Failed to save config: {e}")
 
     def _get_env_key(self, key_path: str) -> str:
         """

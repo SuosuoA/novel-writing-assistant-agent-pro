@@ -90,6 +90,8 @@ class AgentTaskQueue:
         """
         移除任务(取消任务)
 
+        修复：从堆中也移除任务，避免内存泄漏
+
         Args:
             task_id: 任务ID
 
@@ -101,8 +103,15 @@ class AgentTaskQueue:
                 return False
 
             task = self._task_map[task_id]
-            # 标记为已删除(惰性删除，避免O(n)移除)
-            task.task_id = None
+            priority = task.priority
+
+            # 从堆中移除（需要重建堆）
+            self._queues[priority] = [
+                item for item in self._queues[priority]
+                if item[1] != task_id
+            ]
+            heapq.heapify(self._queues[priority])
+
             del self._task_map[task_id]
             return True
 

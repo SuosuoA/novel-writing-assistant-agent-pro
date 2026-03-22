@@ -573,14 +573,40 @@ class HotSwapManager:
         """
         通知监听器
 
+        P0-4修复：记录失败的监听器信息到插件状态中
+
         Args:
             event: 热插拔事件
         """
+        failed_listeners = []
+        
         for listener in self._listeners:
             try:
                 listener(event)
             except Exception as e:
-                logger.error(f"Hot swap listener error: {e}")
+                listener_name = getattr(listener, '__name__', str(listener))
+                logger.error(
+                    f"Hot swap listener error: {listener_name} - {e}",
+                    exc_info=True,
+                    extra={
+                        "plugin_id": event.plugin_id,
+                        "event_state": event.state.value,
+                        "listener": listener_name,
+                    }
+                )
+                failed_listeners.append({
+                    "listener": listener_name,
+                    "error": str(e),
+                })
+        
+        # P0-4修复：如果有监听器失败，记录到插件状态信息中
+        if failed_listeners and event.plugin_id in self._plugin_states:
+            with self._lock:
+                state = self._plugin_states[event.plugin_id]
+                state.last_error = f"{len(failed_listeners)} listeners failed"
+                logger.warning(
+                    f"{len(failed_listeners)} listeners failed for plugin {event.plugin_id}"
+                )
 
         # 发布到EventBus
         if self._event_bus:
