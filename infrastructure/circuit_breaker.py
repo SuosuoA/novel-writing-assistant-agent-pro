@@ -156,8 +156,11 @@ class CircuitBreaker:
         if self._on_state_change:
             try:
                 self._on_state_change(old_state, new_state)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f"CircuitBreaker state change callback failed: {e}, "
+                    f"callback={self._on_state_change}"
+                )
     
     def can_execute(self) -> bool:
         """检查是否可以执行"""

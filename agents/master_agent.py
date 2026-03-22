@@ -169,16 +169,19 @@ class MasterAgent:
         try:
             logger.info(f"开始执行任务: {task.task_id} " f"(Agent: {task.agent_type})")
 
-            # 先从队列移除
+            # 从队列取出任务
             popped_task = self._task_queue.pop()
             if popped_task is None:
-                logger.warning(f"任务队列为空，跳过执行")
+                logger.warning("任务队列为空，跳过执行")
                 return
 
-            # 再标记状态
+            # 使用实际取出的任务
+            task = popped_task
+
+            # 标记状态
             if not self._dependency_state.mark_in_progress(task.task_id):
                 logger.warning(f"任务 {task.task_id} 状态异常，重新入队")
-                self._task_queue.push(task)  # 回滚
+                self._task_queue.push(task)
                 return
 
             # 获取Agent实例

@@ -63,8 +63,14 @@ except ImportError as e:
 
 # 配置日志
 log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+valid_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+if log_level not in valid_levels:
+    # 使用print因为logger还未初始化
+    print(f"[WARNING] Invalid LOG_LEVEL '{log_level}', using INFO")
+    log_level = 'INFO'
+
 logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
+    level=getattr(logging, log_level),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -164,12 +170,14 @@ class GlassWindowManager:
             是否成功启用
         """
         if not self._dll_available:
+            logger.info("Windows DLL not available, using standard window mode")
             return False
         
         try:
             # 获取窗口句柄
             self.hwnd = self.user32.GetActiveWindow()
             if not self.hwnd:
+                logger.warning("Failed to get window handle, using standard window mode")
                 return False
             
             # 设置Accent策略
@@ -191,12 +199,23 @@ class GlassWindowManager:
                 self._is_acrylic = True
                 logger.info("Acrylic effect enabled")
             else:
-                logger.warning("Failed to enable Acrylic effect")
+                # 降级：尝试使用blur behind作为备选方案
+                logger.warning("Acrylic not supported, trying blur behind fallback")
+                if self.enable_blur_behind():
+                    logger.info("Blur behind fallback enabled successfully")
+                else:
+                    logger.warning("Blur behind also failed, using standard window mode")
             
             return result != 0
         
         except Exception as e:
-            logger.error(f"Error enabling Acrylic: {e}")
+            logger.error(f"Error enabling Acrylic: {e}, using standard window mode")
+            # 降级：设置基本透明度作为最终备选
+            try:
+                self.root.attributes('-alpha', 0.95)
+                logger.info("Applied basic transparency as fallback")
+            except Exception:
+                pass
             return False
     
     def make_frameless(self, keep_resize_border: bool = True) -> None:
