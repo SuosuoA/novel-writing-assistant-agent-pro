@@ -15,6 +15,7 @@ from enum import Enum
 import logging
 import time
 import threading
+import atexit
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
@@ -112,6 +113,9 @@ class LLMClientWithResilience:
         # 实际客户端（延迟初始化）
         self._client = None
         self._executor = ThreadPoolExecutor(max_workers=5)
+        
+        # 注册退出时自动清理
+        atexit.register(self.cleanup)
 
     def _get_fallback_models(self) -> List[str]:
         """获取备用模型列表"""

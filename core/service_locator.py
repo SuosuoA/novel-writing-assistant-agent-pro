@@ -16,8 +16,16 @@ V1.1增强：
 """
 
 import threading
+import logging
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Type
+
+logger = logging.getLogger(__name__)
+
+
+class CircularDependencyError(Exception):
+    """循环依赖异常"""
+    pass
 
 
 class ServiceScope(str, Enum):
@@ -480,9 +488,10 @@ class ServiceLocator:
                 if in_degree[neighbor] == 0:
                     queue.append(neighbor)
 
-        # 如果存在循环依赖，返回所有服务（顺序可能不正确）
+        # 如果存在循环依赖，抛出异常
         if len(sorted_services) != len(self._descriptors):
-            return list(self._descriptors.keys())
+            logger.error("Circular dependency detected in services")
+            raise CircularDependencyError("Cannot resolve service dependencies")
 
         return sorted_services
 

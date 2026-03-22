@@ -103,16 +103,20 @@ class ConnectionPool:
     def close_all(self) -> None:
         """关闭所有连接"""
         with self._connections_lock:
+            # 关闭所有连接
             for conn in self._all_connections:
                 try:
                     conn.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Error closing connection: {e}")
+            
             self._all_connections.clear()
         
-        # 清理线程本地连接
-        if hasattr(self._thread_local, "connection"):
+        # 清理线程本地连接引用
+        with self._lock:
             self._thread_local.connection = None
+        
+        logger.info("All database connections closed")
 
 
 class DatabaseMigration:

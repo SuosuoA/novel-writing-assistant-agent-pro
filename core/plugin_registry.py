@@ -551,8 +551,10 @@ class PluginRegistry:
         for observer in self._observers:
             try:
                 observer(plugin_id, old_state, new_state)
-            except Exception:
-                pass  # 观察者异常不影响主流程
+            except Exception as e:
+                logger.warning(
+                    f"Observer callback failed: {e}, observer={observer}"
+                )
 
     # ========================================================================
     # V5保护模块相关方法（V1.3新增）

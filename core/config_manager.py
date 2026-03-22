@@ -468,7 +468,10 @@ class ConfigManager:
             try:
                 observer(key_path, old_value, new_value)
             except Exception as e:
-                logger.warning(f"Observer callback failed: {e}, observer={observer}")
+                logger.warning(
+                    f"Observer callback failed: {e}, "
+                    f"observer={observer}, key_path={key_path}"
+                )
 
 
 # 全局单例
