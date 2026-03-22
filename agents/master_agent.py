@@ -169,13 +169,17 @@ class MasterAgent:
         try:
             logger.info(f"开始执行任务: {task.task_id} " f"(Agent: {task.agent_type})")
 
-            # 标记为进行中
-            if not self._dependency_state.mark_in_progress(task.task_id):
-                logger.warning(f"任务 {task.task_id} 状态异常，跳过执行")
+            # 先从队列移除
+            popped_task = self._task_queue.pop()
+            if popped_task is None:
+                logger.warning(f"任务队列为空，跳过执行")
                 return
 
-            # 从队列移除
-            self._task_queue.pop()
+            # 再标记状态
+            if not self._dependency_state.mark_in_progress(task.task_id):
+                logger.warning(f"任务 {task.task_id} 状态异常，重新入队")
+                self._task_queue.push(task)  # 回滚
+                return
 
             # 获取Agent实例
             agent = self._agent_pool.get_agent(task.agent_type)
@@ -248,9 +252,9 @@ class MasterAgent:
                 f"任务 {task.task_id} 准备重试 "
                 f"({task.retry_count}/{task.max_retries})"
             )
-            # 重新加入队列
+            # 重试任务重新入队，状态改为PENDING
+            self._dependency_state.mark_pending(task.task_id)
             self._task_queue.push(task)
-            self._dependency_state.mark_in_progress(task.task_id)
         else:
             # 标记为失败
             self._dependency_state.mark_failed(task.task_id)

@@ -59,6 +59,10 @@ class ConnectionPool:
         self._timeout = timeout
         self._lock = threading.RLock()
         self._thread_local = threading.local()
+        
+        # 跟踪所有连接（用于正确关闭）
+        self._all_connections: List[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
 
         # 确保数据库目录存在
         db_file = Path(db_path)
@@ -89,16 +93,25 @@ class ConnectionPool:
             conn.row_factory = sqlite3.Row
 
             self._thread_local.connection = conn
+            
+            # 跟踪连接
+            with self._connections_lock:
+                self._all_connections.append(conn)
 
         return self._thread_local.connection
 
     def close_all(self) -> None:
         """关闭所有连接"""
-        if hasattr(self._thread_local, "connection") and self._thread_local.connection:
-            try:
-                self._thread_local.connection.close()
-            except Exception:
-                pass
+        with self._connections_lock:
+            for conn in self._all_connections:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._all_connections.clear()
+        
+        # 清理线程本地连接
+        if hasattr(self._thread_local, "connection"):
             self._thread_local.connection = None
 
 

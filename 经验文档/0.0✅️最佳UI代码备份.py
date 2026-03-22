@@ -62,9 +62,8 @@ except ImportError as e:
     logging.warning(f"Core modules not available: {e}")
 
 # 配置日志
-log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -4474,36 +4473,12 @@ class MainWindow:
 
 def main():
     """主入口"""
-    # 初始化核心服务（配置和日志）
-    if CORE_AVAILABLE:
-        try:
-            init_results = initialize_core_services()
-            if init_results.get("ConfigService") and init_results.get("LoggingService"):
-                # 获取日志服务
-                logging_service = get_logging_service()
-                logging_service.log_system_event(
-                    "startup", "应用程序启动 - 核心服务初始化完成"
-                )
-                logger.info("Core services initialized successfully")
-            else:
-                logger.warning(f"Core services initialization partial: {init_results}")
-        except Exception as e:
-            logger.error(f"Failed to initialize core services: {e}")
-
     try:
         app = MainWindow()
         app.run()
     except Exception as e:
         logger.error(f"Application error: {e}")
         raise
-    finally:
-        # 释放核心服务
-        if CORE_AVAILABLE:
-            try:
-                dispose_core_services()
-                logger.info("Core services disposed")
-            except Exception as e:
-                logger.error(f"Failed to dispose core services: {e}")
 
 
 if __name__ == "__main__":

@@ -3,11 +3,13 @@
 
 V1.2新增模块
 创建日期：2026-03-21
+修订日期：2026-03-22（V1.3增强脱敏规则）
 
 特性：
 - 敏感信息自动检测
 - 多种脱敏模式
 - 可配置规则
+- 支持多种格式（api_key/API Key/ApiKey等）
 """
 
 import logging
@@ -38,7 +40,16 @@ class LogSanitizer:
     # 默认脱敏规则
     DEFAULT_SANITIZE_RULES = {
         "api_key": {
-            "pattern": r"(api[_-]?key\s*[=:]\s*)['\"]?([a-zA-Z0-9_-]+)['\"]?",
+            # 支持多种格式：api_key, api-key, API Key, API key, ApiKey 等
+            "pattern": r"(api[_\s-]?key\s*[=:]\s*)['\"]?([a-zA-Z0-9_-]+)['\"]?",
+            "replacement": r"\1***REDACTED***",
+        },
+        "secret_key": {
+            "pattern": r"(secret[_\s-]?key\s*[=:]\s*)['\"]?([a-zA-Z0-9_-]+)['\"]?",
+            "replacement": r"\1***REDACTED***",
+        },
+        "access_token": {
+            "pattern": r"(access[_\s-]?token\s*[=:]\s*)['\"]?([a-zA-Z0-9_.-]+)['\"]?",
             "replacement": r"\1***REDACTED***",
         },
         "password": {
