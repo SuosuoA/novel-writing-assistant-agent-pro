@@ -39,6 +39,8 @@ class DatabasePool:
     - 连接复用
     - 线程安全
     - 自动回收
+    - P0-3修复：连接使用超时保护
+    - P0-3修复：优雅关闭机制
     
     用法:
         pool = DatabasePool("app.db", pool_size=5)
@@ -52,6 +54,9 @@ class DatabasePool:
         results = pool.execute("SELECT * FROM users WHERE id = ?", (1,))
     """
     
+    # P0-3修复：默认最大连接使用时间（5分钟）
+    DEFAULT_MAX_CONNECTION_TIME = 300.0
+    
     def __init__(
         self,
         db_path: str = ":memory:",
@@ -59,6 +64,7 @@ class DatabasePool:
         timeout: float = 30.0,
         wal_mode: bool = True,
         foreign_keys: bool = True,
+        max_connection_time: float = None,
     ):
         """
         初始化数据库连接池
@@ -69,16 +75,21 @@ class DatabasePool:
             timeout: 获取连接超时时间
             wal_mode: 是否启用WAL模式
             foreign_keys: 是否启用外键约束
+            max_connection_time: 连接最大使用时间（秒），超时强制回收
         """
         self._db_path = db_path
         self._pool_size = pool_size
         self._timeout = timeout
         self._wal_mode = wal_mode
         self._foreign_keys = foreign_keys
+        # P0-3修复：连接使用超时配置
+        self._max_connection_time = max_connection_time or self.DEFAULT_MAX_CONNECTION_TIME
         
         self._pool: List[ConnectionInfo] = []
         self._lock = threading.RLock()
         self._available = threading.Condition(self._lock)
+        # P0-3修复：关闭状态标记
+        self._closed = False
         
         # 初始化连接池
         self._initialize_pool()
@@ -115,13 +126,32 @@ class DatabasePool:
         return conn
     
     def _get_connection(self) -> ConnectionInfo:
-        """获取连接（内部方法）"""
+        """
+        获取连接（内部方法）
+        
+        P0-3修复：添加连接使用超时保护，强制回收长时间占用的连接
+        """
         with self._available:
+            # P0-3修复：检查连接池是否已关闭
+            if self._closed:
+                raise RuntimeError("Database pool is closed")
+            
             # 等待可用连接
             start_time = time.time()
             while True:
-                # 查找空闲连接
+                # 查找空闲连接（含超时回收检查）
                 for conn_info in self._pool:
+                    # P0-3修复：检查连接是否超时被强制回收
+                    if conn_info.in_use:
+                        elapsed = (datetime.now() - conn_info.last_used).total_seconds()
+                        if elapsed > self._max_connection_time:
+                            # 强制回收超时连接
+                            import logging
+                            logging.warning(
+                                f"Connection in use timeout, force reclaim: {elapsed:.1f}s"
+                            )
+                            conn_info.in_use = False
+                    
                     if not conn_info.in_use:
                         conn_info.in_use = True
                         conn_info.last_used = datetime.now()
@@ -252,15 +282,48 @@ class DatabasePool:
         
         self.execute(query)
     
-    def close(self) -> None:
-        """关闭所有连接"""
+    def close(self, timeout: float = 5.0) -> None:
+        """
+        优雅关闭所有连接
+        
+        P0-3修复：等待使用中的连接归还后再关闭
+        
+        Args:
+            timeout: 等待超时时间（秒）
+        """
+        import logging
+        
         with self._lock:
+            # P0-3修复：标记为已关闭，阻止新连接获取
+            self._closed = True
+            
+            # P0-3修复：等待所有连接归还
+            start_time = time.time()
+            while any(c.in_use for c in self._pool):
+                if time.time() - start_time > timeout:
+                    in_use_count = sum(1 for c in self._pool if c.in_use)
+                    logging.warning(
+                        f"Close timeout, forcing close {in_use_count} connections in use"
+                    )
+                    break
+                time.sleep(0.1)
+            
+            # 关闭所有连接
+            closed_count = 0
             for conn_info in self._pool:
                 try:
                     conn_info.connection.close()
-                except Exception:
-                    pass
+                    closed_count += 1
+                except Exception as e:
+                    logging.warning(f"Error closing connection: {e}")
+            
             self._pool.clear()
+            logging.info(f"Database pool closed ({closed_count} connections)")
+    
+    def is_closed(self) -> bool:
+        """P0-3修复：检查连接池是否已关闭"""
+        with self._lock:
+            return self._closed
     
     def get_pool_status(self) -> Dict[str, Any]:
         """获取连接池状态"""

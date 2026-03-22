@@ -33,31 +33,141 @@ class EventPriority(IntEnum):
 
 
 class DeadLetterQueue:
-    """死信队列"""
+    """
+    死信队列
 
-    def __init__(self, max_size: int = 100):
+    P1-6修复：添加自动清理和过期机制
+    """
+
+    # P1-6修复：默认过期时间（7天）
+    DEFAULT_TTL_DAYS = 7
+    DEFAULT_TTL_SECONDS = DEFAULT_TTL_DAYS * 24 * 60 * 60
+
+    def __init__(self, max_size: int = 100, ttl_seconds: int = None):
+        """
+        初始化死信队列
+
+        Args:
+            max_size: 最大队列大小
+            ttl_seconds: 过期时间（秒），None表示使用默认值
+        """
         self._queue: List[Dict[str, Any]] = []
         self._max_size = max_size
+        self._ttl = ttl_seconds or self.DEFAULT_TTL_SECONDS
         self._lock = threading.Lock()
 
+        # P1-6修复：统计信息
+        self._total_added = 0
+        self._total_expired = 0
+
     def add(self, event: Event, error: Exception) -> None:
-        """添加失败事件到死信队列"""
+        """
+        添加失败事件到死信队列
+
+        Args:
+            event: 事件对象
+            error: 异常对象
+        """
         with self._lock:
+            # P1-6修复：添加前先清理过期项
+            self._cleanup_expired_unlocked()
+
             if len(self._queue) >= self._max_size:
-                self._queue.pop(0)  # 移除最旧的
+                # 移除最旧的
+                removed = self._queue.pop(0)
+                self._total_expired += 1
 
             self._queue.append(
                 {
                     "event": event.model_dump(),
                     "error": str(error),
                     "timestamp": datetime.now().isoformat(),
+                    "event_type": event.type,
                 }
             )
+            self._total_added += 1
 
     def get_all(self) -> List[Dict[str, Any]]:
         """获取所有死信"""
         with self._lock:
             return list(self._queue)
+
+    def get_by_type(self, event_type: str) -> List[Dict[str, Any]]:
+        """
+        P1-6修复：按事件类型获取死信
+
+        Args:
+            event_type: 事件类型
+
+        Returns:
+            该类型的死信列表
+        """
+        with self._lock:
+            return [
+                item for item in self._queue
+                if item.get("event_type") == event_type
+            ]
+
+    def cleanup_expired(self) -> int:
+        """
+        P1-6修复：清理过期的死信
+
+        Returns:
+            清理的数量
+        """
+        with self._lock:
+            return self._cleanup_expired_unlocked()
+
+    def _cleanup_expired_unlocked(self) -> int:
+        """
+        清理过期的死信（内部方法，不获取锁）
+
+        Returns:
+            清理的数量
+        """
+        import time
+
+        current_time = datetime.now().timestamp()
+        original_size = len(self._queue)
+
+        self._queue = [
+            item for item in self._queue
+            if current_time - datetime.fromisoformat(item["timestamp"]).timestamp() < self._ttl
+        ]
+
+        removed = original_size - len(self._queue)
+        self._total_expired += removed
+
+        return removed
+
+    def clear(self) -> None:
+        """清空死信队列"""
+        with self._lock:
+            self._total_expired += len(self._queue)
+            self._queue.clear()
+
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        P1-6修复：获取死信队列统计信息
+
+        Returns:
+            统计信息字典
+        """
+        with self._lock:
+            # 按事件类型统计
+            by_type: Dict[str, int] = {}
+            for item in self._queue:
+                event_type = item.get("event_type", "unknown")
+                by_type[event_type] = by_type.get(event_type, 0) + 1
+
+            return {
+                "current_size": len(self._queue),
+                "max_size": self._max_size,
+                "ttl_seconds": self._ttl,
+                "total_added": self._total_added,
+                "total_expired": self._total_expired,
+                "by_type": by_type,
+            }
 
 
 class EventBus:
@@ -336,12 +446,14 @@ class EventBus:
         """
         处理handler执行异常
 
+        P0-1修复：发布失败事件供监控系统感知
+
         Args:
             event: 事件对象
             handler_info: 处理器信息
             error: 异常对象
         """
-        # 1. 记录错误日志
+        # 1. 记录错误日志（含完整堆栈）
         import logging
 
         logger = logging.getLogger(__name__)
@@ -349,7 +461,13 @@ class EventBus:
             f"EventBus handler error: "
             f"event_type={event.type}, "
             f"handler_id={handler_info.id}, "
-            f"error={error}"
+            f"error={error}",
+            exc_info=True,
+            extra={
+                "event_type": event.type,
+                "event_data": str(event.data)[:200] if event.data else None,
+                "handler_id": handler_info.id,
+            }
         )
 
         # 2. 熔断器计数+1
@@ -357,6 +475,21 @@ class EventBus:
 
         # 3. 添加到死信队列
         self._dead_letter_queue.add(event, error)
+
+        # 4. P0-1修复：发布失败事件供监控
+        try:
+            self.publish(
+                f"{event.type}.callback_failed",
+                {
+                    "callback": handler_info.id,
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                    "original_event": str(event.data)[:500] if event.data else None,
+                },
+                source="EventBus"
+            )
+        except Exception as publish_error:
+            logger.warning(f"Failed to publish callback_failed event: {publish_error}")
 
     def _increment_failure_count(self, handler_id: str) -> None:
         """增加失败计数"""
@@ -415,6 +548,28 @@ class EventBus:
     def get_dead_letter_queue(self) -> List[Dict[str, Any]]:
         """获取死信队列内容"""
         return self._dead_letter_queue.get_all()
+
+    def get_dead_letter_stats(self) -> Dict[str, Any]:
+        """
+        P1-6修复：获取死信队列统计信息
+
+        Returns:
+            统计信息字典
+        """
+        return self._dead_letter_queue.get_stats()
+
+    def cleanup_dead_letters(self) -> int:
+        """
+        P1-6修复：清理过期的死信
+
+        Returns:
+            清理的数量
+        """
+        return self._dead_letter_queue.cleanup_expired()
+
+    def clear_dead_letters(self) -> None:
+        """P1-6修复：清空死信队列"""
+        self._dead_letter_queue.clear()
 
     def shutdown(self) -> None:
         """优雅关闭线程池"""

@@ -174,16 +174,23 @@ class SensitiveDataFilter:
         mask_length = len(value) - self._visible_chars
         return f"{visible_start}{self._mask_char * mask_length}"
     
-    def detect_sensitive(self, text: str) -> List[Dict[str, Any]]:
+    def detect_sensitive(
+        self, text: str, context: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         """
         检测敏感信息
         
+        P1-11修复：添加审计日志记录敏感信息检测事件
+        
         Args:
             text: 要检测的文本
+            context: 检测上下文信息（用于审计日志）
         
         Returns:
             检测到的敏感信息列表
         """
+        import logging
+        
         findings = []
         
         with self._lock:
@@ -195,6 +202,20 @@ class SensitiveDataFilter:
                         "start": match.start(),
                         "end": match.end(),
                     })
+        
+        # P1-11修复：审计日志记录
+        if findings:
+            logger = logging.getLogger(__name__)
+            logger.info(
+                f"敏感信息检测: 发现 {len(findings)} 处敏感数据",
+                extra={
+                    "event_type": "sensitive_data_detected",
+                    "findings_count": len(findings),
+                    "types": list(set(f["type"] for f in findings)),
+                    "context": context or {},
+                    "text_length": len(text),
+                }
+            )
         
         return findings
 

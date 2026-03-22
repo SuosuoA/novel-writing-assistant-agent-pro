@@ -135,3 +135,56 @@ class RetryManager:
 
         # 理论上不会到达这里
         raise last_exception
+
+    async def async_execute_with_retry(
+        self, func: Callable, *args, **kwargs
+    ) -> Tuple[Any, int]:
+        """
+        执行函数并自动重试(异步版本)
+
+        Args:
+            func: 要执行的函数（可以是同步或异步函数）
+            *args: 位置参数
+            **kwargs: 关键字参数
+
+        Returns:
+            (结果, 实际重试次数)
+
+        Raises:
+            最后一次异常(如果所有重试都失败)
+        """
+        import asyncio
+
+        last_exception = None
+
+        for attempt in range(self._config.max_attempts):
+            try:
+                # 支持同步和异步函数
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(*args, **kwargs)
+                else:
+                    result = func(*args, **kwargs)
+                return result, attempt
+
+            except self._config.retryable_exceptions as e:
+                last_exception = e
+                logger.warning(
+                    f"异步执行失败(尝试 {attempt + 1}/{self._config.max_attempts}): {e}"
+                )
+
+                # 最后一次尝试不等待
+                if attempt < self._config.max_attempts - 1:
+                    delay = self.calculate_delay(attempt)
+                    logger.info(f"等待 {delay:.2f}秒后重试...")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error("所有异步重试尝试均失败")
+                    raise
+
+            except Exception as e:
+                # 非重试异常直接抛出
+                logger.error(f"非重试异常: {e}")
+                raise
+
+        # 理论上不会到达这里
+        raise last_exception

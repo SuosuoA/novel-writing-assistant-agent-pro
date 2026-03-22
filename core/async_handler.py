@@ -87,17 +87,46 @@ class PriorityTaskQueue:
     线程安全的优先级任务队列
 
     使用heapq实现优先级排序，同优先级按创建时间FIFO
+    P1-4修复：添加队列容量限制，防止内存溢出
     """
 
-    def __init__(self):
+    # P1-4修复：默认最大队列长度
+    DEFAULT_MAX_SIZE = 1000
+
+    def __init__(self, max_size: int = DEFAULT_MAX_SIZE):
+        """
+        初始化优先级队列
+        
+        Args:
+            max_size: 最大队列长度，超过时拒绝新任务
+        """
         self._queue: List[Tuple[int, float, Task]] = []
         self._lock = threading.Lock()
         self._not_empty = threading.Condition(self._lock)
         self._counter = 0  # 用于同优先级FIFO排序
+        self._max_size = max_size  # P1-4修复：容量限制
 
-    def put(self, task: Task) -> None:
-        """添加任务到队列"""
+    def put(self, task: Task) -> bool:
+        """
+        添加任务到队列
+        
+        P1-4修复：添加容量检查，队列满时返回False
+        
+        Args:
+            task: 任务对象
+            
+        Returns:
+            是否成功添加（队列满时返回False）
+        """
         with self._lock:
+            # P1-4修复：容量检查
+            if len(self._queue) >= self._max_size:
+                logger.warning(
+                    f"Task queue is full (size={len(self._queue)}, max={self._max_size}), "
+                    f"rejecting task {task.id}"
+                )
+                return False
+            
             self._counter += 1
             # 优先级 + 创建时间 + 序号（保证FIFO）
             entry = (task.priority, task.created_at, self._counter, task)
@@ -105,6 +134,7 @@ class PriorityTaskQueue:
             # 按优先级排序
             self._queue.sort(key=lambda x: (x[0], x[1], x[2]))
             self._not_empty.notify()
+            return True
 
     def get(self, timeout: Optional[float] = None) -> Optional[Task]:
         """

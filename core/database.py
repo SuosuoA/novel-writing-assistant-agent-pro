@@ -46,6 +46,11 @@ class ConnectionPool:
     注意：SQLite的连接不能跨线程共享，因此使用线程本地存储
     """
 
+    # P1-1修复：添加连接池大小限制常量
+    DEFAULT_MAX_CONNECTIONS = 20
+    MIN_CONNECTIONS = 1
+    MAX_CONNECTIONS_LIMIT = 100  # 硬性上限
+
     def __init__(self, db_path: str, pool_size: int = 5, timeout: float = 30.0):
         """
         初始化连接池
@@ -54,69 +59,204 @@ class ConnectionPool:
             db_path: 数据库文件路径
             pool_size: 连接池大小（实际是每个线程一个连接）
             timeout: 连接超时时间
+
+        Raises:
+            ValueError: pool_size超出允许范围
         """
+        # P1-1修复：验证pool_size参数
+        if not isinstance(pool_size, int) or pool_size < self.MIN_CONNECTIONS:
+            raise ValueError(
+                f"pool_size must be >= {self.MIN_CONNECTIONS}, got {pool_size}"
+            )
+        if pool_size > self.MAX_CONNECTIONS_LIMIT:
+            raise ValueError(
+                f"pool_size must be <= {self.MAX_CONNECTIONS_LIMIT}, got {pool_size}"
+            )
+
         self._db_path = db_path
+        self._pool_size = min(pool_size, self.DEFAULT_MAX_CONNECTIONS)
         self._timeout = timeout
         self._lock = threading.RLock()
         self._thread_local = threading.local()
-        
+
         # 跟踪所有连接（用于正确关闭）
         self._all_connections: List[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
+
+        # P1-1修复：连接计数器和信号量
+        self._connection_count = 0
+        self._connection_semaphore = threading.Semaphore(self._pool_size)
+
+        # P0-3修复：连接使用超时和关闭标记
+        self._max_connection_time = 300.0  # 单个连接最大使用时间（5分钟）
+        self._connection_last_used: Dict[sqlite3.Connection, datetime] = {}
+        self._closed = False  # 连接池关闭标记
 
         # 确保数据库目录存在
         db_file = Path(db_path)
         db_file.parent.mkdir(parents=True, exist_ok=True)
 
-    def get_connection(self) -> sqlite3.Connection:
+    def get_connection(self, timeout: Optional[float] = None) -> sqlite3.Connection:
         """
         获取当前线程的数据库连接
 
+        Args:
+            timeout: 获取连接的超时时间（秒），None表示使用默认超时
+
         Returns:
             SQLite连接对象
+
+        Raises:
+            TimeoutError: 无法在指定时间内获取连接（连接池已满）
+            RuntimeError: 连接池已关闭
         """
-        if (
-            not hasattr(self._thread_local, "connection")
-            or self._thread_local.connection is None
-        ):
-            conn = sqlite3.connect(
-                self._db_path, timeout=self._timeout, check_same_thread=False
+        # P0-3修复：检查连接池是否已关闭
+        if self._closed:
+            raise RuntimeError("Connection pool is closed")
+
+        # P1-1修复：使用信号量限制连接数
+        acquire_timeout = timeout if timeout is not None else self._timeout
+        if not self._connection_semaphore.acquire(timeout=acquire_timeout):
+            raise TimeoutError(
+                f"Connection pool exhausted. "
+                f"Max connections: {self._pool_size}, "
+                f"Current count: {self._connection_count}"
             )
 
-            # 启用WAL模式
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA cache_size=-64000")  # 64MB缓存
-            conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            if (
+                not hasattr(self._thread_local, "connection")
+                or self._thread_local.connection is None
+            ):
+                conn = sqlite3.connect(
+                    self._db_path, timeout=self._timeout, check_same_thread=False
+                )
 
-            # 启用row_factory
-            conn.row_factory = sqlite3.Row
+                # 启用WAL模式
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA cache_size=-64000")  # 64MB缓存
+                conn.execute("PRAGMA foreign_keys=ON")
 
-            self._thread_local.connection = conn
-            
-            # 跟踪连接
+                # 启用row_factory
+                conn.row_factory = sqlite3.Row
+
+                self._thread_local.connection = conn
+
+                # 跟踪连接
+                with self._connections_lock:
+                    self._all_connections.append(conn)
+                    self._connection_count += 1
+                    self._connection_last_used[conn] = datetime.now()
+                    logger.debug(
+                        f"Connection created. "
+                        f"Total: {self._connection_count}/{self._pool_size}"
+                    )
+
+            # P0-3修复：更新连接最后使用时间
+            conn = self._thread_local.connection
             with self._connections_lock:
-                self._all_connections.append(conn)
+                self._connection_last_used[conn] = datetime.now()
 
-        return self._thread_local.connection
+            return conn
+        except Exception:
+            # 获取连接失败时释放信号量
+            self._connection_semaphore.release()
+            raise
 
     def close_all(self) -> None:
-        """关闭所有连接"""
+        """
+        关闭所有连接（P0-3修复：优雅关闭）
+
+        等待使用中的连接归还后再关闭。
+        """
+        # P0-3修复：设置关闭标记
+        with self._connections_lock:
+            if self._closed:
+                logger.warning("Connection pool already closed")
+                return
+            self._closed = True
+
+        # P0-3修复：等待所有连接归还（最多等待5秒）
+        import time
+        wait_timeout = 5.0
+        start_time = time.time()
+
+        while time.time() - start_time < wait_timeout:
+            # 检查是否有连接在使用（通过信号量判断）
+            available = self._connection_semaphore._value
+            if available >= self._pool_size:
+                break
+            time.sleep(0.1)
+
         with self._connections_lock:
             # 关闭所有连接
+            closed_count = 0
             for conn in self._all_connections:
                 try:
                     conn.close()
+                    closed_count += 1
                 except Exception as e:
                     logger.warning(f"Error closing connection: {e}")
-            
+
             self._all_connections.clear()
-        
+            self._connection_count = 0
+            self._connection_last_used.clear()
+
+            # P1-1修复：释放所有信号量
+            for _ in range(self._pool_size):
+                try:
+                    self._connection_semaphore.release()
+                except ValueError:
+                    # 信号量已满，忽略
+                    pass
+
         # 清理线程本地连接引用
         with self._lock:
             self._thread_local.connection = None
-        
-        logger.info("All database connections closed")
+
+        logger.info(f"All database connections closed ({closed_count} connections)")
+
+    def force_close_all(self) -> None:
+        """
+        强制关闭所有连接（P0-3修复：用于紧急情况）
+
+        不等待使用中的连接归还，立即关闭。
+        """
+        self._closed = True
+
+        with self._connections_lock:
+            closed_count = 0
+            for conn in self._all_connections:
+                try:
+                    conn.close()
+                    closed_count += 1
+                except Exception as e:
+                    logger.warning(f"Error force closing connection: {e}")
+
+            self._all_connections.clear()
+            self._connection_count = 0
+            self._connection_last_used.clear()
+
+        with self._lock:
+            self._thread_local.connection = None
+
+        logger.warning(f"All database connections force closed ({closed_count} connections)")
+
+    def get_pool_status(self) -> Dict[str, Any]:
+        """
+        获取连接池状态（P1-1修复：新增监控接口）
+
+        Returns:
+            连接池状态信息
+        """
+        with self._connections_lock:
+            return {
+                "max_connections": self._pool_size,
+                "current_count": self._connection_count,
+                "available_slots": self._pool_size - self._connection_count,
+                "db_path": str(self._db_path),
+            }
 
 
 class DatabaseMigration:
