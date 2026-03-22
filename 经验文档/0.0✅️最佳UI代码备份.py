@@ -62,8 +62,15 @@ except ImportError as e:
     logging.warning(f"Core modules not available: {e}")
 
 # 配置日志
+log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+valid_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+if log_level not in valid_levels:
+    # 使用print因为logger还未初始化
+    print(f"[WARNING] Invalid LOG_LEVEL '{log_level}', using INFO")
+    log_level = 'INFO'
+
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, log_level),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -163,12 +170,14 @@ class GlassWindowManager:
             是否成功启用
         """
         if not self._dll_available:
+            logger.info("Windows DLL not available, using standard window mode")
             return False
         
         try:
             # 获取窗口句柄
             self.hwnd = self.user32.GetActiveWindow()
             if not self.hwnd:
+                logger.warning("Failed to get window handle, using standard window mode")
                 return False
             
             # 设置Accent策略
@@ -190,12 +199,23 @@ class GlassWindowManager:
                 self._is_acrylic = True
                 logger.info("Acrylic effect enabled")
             else:
-                logger.warning("Failed to enable Acrylic effect")
+                # 降级：尝试使用blur behind作为备选方案
+                logger.warning("Acrylic not supported, trying blur behind fallback")
+                if self.enable_blur_behind():
+                    logger.info("Blur behind fallback enabled successfully")
+                else:
+                    logger.warning("Blur behind also failed, using standard window mode")
             
             return result != 0
         
         except Exception as e:
-            logger.error(f"Error enabling Acrylic: {e}")
+            logger.error(f"Error enabling Acrylic: {e}, using standard window mode")
+            # 降级：设置基本透明度作为最终备选
+            try:
+                self.root.attributes('-alpha', 0.95)
+                logger.info("Applied basic transparency as fallback")
+            except Exception:
+                pass
             return False
     
     def make_frameless(self, keep_resize_border: bool = True) -> None:
@@ -561,28 +581,51 @@ class ResponsiveButton(ttk.Button):
             self._execute_sync()
     
     def _execute_sync(self) -> None:
+        """P1-8修复：按异常类型分类处理"""
         try:
             self._set_loading(True)
             self._original_command()
+        except ValueError as e:
+            logger.warning(f"输入验证失败: {e}")
+            messagebox.showwarning("输入错误", f"请检查输入：{e}")
+        except PermissionError as e:
+            logger.error(f"权限不足: {e}")
+            messagebox.showerror("权限错误", "您没有执行此操作的权限")
+        except FileNotFoundError as e:
+            logger.error(f"文件不存在: {e}")
+            messagebox.showerror("文件错误", f"找不到文件：{e}")
         except Exception as e:
-            logger.error(f"Button command error: {e}")
-            messagebox.showerror("错误", f"执行失败：{e}")
+            logger.error(f"执行失败: {e}", exc_info=True)
+            messagebox.showerror(
+                "执行失败",
+                f"操作失败：{type(e).__name__}\n详情：{str(e)[:200]}"
+            )
         finally:
             self._set_loading(False)
-    
+
     def _execute_async(self) -> None:
         self._set_loading(True)
-        
+
         def task():
             return self._original_command()
-        
+
         def on_success(result):
             self._set_loading(False)
-        
+
         def on_error(error):
             self._set_loading(False)
-            messagebox.showerror("错误", f"执行失败：{error}")
-        
+            # P1-8修复：按异常类型分类处理
+            error_str = str(error)
+            if "permission" in error_str.lower():
+                messagebox.showerror("权限错误", "您没有执行此操作的权限")
+            elif "not found" in error_str.lower() or "找不到" in error_str:
+                messagebox.showerror("文件错误", f"找不到资源：{error}")
+            else:
+                messagebox.showerror(
+                    "执行失败",
+                    f"操作失败\n详情：{error_str[:200]}"
+                )
+
         self._async_handler.submit(
             func=task,
             callback=on_success,
@@ -1845,8 +1888,16 @@ class MainWindow:
         list_frame = ttk.LabelFrame(frame, text="世界观项目列表", padding=10)
         list_frame.pack(fill=tk.X, padx=5, pady=5)
         
+        # 创建带滚动条的Treeview容器
+        tree_container = ttk.Frame(list_frame)
+        tree_container.pack(fill=tk.X, pady=5)
+        
+        # 滚动条
+        worldview_scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL)
+        worldview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
         columns = ("name", "category", "elements", "status", "modified")
-        self._worldview_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=4)
+        self._worldview_tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=4, yscrollcommand=worldview_scrollbar.set)
         self._worldview_tree.heading("name", text="世界观名称")
         self._worldview_tree.heading("category", text="世界观类别")
         self._worldview_tree.heading("elements", text="核心元素")
@@ -1857,7 +1908,16 @@ class MainWindow:
         self._worldview_tree.column("elements", width=160)
         self._worldview_tree.column("status", width=80)
         self._worldview_tree.column("modified", width=110)
-        self._worldview_tree.pack(fill=tk.X, pady=5)
+        self._worldview_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # 配置滚动条
+        worldview_scrollbar.config(command=self._worldview_tree.yview)
+        
+        # 鼠标滚轮支持
+        def _on_worldview_mousewheel(event):
+            self._worldview_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        self._worldview_tree.bind("<MouseWheel>", _on_worldview_mousewheel)
 
         list_btn_frame = ttk.Frame(list_frame, style="TFrame")
         list_btn_frame.pack(fill=tk.X, pady=5)
@@ -1928,9 +1988,17 @@ class MainWindow:
         list_frame = ttk.LabelFrame(frame, text="人物列表", padding=10)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # 创建带滚动条的Treeview容器
+        tree_container = ttk.Frame(list_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True)
+        
+        # 滚动条
+        character_scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL)
+        character_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
         # 列表（移除头像列，情绪改为情感状态）
         columns = ("name", "role", "status", "emotion", "chapters")
-        self._character_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=8)
+        self._character_tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=8, yscrollcommand=character_scrollbar.set)
         self._character_tree.heading("name", text="姓名")
         self._character_tree.heading("role", text="角色类型")
         self._character_tree.heading("status", text="状态")
@@ -1941,7 +2009,16 @@ class MainWindow:
         self._character_tree.column("status", width=80)
         self._character_tree.column("emotion", width=100)
         self._character_tree.column("chapters", width=100)
-        self._character_tree.pack(fill=tk.BOTH, expand=True)
+        self._character_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # 配置滚动条
+        character_scrollbar.config(command=self._character_tree.yview)
+        
+        # 鼠标滚轮支持
+        def _on_character_mousewheel(event):
+            self._character_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        self._character_tree.bind("<MouseWheel>", _on_character_mousewheel)
         
         # 列表操作按钮
         list_btn_frame = ttk.Frame(list_frame, style="TFrame")
@@ -4471,14 +4548,67 @@ class MainWindow:
 
 # ============== 入口 ==============
 
+def _global_exception_handler(exc_type, exc_value, exc_tb):
+    """
+    P1-12修复：全局异常处理器
+
+    捕获未处理的异常，记录日志并显示友好的错误提示。
+    """
+    # 记录完整的异常信息
+    logger.critical(
+        "未捕获的异常",
+        exc_info=(exc_type, exc_value, exc_tb)
+    )
+
+    # 显示友好的错误提示
+    try:
+        messagebox.showerror(
+            "程序错误",
+            f"发生未预期的错误：{exc_type.__name__}\n"
+            f"详情：{str(exc_value)[:200]}\n\n"
+            "请查看日志文件获取更多信息。"
+        )
+    except Exception:
+        # 如果messagebox也失败了，打印到控制台
+        print(f"CRITICAL ERROR: {exc_type.__name__}: {exc_value}")
+
+
 def main():
     """主入口"""
+    # P1-12修复：注册全局异常处理器
+    import sys
+    sys.excepthook = _global_exception_handler
+
+    # 初始化核心服务（配置和日志）
+    if CORE_AVAILABLE:
+        try:
+            init_results = initialize_core_services()
+            if init_results.get("ConfigService") and init_results.get("LoggingService"):
+                # 获取日志服务
+                logging_service = get_logging_service()
+                logging_service.log_system_event(
+                    "startup", "应用程序启动 - 核心服务初始化完成"
+                )
+                logger.info("Core services initialized successfully")
+            else:
+                logger.warning(f"Core services initialization partial: {init_results}")
+        except Exception as e:
+            logger.error(f"Failed to initialize core services: {e}")
+
     try:
         app = MainWindow()
         app.run()
     except Exception as e:
         logger.error(f"Application error: {e}")
         raise
+    finally:
+        # 释放核心服务
+        if CORE_AVAILABLE:
+            try:
+                dispose_core_services()
+                logger.info("Core services disposed")
+            except Exception as e:
+                logger.error(f"Failed to dispose core services: {e}")
 
 
 if __name__ == "__main__":

@@ -1888,8 +1888,16 @@ class MainWindow:
         list_frame = ttk.LabelFrame(frame, text="世界观项目列表", padding=10)
         list_frame.pack(fill=tk.X, padx=5, pady=5)
         
+        # 创建带滚动条的Treeview容器
+        tree_container = ttk.Frame(list_frame)
+        tree_container.pack(fill=tk.X, pady=5)
+        
+        # 滚动条
+        worldview_scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL)
+        worldview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
         columns = ("name", "category", "elements", "status", "modified")
-        self._worldview_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=4)
+        self._worldview_tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=4, yscrollcommand=worldview_scrollbar.set)
         self._worldview_tree.heading("name", text="世界观名称")
         self._worldview_tree.heading("category", text="世界观类别")
         self._worldview_tree.heading("elements", text="核心元素")
@@ -1900,7 +1908,16 @@ class MainWindow:
         self._worldview_tree.column("elements", width=160)
         self._worldview_tree.column("status", width=80)
         self._worldview_tree.column("modified", width=110)
-        self._worldview_tree.pack(fill=tk.X, pady=5)
+        self._worldview_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # 配置滚动条
+        worldview_scrollbar.config(command=self._worldview_tree.yview)
+        
+        # 鼠标滚轮支持
+        def _on_worldview_mousewheel(event):
+            self._worldview_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        self._worldview_tree.bind("<MouseWheel>", _on_worldview_mousewheel)
 
         list_btn_frame = ttk.Frame(list_frame, style="TFrame")
         list_btn_frame.pack(fill=tk.X, pady=5)
@@ -1971,9 +1988,17 @@ class MainWindow:
         list_frame = ttk.LabelFrame(frame, text="人物列表", padding=10)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # 创建带滚动条的Treeview容器
+        tree_container = ttk.Frame(list_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True)
+        
+        # 滚动条
+        character_scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL)
+        character_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
         # 列表（移除头像列，情绪改为情感状态）
         columns = ("name", "role", "status", "emotion", "chapters")
-        self._character_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=8)
+        self._character_tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=8, yscrollcommand=character_scrollbar.set)
         self._character_tree.heading("name", text="姓名")
         self._character_tree.heading("role", text="角色类型")
         self._character_tree.heading("status", text="状态")
@@ -1984,7 +2009,16 @@ class MainWindow:
         self._character_tree.column("status", width=80)
         self._character_tree.column("emotion", width=100)
         self._character_tree.column("chapters", width=100)
-        self._character_tree.pack(fill=tk.BOTH, expand=True)
+        self._character_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # 配置滚动条
+        character_scrollbar.config(command=self._character_tree.yview)
+        
+        # 鼠标滚轮支持
+        def _on_character_mousewheel(event):
+            self._character_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        self._character_tree.bind("<MouseWheel>", _on_character_mousewheel)
         
         # 列表操作按钮
         list_btn_frame = ttk.Frame(list_frame, style="TFrame")
