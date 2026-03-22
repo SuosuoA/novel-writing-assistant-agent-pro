@@ -154,13 +154,41 @@ class DatabaseMigration:
 
     def register_migration(self, name: str, sql: str) -> None:
         """
-        注册迁移脚本
+        注册迁移脚本（带安全验证）
 
         Args:
             name: 迁移名称（唯一标识）
             sql: SQL脚本
+
+        Raises:
+            ValueError: 迁移名称格式无效或SQL包含危险模式
         """
+        import re
+
+        # 1. 验证迁移名称格式（格式：001_create_table）
+        if not re.match(r'^\d{3}_[a-z_]+$', name):
+            raise ValueError(
+                f"Invalid migration name: {name}. "
+                f"Expected format: 'XXX_description' (e.g., '001_create_table')"
+            )
+
+        # 2. 检查危险SQL模式
+        dangerous_patterns = [
+            (r'DROP\s+TABLE', 'DROP TABLE'),
+            (r'DELETE\s+FROM', 'DELETE FROM'),
+            (r'TRUNCATE\s+TABLE', 'TRUNCATE TABLE'),
+            (r'--.*$', 'SQL comment'),  # SQL注释可能隐藏恶意代码
+        ]
+
+        for pattern, pattern_name in dangerous_patterns:
+            if re.search(pattern, sql, re.IGNORECASE):
+                raise ValueError(
+                    f"Migration '{name}' contains dangerous SQL pattern: {pattern_name}. "
+                    f"Please use safe operations only."
+                )
+
         self._migrations[name] = sql
+        logger.info(f"Migration registered: {name}")
 
     def get_pending_migrations(self) -> List[str]:
         """
@@ -180,7 +208,7 @@ class DatabaseMigration:
 
     def apply_migration(self, name: str) -> bool:
         """
-        应用单个迁移
+        应用单个迁移（带事务保护）
 
         Args:
             name: 迁移名称
@@ -196,8 +224,14 @@ class DatabaseMigration:
         conn = self._pool.get_connection()
 
         try:
-            # 执行迁移SQL
-            conn.executescript(sql)
+            # 开始事务
+            conn.execute("BEGIN TRANSACTION")
+
+            # 拆分SQL语句并逐条执行（而不是executescript）
+            statements = [s.strip() for s in sql.split(';') if s.strip()]
+
+            for stmt in statements:
+                conn.execute(stmt)
 
             # 记录迁移
             conn.execute(
@@ -207,12 +241,14 @@ class DatabaseMigration:
                 """,
                 (name, datetime.now().isoformat(), MigrationStatus.APPLIED.value),
             )
-            conn.commit()
 
-            logger.info(f"Migration applied: {name}")
+            # 提交事务
+            conn.commit()
+            logger.info(f"Migration applied successfully: {name}")
             return True
 
         except Exception as e:
+            # 回滚事务
             conn.rollback()
             logger.error(f"Migration failed: {name}, error: {e}")
 
@@ -226,8 +262,8 @@ class DatabaseMigration:
                     (name, datetime.now().isoformat(), MigrationStatus.FAILED.value),
                 )
                 conn.commit()
-            except Exception:
-                pass
+            except Exception as record_error:
+                logger.error(f"Failed to record migration failure: {record_error}")
 
             return False
 
