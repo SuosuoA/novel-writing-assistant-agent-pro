@@ -55,6 +55,9 @@ try:
         TaskPriority,
         init_async_handler,
         CoreServiceManager,
+        initialize_core_services,
+        dispose_core_services,
+        get_logging_service,
     )
     CORE_AVAILABLE = True
 except ImportError as e:
@@ -220,7 +223,7 @@ class GlassWindowManager:
     
     def make_frameless(self, keep_resize_border: bool = True) -> None:
         """
-        设置完全无边框窗口（移除系统边框）
+        设置完全无边框窗口（移除系统边框和标题栏按钮）
         
         Args:
             keep_resize_border: 是否保留调整大小的边框
@@ -231,13 +234,15 @@ class GlassWindowManager:
             return
         
         try:
-            # 确保窗口句柄存在
+            # 确保窗口句柄存在（必须在 overrideredirect 之前获取）
             if not self.hwnd:
                 self.hwnd = self.user32.GetActiveWindow()
             
             if not self.hwnd:
+                logger.warning("Failed to get window handle for frameless mode")
                 return
             
+            # 先通过Windows API移除边框样式
             style = self.user32.GetWindowLongW(self.hwnd, self.GWL_STYLE)
             
             if keep_resize_border:
@@ -256,6 +261,10 @@ class GlassWindowManager:
             # 强制重绘窗口
             self.user32.SetWindowPos(self.hwnd, None, 0, 0, 0, 0, 
                                      0x27)  # SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+            
+            # 关键：使用 overrideredirect 完全移除系统标题栏按钮
+            # 必须在Windows API设置之后调用，否则无法获取窗口句柄
+            self.root.overrideredirect(True)
             
             logger.info(f"Frameless window enabled (keep_resize_border={keep_resize_border})")
         
@@ -806,49 +815,76 @@ class CustomTitleBar(tk.Frame):
         btn_frame = tk.Frame(self, bg=GlassTheme.GLASS_BG)
         btn_frame.pack(side=tk.RIGHT)
         
+        # 按钮统一配置（等比例缩小）
+        BTN_WIDTH = 36
+        BTN_HEIGHT = 26
+        
+        # 使用Canvas绘制统一大小的图标
+        def create_icon_canvas(parent, draw_func, bg_color):
+            """创建图标Canvas"""
+            canvas = tk.Canvas(
+                parent,
+                width=BTN_WIDTH,
+                height=BTN_HEIGHT,
+                bg=bg_color,
+                highlightthickness=0
+            )
+            draw_func(canvas, BTN_WIDTH // 2, BTN_HEIGHT // 2)
+            return canvas
+        
+        def draw_minimize(canvas, cx, cy):
+            """绘制最小化图标 - 水平线"""
+            canvas.create_line(cx - 6, cy, cx + 6, cy, fill=GlassTheme.TEXT_SECONDARY, width=2)
+        
+        def draw_maximize(canvas, cx, cy):
+            """绘制最大化图标 - 空心方块"""
+            canvas.create_rectangle(cx - 5, cy - 5, cx + 5, cy + 5, outline=GlassTheme.TEXT_SECONDARY, width=2)
+        
+        def draw_close(canvas, cx, cy):
+            """绘制关闭图标 - X"""
+            canvas.create_line(cx - 5, cy - 5, cx + 5, cy + 5, fill=GlassTheme.TEXT_SECONDARY, width=2)
+            canvas.create_line(cx - 5, cy + 5, cx + 5, cy - 5, fill=GlassTheme.TEXT_SECONDARY, width=2)
+        
         # 最小化按钮
-        self.min_btn = tk.Label(
-            btn_frame,
-            text="─",  # 使用更宽的破折号
-            font=("Segoe UI", 12),  # 使用系统字体
-            fg=GlassTheme.TEXT_SECONDARY,
-            bg=GlassTheme.GLASS_BG,
-            width=4,
-            cursor="hand2"
-        )
-        self.min_btn.pack(side=tk.LEFT, pady=8)
+        self.min_btn = create_icon_canvas(btn_frame, draw_minimize, GlassTheme.GLASS_BG)
+        self.min_btn.pack(side=tk.LEFT)
+        self.min_btn.cursor = "hand2"
         
         # 最大化按钮
-        self.max_btn = tk.Label(
-            btn_frame,
-            text="□",  # 空心方块
-            font=("Segoe UI", 12),
-            fg=GlassTheme.TEXT_SECONDARY,
-            bg=GlassTheme.GLASS_BG,
-            width=4,
-            cursor="hand2"
-        )
-        self.max_btn.pack(side=tk.LEFT, pady=8)
+        self.max_btn = create_icon_canvas(btn_frame, draw_maximize, GlassTheme.GLASS_BG)
+        self.max_btn.pack(side=tk.LEFT)
+        self.max_btn.cursor = "hand2"
         
         # 关闭按钮
-        self.close_btn = tk.Label(
-            btn_frame,
-            text="✕",  # 使用乘号符号
-            font=("Segoe UI", 14),
-            fg=GlassTheme.TEXT_SECONDARY,
-            bg=GlassTheme.GLASS_BG,
-            width=4,
-            cursor="hand2"
-        )
-        self.close_btn.pack(side=tk.LEFT, pady=8)
+        self.close_btn = create_icon_canvas(btn_frame, draw_close, GlassTheme.GLASS_BG)
+        self.close_btn.pack(side=tk.LEFT)
+        self.close_btn.cursor = "hand2"
         
         # 悬停效果
         for btn in [self.min_btn, self.max_btn]:
             btn.bind("<Enter>", lambda e, b=btn: b.configure(bg=GlassTheme.GLASS_HOVER))
             btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=GlassTheme.GLASS_BG))
         
-        self.close_btn.bind("<Enter>", lambda e: self.close_btn.configure(bg=GlassTheme.ERROR))
-        self.close_btn.bind("<Leave>", lambda e: self.close_btn.configure(bg=GlassTheme.GLASS_BG))
+        # Canvas悬停效果 - 使用不同的方法
+        def on_min_enter(e):
+            self.min_btn.configure(bg=GlassTheme.GLASS_HOVER)
+        def on_min_leave(e):
+            self.min_btn.configure(bg=GlassTheme.GLASS_BG)
+        def on_max_enter(e):
+            self.max_btn.configure(bg=GlassTheme.GLASS_HOVER)
+        def on_max_leave(e):
+            self.max_btn.configure(bg=GlassTheme.GLASS_BG)
+        def on_close_enter(e):
+            self.close_btn.configure(bg=GlassTheme.ERROR)
+        def on_close_leave(e):
+            self.close_btn.configure(bg=GlassTheme.GLASS_BG)
+        
+        self.min_btn.bind("<Enter>", on_min_enter)
+        self.min_btn.bind("<Leave>", on_min_leave)
+        self.max_btn.bind("<Enter>", on_max_enter)
+        self.max_btn.bind("<Leave>", on_max_leave)
+        self.close_btn.bind("<Enter>", on_close_enter)
+        self.close_btn.bind("<Leave>", on_close_leave)
     
     def _bind_events(self) -> None:
         # 拖动窗口
@@ -1983,6 +2019,7 @@ class MainWindow:
         ttk.Entry(path_frame, textvariable=self._character_path_var, width=50).pack(side=tk.LEFT, padx=10)
         ttk.Button(path_frame, text="浏览", command=self._on_character_browse).pack(side=tk.LEFT)
         ttk.Button(path_frame, text="新建人物", command=self._on_character_new).pack(side=tk.LEFT, padx=5)
+        ttk.Button(path_frame, text="批量解析导入", command=self._on_character_batch_import).pack(side=tk.LEFT, padx=5)
         
         # 中部：人物列表区
         list_frame = ttk.LabelFrame(frame, text="人物列表", padding=10)
@@ -2168,6 +2205,7 @@ class MainWindow:
                  foreground=GlassTheme.TEXT_LINK).pack(side=tk.LEFT, padx=10)
         ttk.Button(path_frame, text="上传范文", command=self._on_style_browse).pack(side=tk.LEFT)
         ttk.Button(path_frame, text="删除范文", command=self._on_style_delete).pack(side=tk.LEFT, padx=5)
+        ttk.Button(path_frame, text="解析风格", command=self._on_style_analyze).pack(side=tk.LEFT, padx=5)
         ttk.Button(path_frame, text="导出风格", command=self._on_style_export).pack(side=tk.RIGHT)
         
         # 中部左：风格档案库
@@ -2884,6 +2922,10 @@ class MainWindow:
             self._character_path_var.set(path)
             self._set_status(f"已选择: {os.path.basename(path)}")
     
+    def _on_character_batch_import(self):
+        """批量解析导入人物"""
+        self._set_status("批量解析导入功能开发中...")
+    
     def _on_character_new(self):
         """新建人物（弹窗）"""
         dialog = tk.Toplevel(self.root)
@@ -3149,6 +3191,10 @@ class MainWindow:
     def _on_style_delete(self):
         """删除范文"""
         self._set_status("删除范文功能开发中...")
+    
+    def _on_style_analyze(self):
+        """解析风格"""
+        self._set_status("解析风格功能开发中...")
     
     def _on_style_export(self):
         """导出风格"""
@@ -3766,7 +3812,14 @@ class MainWindow:
         return frame
     
     def _create_plugins_page(self) -> tk.Frame:
-        """创建插件管理页面（支持滚动）"""
+        """创建插件管理页面（支持滚动）- V2.2增强版
+        
+        功能：
+        - 显示已安装插件列表（名称、版本、状态、类型、保护状态）
+        - 启用/禁用插件（调用PluginRegistry）
+        - 插件配置界面（通过PluginContext读取/保存配置）
+        - V5保护模块标识（禁止操作）
+        """
         frame = ttk.Frame(self._content_frame, style="TFrame")
         
         # 创建Canvas和Scrollbar用于滚动
@@ -3798,67 +3851,116 @@ class MainWindow:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # 标题
+        # 标题区域
         header = ttk.Frame(scrollable_frame, style="TFrame")
         header.pack(fill=tk.X, padx=20, pady=(20, 10))
         
         ttk.Label(header, text="插件管理", style="Title.TLabel").pack(side=tk.LEFT)
         
+        # 状态说明
+        status_info = ttk.Label(
+            header, 
+            text="🔒 = V5核心保护模块（禁止禁用）", 
+            font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_SMALL),
+            foreground=GlassTheme.ACCENT_ORANGE
+        )
+        status_info.pack(side=tk.RIGHT)
+        
         # 插件列表
         list_frame = ttk.LabelFrame(scrollable_frame, text="已安装插件", padding=15)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
         
-        columns = ("name", "version", "status", "type")
+        # V2.2新增：增加保护状态列
+        columns = ("name", "version", "status", "type", "protected")
         self._plugin_tree = ttk.Treeview(
             list_frame,
             columns=columns,
             show="headings",
-            height=15
+            height=15,
+            selectmode="browse"  # 单选模式
         )
 
-        # 配置字体 - 直接使用Treeview样式
+        # 配置字体
         style = ttk.Style()
         style.configure("Treeview",
                      font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_NORMAL))
         style.configure("Treeview.Heading",
                      font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_NORMAL, "bold"))
         
+        # 配置列标题和宽度
         self._plugin_tree.heading("name", text="插件名称")
         self._plugin_tree.heading("version", text="版本")
         self._plugin_tree.heading("status", text="状态")
         self._plugin_tree.heading("type", text="类型")
+        self._plugin_tree.heading("protected", text="保护")
         
-        self._plugin_tree.column("name", width=200)
-        self._plugin_tree.column("version", width=80)
-        self._plugin_tree.column("status", width=80)
-        self._plugin_tree.column("type", width=100)
+        self._plugin_tree.column("name", width=200, minwidth=150)
+        self._plugin_tree.column("version", width=80, minwidth=60)
+        self._plugin_tree.column("status", width=80, minwidth=60)
+        self._plugin_tree.column("type", width=100, minwidth=80)
+        self._plugin_tree.column("protected", width=60, minwidth=50)
         
-        self._plugin_tree.pack(fill=tk.BOTH, expand=True)
+        # 添加滚动条
+        tree_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self._plugin_tree.yview)
+        self._plugin_tree.configure(yscrollcommand=tree_scroll.set)
         
-        # 加载插件数据
-        self._load_plugins()
+        self._plugin_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # 操作按钮
+        # 绑定双击事件打开配置对话框
+        self._plugin_tree.bind("<Double-1>", self._on_plugin_double_click)
+        # 绑定选择事件更新按钮状态
+        self._plugin_tree.bind("<<TreeviewSelect>>", self._on_plugin_select)
+        
+        # V2.3优化：异步加载插件数据
+        self._load_plugins_async()
+        
+        # 插件详情区域
+        detail_frame = ttk.LabelFrame(scrollable_frame, text="插件详情", padding=15)
+        detail_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        self._plugin_detail_var = tk.StringVar(value="请选择一个插件查看详情")
+        detail_label = ttk.Label(
+            detail_frame, 
+            textvariable=self._plugin_detail_var,
+            font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_NORMAL),
+            wraplength=800,
+            justify=tk.LEFT
+        )
+        detail_label.pack(fill=tk.X, anchor=tk.W)
+        
+        # 操作按钮区域
         btn_frame = ttk.Frame(scrollable_frame, style="TFrame")
         btn_frame.pack(fill=tk.X, padx=20, pady=10)
 
+        # V2.2新增：启用/禁用/配置按钮
         buttons = [
-            ("刷新", self._on_refresh_plugins),
-            ("安装插件", self._on_install_plugin),
-            ("卸载插件", self._on_uninstall_plugin),
+            ("刷新列表", self._on_refresh_plugins, "TButton"),
+            ("启用插件", self._on_enable_plugin, "TButton"),
+            ("禁用插件", self._on_disable_plugin, "TButton"),
+            ("插件配置", self._on_config_plugin, "Accent.TButton"),
+            ("重新加载", self._on_reload_plugin, "TButton"),
         ]
 
-        for i, (text, command) in enumerate(buttons):
+        for i, (text, command, btn_style) in enumerate(buttons):
             ResponsiveButton(
                 btn_frame,
                 text=text,
                 command=command,
-                async_handler=self._async_handler
+                async_handler=self._async_handler,
+                style=btn_style
             ).grid(row=0, column=i, padx=5, pady=2, sticky="ew")
 
-        # 配置列权重，确保按钮均匀分布
-        for i in range(3):
+        # 配置列权重
+        for i in range(len(buttons)):
             btn_frame.grid_columnconfigure(i, weight=1)
+
+        # 存储按钮引用以便更新状态
+        self._plugin_buttons = {
+            "enable": btn_frame.winfo_children()[1],
+            "disable": btn_frame.winfo_children()[2],
+            "config": btn_frame.winfo_children()
+        }
 
         return frame
     
@@ -3971,26 +4073,6 @@ class MainWindow:
         self._temp_label.pack(side=tk.LEFT)
         temp_scale.configure(command=lambda v: self._temp_label.configure(text=f"{float(v):.2f}"))
         
-        # 界面设置
-        ui_frame = ttk.LabelFrame(scrollable_frame, text="界面设置", padding=15)
-        ui_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        # 主题
-        theme_frame = ttk.Frame(ui_frame, style="TFrame")
-        theme_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(theme_frame, text="主题：").pack(side=tk.LEFT)
-        self._theme_var = tk.StringVar(value="dark")
-        ttk.Radiobutton(theme_frame, text="深色", variable=self._theme_var, value="dark", command=self._on_theme_changed).pack(side=tk.LEFT, padx=10)
-        ttk.Radiobutton(theme_frame, text="浅色", variable=self._theme_var, value="light", command=self._on_theme_changed).pack(side=tk.LEFT)
-        
-        # 字体大小
-        font_frame = ttk.Frame(ui_frame, style="TFrame")
-        font_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(font_frame, text="字体大小：").pack(side=tk.LEFT)
-        self._font_size_var = tk.StringVar(value="14")
-        font_spinbox = ttk.Spinbox(font_frame, from_=10, to=20, textvariable=self._font_size_var, width=8)
-        font_spinbox.pack(side=tk.LEFT, padx=10)
-        font_spinbox.bind("<Return>", lambda e: self._on_font_size_changed())
 
         # 文件路径设置
         # 文件路径设置
@@ -4155,18 +4237,408 @@ class MainWindow:
             'update_time': datetime.now().strftime('%Y-%m-%d %H:%M')
         }
     
-    def _load_plugins(self) -> None:
-        """加载插件列表"""
-        plugins = [
-            ("大纲解析器", "1.0.0", "active", "Analyzer"),
-            ("风格学习器", "1.0.0", "active", "Analyzer"),
-            ("人物管理器", "1.0.0", "active", "Tool"),
-            ("世界观解析器", "1.0.0", "active", "Analyzer"),
-            ("章节生成器", "1.0.0", "active", "Generator"),
-        ]
+    def _load_plugins_async(self) -> None:
+        """异步加载插件列表 - V2.3优化版
         
-        for plugin in plugins:
-            self._plugin_tree.insert("", tk.END, values=plugin)
+        使用AsyncHandler异步加载插件，避免UI卡顿
+        """
+        # 显示加载状态
+        loading_item = self._plugin_tree.insert(
+            "",
+            tk.END,
+            values=("正在加载插件...", "", "", "", "")
+        )
+        
+        def load_task():
+            """后台加载任务"""
+            # 使用线程池执行加载
+            from concurrent.futures import ThreadPoolExecutor
+            import time
+            
+            # 模拟加载延迟（实际是文件IO）
+            plugins_data = []
+            plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+            
+            if os.path.exists(plugins_dir):
+                protected_modules = {
+                    "outline-parser-v3", "style-learner-v5", "character-manager-v1",
+                    "worldview-parser-v1", "context-builder-v1", "iterative-generator-v2",
+                    "quality-validator-v1", "novel-generator-v3", "hot-ranking-v1"
+                }
+                
+                for plugin_name in sorted(os.listdir(plugins_dir)):
+                    plugin_path = os.path.join(plugins_dir, plugin_name)
+                    if os.path.isdir(plugin_path) and not plugin_name.startswith("__"):
+                        plugin_json = os.path.join(plugin_path, "plugin.json")
+                        if os.path.exists(plugin_json):
+                            try:
+                                with open(plugin_json, "r", encoding="utf-8") as f:
+                                    data = json.load(f)
+                                
+                                is_protected = plugin_name in protected_modules
+                                plugins_data.append({
+                                    "id": plugin_name,
+                                    "data": data,
+                                    "is_protected": is_protected
+                                })
+                            except Exception as e:
+                                logger.warning(f"Failed to load plugin.json for {plugin_name}: {e}")
+            
+            return plugins_data
+        
+        def on_success(plugins_data):
+            """加载成功回调（在主线程执行）"""
+            # 清空加载状态
+            for item in self._plugin_tree.get_children():
+                self._plugin_tree.delete(item)
+            
+            self._plugin_data = {}
+            
+            # 类型映射
+            type_map = {
+                "analyzer": "分析器",
+                "generator": "生成器",
+                "validator": "验证器",
+                "tool": "工具",
+                "storage": "存储",
+                "ai": "AI服务",
+                "protocol": "协议"
+            }
+            
+            # 填充数据
+            for plugin_info in plugins_data:
+                plugin_id = plugin_info["id"]
+                data = plugin_info["data"]
+                is_protected = plugin_info["is_protected"]
+                
+                protected_text = "🔒" if is_protected else ""
+                type_text = type_map.get(data.get("plugin_type", "tool").lower(), data.get("plugin_type", "工具"))
+                status_text = "已启用" if data.get("enabled", True) else "已禁用"
+                
+                item_id = self._plugin_tree.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        data.get("name", plugin_id),
+                        data.get("version", "1.0.0"),
+                        status_text,
+                        type_text,
+                        protected_text
+                    )
+                )
+                
+                self._plugin_data[item_id] = {
+                    "id": plugin_id,
+                    "name": data.get("name", plugin_id),
+                    "version": data.get("version", "1.0.0"),
+                    "description": data.get("description", ""),
+                    "author": data.get("author", ""),
+                    "type": data.get("plugin_type", "tool"),
+                    "state": "active" if data.get("enabled", True) else "disabled",
+                    "is_protected": is_protected,
+                    "dependencies": data.get("dependencies", [])
+                }
+            
+            self._set_status(f"已加载 {len(plugins_data)} 个插件")
+            logger.info(f"Async loaded {len(plugins_data)} plugins")
+        
+        def on_error(error):
+            """加载失败回调（在主线程执行）"""
+            # 清空加载状态
+            for item in self._plugin_tree.get_children():
+                self._plugin_tree.delete(item)
+            
+            # 显示错误
+            self._plugin_tree.insert(
+                "",
+                tk.END,
+                values=(f"加载失败: {error}", "", "", "", "")
+            )
+            
+            self._set_status("插件加载失败")
+            logger.error(f"Failed to async load plugins: {error}")
+        
+        # 提交异步任务
+        if self._async_handler:
+            self._async_handler.submit(
+                func=load_task,
+                callback=on_success,
+                error_callback=on_error,
+                priority=TaskPriority.HIGH,
+                timeout=10.0
+            )
+        else:
+            # 回退到同步加载
+            self._load_plugins()
+    
+    def _load_plugins(self) -> None:
+        """加载插件列表 - V2.2重构版
+        
+        从PluginRegistry读取真实的插件数据，包括：
+        - 插件元数据（名称、版本、类型）
+        - 插件状态（active/loaded/error等）
+        - V5保护模块标识
+        """
+        # 清空现有数据
+        for item in self._plugin_tree.get_children():
+            self._plugin_tree.delete(item)
+        
+        # 存储插件数据用于后续操作
+        self._plugin_data: Dict[str, Dict[str, Any]] = {}
+        
+        # 尝试从PluginRegistry获取真实数据
+        registry = None
+        try:
+            if CORE_AVAILABLE:
+                registry = get_plugin_registry()
+        except Exception as e:
+            logger.warning(f"Failed to get PluginRegistry: {e}")
+        
+        if registry and registry._plugins:
+            # 获取所有已注册的插件信息
+            for plugin_id in registry._plugins.keys():
+                plugin_info = registry.get_plugin_info(plugin_id)
+                if plugin_info:
+                    metadata = plugin_info.metadata
+                    state = plugin_info.state
+                    is_protected = registry.is_protected(plugin_id)
+                    
+                    # 状态显示映射
+                    status_map = {
+                        "active": "已启用",
+                        "loaded": "已加载",
+                        "error": "错误",
+                        "unloaded": "未加载",
+                        "unloading": "卸载中"
+                    }
+                    status_text = status_map.get(state, state)
+                    
+                    # 类型显示映射
+                    type_map = {
+                        "analyzer": "分析器",
+                        "generator": "生成器",
+                        "validator": "验证器",
+                        "tool": "工具",
+                        "storage": "存储",
+                        "ai": "AI服务",
+                        "protocol": "协议"
+                    }
+                    type_text = type_map.get(metadata.plugin_type.lower(), metadata.plugin_type)
+                    
+                    # 保护状态显示
+                    protected_text = "🔒" if is_protected else ""
+                    
+                    # 插入到树形视图
+                    item_id = self._plugin_tree.insert(
+                        "", 
+                        tk.END, 
+                        values=(
+                            metadata.name,
+                            metadata.version,
+                            status_text,
+                            type_text,
+                            protected_text
+                        )
+                    )
+                    
+                    # 存储插件数据
+                    self._plugin_data[item_id] = {
+                        "id": plugin_id,
+                        "name": metadata.name,
+                        "version": metadata.version,
+                        "description": metadata.description,
+                        "author": metadata.author,
+                        "type": metadata.plugin_type,
+                        "state": state,
+                        "is_protected": is_protected,
+                        "dependencies": metadata.dependencies,
+                        "error_message": plugin_info.error_message if hasattr(plugin_info, 'error_message') else None
+                    }
+            
+            logger.info(f"Loaded {len(self._plugin_data)} plugins from registry")
+        else:
+            # 回退：从plugins目录扫描plugin.json文件
+            self._load_plugins_from_filesystem()
+            logger.info(f"Loaded {len(self._plugin_data)} plugins from filesystem")
+    
+    def _load_plugins_from_filesystem(self) -> None:
+        """从文件系统扫描插件并注册到PluginRegistry（修复版本）
+        
+        修复说明：
+        匨修复前的流程：
+        1. 只读取plugin.json文件
+        2. 存储到self._plugin_data字典
+        3. 显示在Treeview中
+        ❌ 问题：插件未注册到PluginRegistry，导致启用/禁用操作失败
+        
+        @修复后的流程：
+        1. 使用PluginLoader.discover_plugins()发现插件
+        2. 使用PluginLoader.load_plugin()加载并注册插件
+        3. 从PluginRegistry获取真实状态显示在UI
+        """
+        plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+        
+        if not os.path.exists(plugins_dir):
+            return
+        
+        # V5保护模块列表
+        protected_modules = {
+            "outline-parser-v3", "style-learner-v2", "character-manager",
+            "worldview-parser", "context-builder", "iterative-generator-v2",
+            "weighted-validator", "optimized-generator-v2", "hot-ranking"
+        }
+        
+        # 尝试使用PluginLoader来发现和注册插件
+        try:
+            from core.plugin_loader import get_plugin_loader
+            from core.plugin_registry import get_plugin_registry, PluginState
+            
+            loader = get_plugin_loader()
+            registry = get_plugin_registry()
+            
+            # 设置插件目录
+            loader._plugin_directories = [plugins_dir]
+            
+            # 发现插件
+            discovered_ids = loader.discover_plugins()
+            logger.info(f"Discovered {len(discovered_ids)} plugins")
+            
+            # 按依赖顺序加载插件
+            load_results = loader.load_all()
+            logger.info(f"Loaded {sum(1 for r in load_results.values() if r.success)} plugins")
+            
+            # 清空现有数据
+            for item in self._plugin_tree.get_children():
+                self._plugin_tree.delete(item)
+            self._plugin_data = {}
+            
+            # 从PluginRegistry获取插件信息并更新UI
+            for plugin_id in discovered_ids:
+                plugin_info = registry.get_plugin_info(plugin_id)
+                if not plugin_info:
+                    continue
+                
+                metadata = plugin_info.metadata
+                state = plugin_info.state
+                is_protected = plugin_id in protected_modules
+                
+                # 类型映射
+                type_map = {
+                    "analyzer": "分析器",
+                    "generator": "生成器",
+                    "validator": "验证器",
+                    "tool": "工具",
+                    "storage": "存储",
+                    "ai": "AI服务",
+                    "protocol": "协议"
+                }
+                type_text = type_map.get(metadata.plugin_type.lower(), metadata.plugin_type)
+                protected_text = "🔒" if is_protected else ""
+                
+                # 状态映射
+                state_map = {
+                    "unloaded": "未加载",
+                    "loaded": "已加载",
+                    "active": "已激活",
+                    "error": "错误",
+                    "unloading": "卸载中"
+                }
+                state_text = state_map.get(state, state)
+                
+                item_id = self._plugin_tree.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        metadata.name,
+                        metadata.version,
+                        state_text,
+                        type_text,
+                        protected_text
+                    )
+                )
+                
+                self._plugin_data[item_id] = {
+                    "id": plugin_id,
+                    "name": metadata.name,
+                    "version": metadata.version,
+                    "description": metadata.description,
+                    "author": metadata.author,
+                    "type": metadata.plugin_type,
+                    "state": state,
+                    "is_protected": is_protected,
+                    "dependencies": metadata.dependencies,
+                    "error_message": plugin_info.error_message
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to load plugins via PluginLoader: {e}")
+            # 回退到旧的文件扫描方式
+            self._load_plugins_from_filesystem_legacy()
+    
+    def _load_plugins_from_filesystem_legacy(self) -> None:
+        """旧的文件扫描方式（作为回退方案）"""
+        plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+        
+        if not os.path.exists(plugins_dir):
+            return
+        
+        # V5保护模块列表
+        protected_modules = {
+            "outline-parser-v3", "style-learner-v2", "character-manager",
+            "worldview-parser", "context-builder", "iterative-generator-v2",
+            "weighted-validator", "optimized-generator-v2", "hot-ranking"
+        }
+        
+        for plugin_name in os.listdir(plugins_dir):
+            plugin_path = os.path.join(plugins_dir, plugin_name)
+            if os.path.isdir(plugin_path) and not plugin_name.startswith("__"):
+                plugin_json = os.path.join(plugin_path, "plugin.json")
+                if os.path.exists(plugin_json):
+                    try:
+                        with open(plugin_json, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        
+                        is_protected = plugin_name in protected_modules
+                        protected_text = "🔒" if is_protected else ""
+                        
+                        # 类型映射
+                        type_map = {
+                            "analyzer": "分析器",
+                            "generator": "生成器",
+                            "validator": "验证器",
+                            "tool": "工具",
+                            "storage": "存储",
+                            "ai": "AI服务",
+                            "protocol": "协议"
+                        }
+                        type_text = type_map.get(data.get("plugin_type", "tool").lower(), data.get("plugin_type", "工具"))
+                        
+                        item_id = self._plugin_tree.insert(
+                            "",
+                            tk.END,
+                            values=(
+                                data.get("name", plugin_name),
+                                data.get("version", "1.0.0"),
+                                "已加载" if data.get("enabled", True) else "已禁用",
+                                type_text,
+                                protected_text
+                            )
+                        )
+                        
+                        self._plugin_data[item_id] = {
+                            "id": plugin_name,
+                            "name": data.get("name", plugin_name),
+                            "version": data.get("version", "1.0.0"),
+                            "description": data.get("description", ""),
+                            "author": data.get("author", ""),
+                            "type": data.get("plugin_type", "tool"),
+                            "state": "loaded" if data.get("enabled", True) else "disabled",
+                            "is_protected": is_protected,
+                            "dependencies": data.get("dependencies", []),
+                            "error_message": None
+                        }
+                    except Exception as e:
+                        logger.warning(f"Failed to load plugin.json for {plugin_name}: {e}")
     
     def _load_settings_from_config(self) -> None:
         """从config.yaml加载设置到UI"""
@@ -4183,7 +4655,8 @@ class MainWindow:
                     self._model_var.set(config_data.get("model", "deepseek-chat"))
                     self._api_key_var.set(config_data.get("api_key", ""))
                     self._temp_var.set(float(config_data.get("temperature", 0.7)))
-                    self._theme_var.set(config_data.get("theme", "dark"))
+                    if hasattr(self, '_theme_var'):
+                        self._theme_var.set(config_data.get("theme", "dark"))
                     self._temp_label.configure(text=f"{self._temp_var.get():.2f}")
                     logger.info("Settings loaded from config.yaml")
         except Exception as e:
@@ -4321,19 +4794,487 @@ class MainWindow:
         self._set_status("创建备份...")
     
     def _on_refresh_plugins(self) -> None:
-        """刷新插件"""
-        for item in self._plugin_tree.get_children():
-            self._plugin_tree.delete(item)
+        """刷新插件列表"""
         self._load_plugins()
         self._set_status("插件列表已刷新")
     
+    def _on_plugin_select(self, event) -> None:
+        """插件选择事件 - 更新详情显示"""
+        selection = self._plugin_tree.selection()
+        if not selection:
+            return
+        
+        item_id = selection[0]
+        plugin_data = self._plugin_data.get(item_id, {})
+        
+        # 更新详情显示
+        details = [
+            f"ID: {plugin_data.get('id', 'N/A')}",
+            f"名称: {plugin_data.get('name', 'N/A')}",
+            f"版本: {plugin_data.get('version', 'N/A')}",
+            f"作者: {plugin_data.get('author', 'N/A')}",
+            f"描述: {plugin_data.get('description', 'N/A')}",
+            f"状态: {plugin_data.get('state', 'N/A')}",
+        ]
+        
+        if plugin_data.get('is_protected'):
+            details.append("⚠️ V5核心保护模块（禁止禁用）")
+        
+        if plugin_data.get('dependencies'):
+            details.append(f"依赖: {', '.join(plugin_data['dependencies'])}")
+        
+        if plugin_data.get('error_message'):
+            details.append(f"错误: {plugin_data['error_message']}")
+        
+        self._plugin_detail_var.set("\n".join(details))
+    
+    def _on_plugin_double_click(self, event) -> None:
+        """双击插件打开配置对话框"""
+        self._on_config_plugin()
+    
+    def _get_selected_plugin(self) -> Optional[Dict[str, Any]]:
+        """获取当前选中的插件数据"""
+        selection = self._plugin_tree.selection()
+        if not selection:
+            return None
+        return self._plugin_data.get(selection[0])
+    
+    def _get_plugin_registry(self):
+        """获取PluginRegistry实例"""
+        if not CORE_AVAILABLE:
+            return None
+        try:
+            return get_plugin_registry()
+        except Exception as e:
+            logger.warning(f"Failed to get PluginRegistry: {e}")
+            return None
+    
+    def _get_config_manager(self):
+        """获取ConfigManager实例"""
+        if not CORE_AVAILABLE:
+            return None
+        try:
+            return get_config_manager()
+        except Exception as e:
+            logger.warning(f"Failed to get ConfigManager: {e}")
+            return None
+    
+    def _on_enable_plugin(self) -> None:
+        """启用插件 - 调用PluginRegistry.activate()"""
+        plugin_data = self._get_selected_plugin()
+        if not plugin_data:
+            messagebox.showwarning("提示", "请先选择一个插件")
+            return
+        
+        plugin_id = plugin_data["id"]
+        
+        # 检查保护状态
+        if plugin_data.get("is_protected"):
+            messagebox.showwarning("警告", f"插件 '{plugin_id}' 是V5核心保护模块，无法禁用/启用操作")
+            return
+        
+        # 检查当前状态
+        if plugin_data.get("state") == "active":
+            messagebox.showinfo("提示", f"插件 '{plugin_id}' 已经处于启用状态")
+            return
+        
+        # 调用PluginRegistry激活插件
+        registry = self._get_plugin_registry()
+        if registry:
+            try:
+                success = registry.activate(plugin_id)
+                if success:
+                    self._set_status(f"插件 '{plugin_id}' 已启用")
+                    self._load_plugins()  # 刷新列表
+                    messagebox.showinfo("成功", f"插件 '{plugin_id}' 已成功启用")
+                else:
+                    messagebox.showerror("失败", f"插件 '{plugin_id}' 启用失败")
+            except Exception as e:
+                messagebox.showerror("错误", f"启用插件时发生错误：{e}")
+        else:
+            messagebox.showwarning("提示", "PluginRegistry不可用")
+    
+    def _on_disable_plugin(self) -> None:
+        """禁用插件 - 调用PluginRegistry.deactivate()"""
+        plugin_data = self._get_selected_plugin()
+        if not plugin_data:
+            messagebox.showwarning("提示", "请先选择一个插件")
+            return
+        
+        plugin_id = plugin_data["id"]
+        
+        # 检查保护状态
+        if plugin_data.get("is_protected"):
+            messagebox.showwarning("警告", f"插件 '{plugin_id}' 是V5核心保护模块，禁止禁用")
+            return
+        
+        # 检查当前状态
+        if plugin_data.get("state") != "active":
+            messagebox.showinfo("提示", f"插件 '{plugin_id}' 当前未启用")
+            return
+        
+        # 确认对话框
+        if not messagebox.askyesno("确认", f"确定要禁用插件 '{plugin_id}' 吗？\n禁用后相关功能将不可用。"):
+            return
+        
+        # 调用PluginRegistry停用插件
+        registry = self._get_plugin_registry()
+        if registry:
+            try:
+                success = registry.deactivate(plugin_id)
+                if success:
+                    self._set_status(f"插件 '{plugin_id}' 已禁用")
+                    self._load_plugins()  # 刷新列表
+                    messagebox.showinfo("成功", f"插件 '{plugin_id}' 已成功禁用")
+                else:
+                    messagebox.showerror("失败", f"插件 '{plugin_id}' 禁用失败")
+            except Exception as e:
+                messagebox.showerror("错误", f"禁用插件时发生错误：{e}")
+        else:
+            messagebox.showwarning("提示", "PluginRegistry不可用")
+    
+    def _on_config_plugin(self) -> None:
+        """打开插件配置对话框"""
+        plugin_data = self._get_selected_plugin()
+        if not plugin_data:
+            messagebox.showwarning("提示", "请先选择一个插件")
+            return
+        
+        plugin_id = plugin_data["id"]
+        plugin_name = plugin_data.get("name", plugin_id)
+        
+        # 创建配置对话框
+        self._show_plugin_config_dialog(plugin_id, plugin_name, plugin_data)
+    
+    def _show_plugin_config_dialog(self, plugin_id: str, plugin_name: str, plugin_data: Dict) -> None:
+        """显示插件配置对话框
+        
+        Args:
+            plugin_id: 插件ID
+            plugin_name: 插件显示名称
+            plugin_data: 插件数据字典
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"插件配置 - {plugin_name}")
+        dialog.geometry("500x400")
+        dialog.configure(bg=GlassTheme.GLASS_BG)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # 居中显示
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 500) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 400) // 2
+        dialog.geometry(f"+{x}+{y}")
+        
+        # 主框架
+        main_frame = ttk.Frame(dialog, style="TFrame", padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 插件信息
+        info_frame = ttk.LabelFrame(main_frame, text="插件信息", padding=10)
+        info_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        info_text = f"""
+ID: {plugin_id}
+名称: {plugin_name}
+版本: {plugin_data.get('version', 'N/A')}
+作者: {plugin_data.get('author', 'N/A')}
+类型: {plugin_data.get('type', 'N/A')}
+状态: {plugin_data.get('state', 'N/A')}
+保护: {'是 (V5核心模块)' if plugin_data.get('is_protected') else '否'}
+        """.strip()
+        
+        info_label = ttk.Label(info_frame, text=info_text, justify=tk.LEFT)
+        info_label.pack(anchor=tk.W)
+        
+        # 配置区域（根据插件类型动态生成）
+        config_frame = ttk.LabelFrame(main_frame, text="插件配置", padding=10)
+        config_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        # 存储配置变量
+        config_vars: Dict[str, tk.Variable] = {}
+        
+        # 从ConfigManager加载插件配置
+        plugin_config = {}
+        config = self._get_config_manager()
+        if config:
+            # 插件配置路径: plugins.{plugin_id}.*
+            config_keys = config.list_keys(f"plugins.{plugin_id}")
+            for key in config_keys:
+                value = config.get(key)
+                plugin_config[key] = value
+        
+        # 如果没有配置，显示默认配置选项
+        if not plugin_config:
+            # 根据插件类型提供默认配置选项
+            default_configs = self._get_default_plugin_config(plugin_id, plugin_data.get('type', 'tool'))
+            
+            for config_key, config_info in default_configs.items():
+                row_frame = ttk.Frame(config_frame, style="TFrame")
+                row_frame.pack(fill=tk.X, pady=5)
+                
+                ttk.Label(row_frame, text=config_info['label'] + "：").pack(side=tk.LEFT)
+                
+                if config_info['type'] == 'string':
+                    var = tk.StringVar(value=config_info.get('default', ''))
+                    entry = ttk.Entry(row_frame, textvariable=var, width=30)
+                    entry.pack(side=tk.LEFT, padx=10)
+                    config_vars[config_key] = var
+                elif config_info['type'] == 'int':
+                    var = tk.IntVar(value=config_info.get('default', 0))
+                    spinbox = ttk.Spinbox(row_frame, from_=0, to=100, textvariable=var, width=10)
+                    spinbox.pack(side=tk.LEFT, padx=10)
+                    config_vars[config_key] = var
+                elif config_info['type'] == 'boolean':
+                    var = tk.BooleanVar(value=config_info.get('default', True))
+                    ttk.Checkbutton(row_frame, variable=var).pack(side=tk.LEFT, padx=10)
+                    config_vars[config_key] = var
+                elif config_info['type'] == 'choice':
+                    var = tk.StringVar(value=config_info.get('default', ''))
+                    combo = ttk.Combobox(row_frame, textvariable=var, values=config_info.get('choices', []), width=25)
+                    combo.pack(side=tk.LEFT, padx=10)
+                    config_vars[config_key] = var
+        else:
+            # 显示已有配置
+            for key, value in plugin_config.items():
+                row_frame = ttk.Frame(config_frame, style="TFrame")
+                row_frame.pack(fill=tk.X, pady=5)
+                
+                # 提取配置键名（去掉前缀）
+                display_key = key.replace(f"plugins.{plugin_id}.", "")
+                ttk.Label(row_frame, text=display_key + "：").pack(side=tk.LEFT)
+                
+                if isinstance(value, bool):
+                    var = tk.BooleanVar(value=value)
+                    ttk.Checkbutton(row_frame, variable=var).pack(side=tk.LEFT, padx=10)
+                    config_vars[key] = var
+                elif isinstance(value, int):
+                    var = tk.IntVar(value=value)
+                    spinbox = ttk.Spinbox(row_frame, from_=0, to=10000, textvariable=var, width=10)
+                    spinbox.pack(side=tk.LEFT, padx=10)
+                    config_vars[key] = var
+                else:
+                    var = tk.StringVar(value=str(value))
+                    entry = ttk.Entry(row_frame, textvariable=var, width=30)
+                    entry.pack(side=tk.LEFT, padx=10)
+                    config_vars[key] = var
+        
+        # 如果是保护模块，显示警告
+        if plugin_data.get('is_protected'):
+            warning_label = ttk.Label(
+                config_frame, 
+                text="⚠️ 此插件为V5核心保护模块，部分配置修改可能导致系统不稳定",
+                foreground=GlassTheme.WARNING
+            )
+            warning_label.pack(pady=10)
+        
+        # 按钮区域
+        btn_frame = ttk.Frame(main_frame, style="TFrame")
+        btn_frame.pack(fill=tk.X)
+        
+        def save_config():
+            """保存配置到ConfigManager"""
+            config = self._get_config_manager()
+            if config:
+                try:
+                    for key, var in config_vars.items():
+                        full_key = f"plugins.{plugin_id}.{key}" if not key.startswith("plugins.") else key
+                        value = var.get()
+                        config.set(full_key, value, source="user")
+                    
+                    # 保存到文件
+                    config._save_config()
+                    
+                    messagebox.showinfo("成功", "配置已保存")
+                    dialog.destroy()
+                except Exception as e:
+                    messagebox.showerror("错误", f"保存配置失败：{e}")
+            else:
+                messagebox.showwarning("提示", "ConfigManager不可用，无法保存配置")
+        
+        def reset_config():
+            """重置配置为默认值"""
+            for key, var in config_vars.items():
+                default_configs = self._get_default_plugin_config(plugin_id, plugin_data.get('type', 'tool'))
+                if key in default_configs:
+                    var.set(default_configs[key].get('default', ''))
+        
+        ttk.Button(btn_frame, text="保存", command=save_config).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="重置", command=reset_config).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+    
+    def _get_default_plugin_config(self, plugin_id: str, plugin_type: str) -> Dict[str, Dict]:
+        """获取插件的默认配置选项
+        
+        Args:
+            plugin_id: 插件ID
+            plugin_type: 插件类型
+            
+        Returns:
+            配置选项字典 {config_key: {label, type, default, choices}}
+        """
+        # 通用配置
+        common_config = {
+            "enabled": {
+                "label": "启用插件",
+                "type": "boolean",
+                "default": True
+            },
+            "log_level": {
+                "label": "日志级别",
+                "type": "choice",
+                "default": "INFO",
+                "choices": ["DEBUG", "INFO", "WARNING", "ERROR"]
+            }
+        }
+        
+        # 根据插件类型添加特定配置
+        type_specific_configs = {
+            "analyzer": {
+                "max_content_length": {
+                    "label": "最大内容长度",
+                    "type": "int",
+                    "default": 100000
+                },
+                "cache_enabled": {
+                    "label": "启用缓存",
+                    "type": "boolean",
+                    "default": True
+                }
+            },
+            "generator": {
+                "max_retries": {
+                    "label": "最大重试次数",
+                    "type": "int",
+                    "default": 3
+                },
+                "timeout": {
+                    "label": "超时时间(秒)",
+                    "type": "int",
+                    "default": 300
+                }
+            },
+            "validator": {
+                "strict_mode": {
+                    "label": "严格模式",
+                    "type": "boolean",
+                    "default": False
+                },
+                "min_score": {
+                    "label": "最低分数",
+                    "type": "int",
+                    "default": 60
+                }
+            },
+            "tool": {
+                "auto_start": {
+                    "label": "自动启动",
+                    "type": "boolean",
+                    "default": True
+                }
+            }
+        }
+        
+        # 合并配置
+        config = common_config.copy()
+        if plugin_type.lower() in type_specific_configs:
+            config.update(type_specific_configs[plugin_type.lower()])
+        
+        # 插件特定配置（例如大纲解析器的编码设置）
+        if plugin_id == "outline-parser-v3":
+            config["encoding"] = {
+                "label": "文件编码",
+                "type": "choice",
+                "default": "utf-8",
+                "choices": ["utf-8", "gbk", "gb2312", "big5"]
+            }
+        
+        return config
+    
+    def _on_reload_plugin(self) -> None:
+        """重新加载插件"""
+        plugin_data = self._get_selected_plugin()
+        if not plugin_data:
+            messagebox.showwarning("提示", "请先选择一个插件")
+            return
+        
+        plugin_id = plugin_data["id"]
+        
+        # 检查保护状态
+        if plugin_data.get("is_protected"):
+            messagebox.showwarning("警告", f"插件 '{plugin_id}' 是V5核心保护模块，禁止重新加载")
+            return
+        
+        # 确认对话框
+        if not messagebox.askyesno("确认", f"确定要重新加载插件 '{plugin_id}' 吗？"):
+            return
+        
+        # 调用PluginRegistry重新加载
+        registry = self._get_plugin_registry()
+        if registry:
+            try:
+                success, error = registry.reload_plugin_runtime(plugin_id)
+                if success:
+                    self._set_status(f"插件 '{plugin_id}' 已重新加载")
+                    self._load_plugins()  # 刷新列表
+                    messagebox.showinfo("成功", f"插件 '{plugin_id}' 已成功重新加载")
+                else:
+                    messagebox.showerror("失败", f"插件 '{plugin_id}' 重新加载失败：{error}")
+            except Exception as e:
+                messagebox.showerror("错误", f"重新加载插件时发生错误：{e}")
+        else:
+            messagebox.showwarning("提示", "PluginRegistry不可用")
+    
     def _on_install_plugin(self) -> None:
         """安装插件"""
-        self._set_status("安装插件功能准备中...")
+        # 选择插件包文件
+        file_path = filedialog.askopenfilename(
+            title="选择插件包",
+            filetypes=[("Plugin Package", "*.zip;*.tar.gz"), ("All Files", "*.*")]
+        )
+        
+        if not file_path:
+            return
+        
+        self._set_status(f"正在安装插件：{os.path.basename(file_path)}")
+        # TODO: 实现插件安装逻辑
+        messagebox.showinfo("提示", "插件安装功能开发中...")
     
     def _on_uninstall_plugin(self) -> None:
         """卸载插件"""
-        self._set_status("卸载插件功能准备中...")
+        plugin_data = self._get_selected_plugin()
+        if not plugin_data:
+            messagebox.showwarning("提示", "请先选择一个插件")
+            return
+        
+        plugin_id = plugin_data["id"]
+        
+        # 检查保护状态
+        if plugin_data.get("is_protected"):
+            messagebox.showwarning("警告", f"插件 '{plugin_id}' 是V5核心保护模块，禁止卸载")
+            return
+        
+        # 确认对话框
+        if not messagebox.askyesno("确认卸载", 
+            f"确定要卸载插件 '{plugin_id}' 吗？\n\n此操作将移除插件及其配置，且不可恢复！"):
+            return
+        
+        # 调用PluginRegistry卸载
+        registry = self._get_plugin_registry()
+        if registry:
+            try:
+                success, error = registry.unload_plugin_runtime(plugin_id)
+                if success:
+                    self._set_status(f"插件 '{plugin_id}' 已卸载")
+                    self._load_plugins()  # 刷新列表
+                    messagebox.showinfo("成功", f"插件 '{plugin_id}' 已成功卸载")
+                else:
+                    messagebox.showerror("失败", f"插件 '{plugin_id}' 卸载失败：{error}")
+            except Exception as e:
+                messagebox.showerror("错误", f"卸载插件时发生错误：{e}")
+        else:
+            messagebox.showwarning("提示", "PluginRegistry不可用")
     
     def _on_save_settings(self) -> None:
         """保存设置到config.yaml并应用"""
@@ -4346,7 +5287,7 @@ class MainWindow:
             "api_key": self._api_key_var.get(),
             "local_url": self._local_url_var.get(),
             "temperature": self._temp_var.get(),
-            "theme": self._theme_var.get(),
+            "theme": self._theme_var.get() if hasattr(self, '_theme_var') else "dark",
             "ai_learning": self._ai_learning_var.get() if hasattr(self, '_ai_learning_var') else True,
             "auto_save": True,
             "backup_interval": self._backup_interval_var.get() if hasattr(self, '_backup_interval_var') else "30",
@@ -4543,6 +5484,20 @@ class MainWindow:
     def run(self) -> None:
         """运行主窗口"""
         logger.info("Starting main window")
+        
+        # 关键：在mainloop之前强制更新窗口，确保窗口句柄可用
+        # 这样overrideredirect才能正确移除系统标题栏
+        self.root.update()
+        
+        # 窗口显示后重新应用无边框效果
+        try:
+            glass_mgr = GlassWindowManager(self.root)
+            # 直接设置overrideredirect，无需Windows API
+            self.root.overrideredirect(True)
+            logger.info("Frameless window applied after update")
+        except Exception as e:
+            logger.warning(f"Failed to apply frameless: {e}")
+        
         self.root.mainloop()
 
 
