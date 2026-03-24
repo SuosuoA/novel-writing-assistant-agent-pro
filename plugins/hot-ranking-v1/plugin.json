@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "id": "hot-ranking-v1",
+  "name": "热榜工具 V1",
+  "version": "1.0.0",
+  "description": "小说网站排行榜数据爬取和管理工具，支持番茄小说、起点中文网、晋江文学城",
+  "author": "项目组",
+  "plugin_type": "tool",
+  "api_version": "1.0",
+  "priority": 100,
+  "enabled": true,
+  "dependencies": [],
+  "conflicts": [
+    "hot-ranking-v2"
+  ],
+  "permissions": [
+    "network.request",
+    "file.read",
+    "file.write"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "HotRankingPlugin",
+  "signature": "e13f1b515299384c9fae66cde45903137ff2134190f0dcd990c92cb9cbf51928"
+}

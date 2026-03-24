@@ -1,8 +1,15 @@
 """
 MasterAgent总控调度器
 
-V2.0版本
+V2.1版本 - 安全加固
 创建日期: 2026-03-21
+更新日期: 2026-03-24
+
+安全修复:
+- P0-1: 任务payload输入验证，防止注入攻击
+- P0-2: 不可重试异常检测，防止资源耗尽
+- P1-1: 全局超时控制，防止嵌套任务超时累积
+- P1-2: 协作式取消机制
 
 特性:
 - ThreadPoolExecutor调度
@@ -20,7 +27,12 @@ from datetime import datetime, timezone
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
-from .priority import AgentTask, TaskPriority
+from .priority import (
+    AgentTask, 
+    TaskPriority, 
+    NON_RETRYABLE_EXCEPTIONS,
+    DEFAULT_GLOBAL_TIMEOUT,
+)
 from .task_queue import AgentTaskQueue
 from .dependency_resolver import DependencyResolver
 from .dependency_state import DependencyState
@@ -169,6 +181,25 @@ class MasterAgent:
         try:
             logger.info(f"开始执行任务: {task.task_id} " f"(Agent: {task.agent_type})")
 
+            # P1-1: 检查全局超时
+            if task.global_timeout_exceeded:
+                logger.warning(
+                    f"任务 {task.task_id} 已超过全局超时({task.global_timeout}s)，跳过执行"
+                )
+                self._dependency_state.mark_failed(task.task_id)
+                # 发布超时事件
+                self._event_bus.publish(
+                    "agent.task.global_timeout",
+                    {
+                        "task_id": task.task_id,
+                        "agent_type": task.agent_type,
+                        "global_timeout": task.global_timeout,
+                        "elapsed": task.age_seconds,
+                    },
+                    source="MasterAgent",
+                )
+                return
+
             # 从队列取出任务
             popped_task = self._task_queue.pop()
             if popped_task is None:
@@ -177,6 +208,12 @@ class MasterAgent:
 
             # 使用实际取出的任务
             task = popped_task
+
+            # P1-2: 检查任务是否被取消
+            if task.check_cancelled():
+                logger.info(f"任务 {task.task_id} 已被取消，跳过执行")
+                self._dependency_state.mark_failed(task.task_id)
+                return
 
             # 标记状态
             if not self._dependency_state.mark_in_progress(task.task_id):
@@ -228,10 +265,12 @@ class MasterAgent:
 
             except FutureTimeoutError:
                 logger.error(f"任务 {task.task_id} 执行超时")
+                task.last_exception = TimeoutError("Task execution timeout")
                 self._handle_task_failure(task, "执行超时", constraints)
 
             except Exception as e:
                 logger.error(f"任务 {task.task_id} 执行失败: {e}")
+                task.last_exception = e
                 self._handle_task_failure(task, str(e), constraints)
 
         except Exception as e:
@@ -241,13 +280,28 @@ class MasterAgent:
         self, task: AgentTask, error: str, constraints: Any
     ) -> None:
         """
-        处理任务失败
+        处理任务失败（V2.1安全加固版）
+
+        P0-2修复: 检查失败原因，避免不可重试错误无限重试
 
         Args:
             task: 任务对象
             error: 错误信息
             constraints: 约束配置
         """
+        # P0-2: 检查是否为不可重试的错误
+        if task.is_non_retryable_error:
+            error_type = type(task.last_exception).__name__
+            logger.warning(
+                f"任务 {task.task_id} 因不可重试错误失败: {error_type} - {error}"
+            )
+            # 直接标记失败，不重试
+            self._dependency_state.mark_failed(task.task_id)
+            
+            # 尝试降级策略
+            self._try_fallback_strategy(task, error, constraints)
+            return
+
         # 检查是否可以重试
         if task.can_retry:
             task.retry_count += 1
@@ -261,40 +315,67 @@ class MasterAgent:
         else:
             # 标记为失败
             self._dependency_state.mark_failed(task.task_id)
-
+            
             # 尝试降级策略
-            if constraints:
-                try:
-                    fallback_result = constraints.get_fallback_strategy()()
-                    logger.info(f"任务 {task.task_id} 使用降级策略")
-
-                    # 发布降级事件
-                    self._event_bus.publish(
-                        "agent.task.fallback",
-                        {
-                            "task_id": task.task_id,
-                            "agent_type": task.agent_type,
-                            "fallback_result": fallback_result,
-                        },
-                        source="MasterAgent",
-                    )
-                except Exception as fallback_e:
-                    logger.error(f"降级策略也失败: {fallback_e}")
-
-            # 发布失败事件
-            self._event_bus.publish(
-                "agent.task.failed",
-                {
-                    "task_id": task.task_id,
-                    "agent_type": task.agent_type,
-                    "error": error,
-                    "retry_count": task.retry_count,
-                },
-                source="MasterAgent",
-            )
+            self._try_fallback_strategy(task, error, constraints)
 
         # 唤醒调度循环
         self._task_event.set()
+    
+    def _try_fallback_strategy(
+        self, task: AgentTask, error: str, constraints: Any
+    ) -> None:
+        """
+        尝试执行降级策略
+
+        Args:
+            task: 任务对象
+            error: 错误信息
+            constraints: 约束配置
+        """
+        if not constraints:
+            # 无降级策略，发布失败事件
+            self._publish_failure_event(task, error)
+            return
+            
+        try:
+            fallback_result = constraints.get_fallback_strategy()()
+            logger.info(f"任务 {task.task_id} 使用降级策略")
+
+            # 发布降级事件
+            self._event_bus.publish(
+                "agent.task.fallback",
+                {
+                    "task_id": task.task_id,
+                    "agent_type": task.agent_type,
+                    "fallback_result": fallback_result,
+                },
+                source="MasterAgent",
+            )
+        except Exception as fallback_e:
+            logger.error(f"降级策略也失败: {fallback_e}")
+            self._publish_failure_event(task, error)
+    
+    def _publish_failure_event(self, task: AgentTask, error: str) -> None:
+        """
+        发布任务失败事件
+
+        Args:
+            task: 任务对象
+            error: 错误信息
+        """
+        # 发布失败事件
+        self._event_bus.publish(
+            "agent.task.failed",
+            {
+                "task_id": task.task_id,
+                "agent_type": task.agent_type,
+                "error": error,
+                "retry_count": task.retry_count,
+                "exception_type": type(task.last_exception).__name__ if task.last_exception else None,
+            },
+            source="MasterAgent",
+        )
 
     def submit_task(self, task: AgentTask) -> str:
         """
@@ -305,10 +386,31 @@ class MasterAgent:
 
         Returns:
             任务ID
+            
+        Raises:
+            ValueError: payload验证失败或依赖解析失败
         """
         # 生成任务ID（如果未提供）
         if not task.task_id:
             task.task_id = f"task-{uuid.uuid4().hex[:8]}"
+
+        # P0-1: 验证任务payload
+        try:
+            task.validate_payload()
+            logger.debug(f"任务 {task.task_id} payload验证通过")
+        except ValueError as e:
+            logger.error(f"任务 {task.task_id} payload验证失败: {e}")
+            # 记录审计日志
+            self._event_bus.publish(
+                "agent.task.validation_failed",
+                {
+                    "task_id": task.task_id,
+                    "agent_type": task.agent_type,
+                    "error": str(e),
+                },
+                source="MasterAgent",
+            )
+            raise
 
         with self._lock:
             # 添加到任务字典

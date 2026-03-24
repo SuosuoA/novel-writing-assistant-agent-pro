@@ -1,8 +1,12 @@
 """
 Agent任务优先级队列
 
-V2.0版本
+V2.1版本 - 安全加固
 创建日期: 2026-03-21
+更新日期: 2026-03-24
+
+安全修复:
+- P1-3: 添加队列容量限制，防止内存耗尽
 
 特性:
 - 堆排序实现优先级队列
@@ -12,39 +16,62 @@ V2.0版本
 
 import heapq
 import threading
+import logging
 from typing import Dict, List, Optional
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from .priority import AgentTask, TaskPriority
+from .priority import AgentTask, TaskPriority, MAX_TASK_QUEUE_SIZE
+
+logger = logging.getLogger(__name__)
 
 
 class AgentTaskQueue:
     """
-    Agent任务优先级队列
+    Agent任务优先级队列（V2.1安全加固版）
 
     使用堆排序实现，支持多级优先级
+    
+    P1-3修复: 添加容量限制，防止内存耗尽
     """
 
-    def __init__(self):
-        """初始化队列"""
+    def __init__(self, max_size: int = MAX_TASK_QUEUE_SIZE):
+        """
+        初始化队列
+
+        Args:
+            max_size: 队列最大容量（默认1000）
+        """
         self._queues: Dict[TaskPriority, List[tuple]] = defaultdict(list)
         self._task_map: Dict[str, AgentTask] = {}  # task_id -> task
         self._lock = threading.RLock()
+        self._max_size = max_size
+        self._rejected_count = 0  # 拒绝任务计数（用于监控）
 
     def push(self, task: AgentTask) -> bool:
         """
         添加任务到队列
 
+        P1-3修复: 添加容量检查，队列满时拒绝新任务
+
         Args:
             task: 任务对象
 
         Returns:
-            是否添加成功（任务已存在返回False）
+            是否添加成功（任务已存在或队列已满返回False）
         """
         with self._lock:
             # 检查是否已存在
             if task.task_id in self._task_map:
+                return False
+
+            # P1-3: 检查队列容量
+            if len(self._task_map) >= self._max_size:
+                self._rejected_count += 1
+                logger.warning(
+                    f"任务队列已满 ({self._max_size})，拒绝任务: {task.task_id} "
+                    f"(累计拒绝: {self._rejected_count})"
+                )
                 return False
 
             # 计算优先级分数: (priority, age_seconds)
@@ -53,6 +80,31 @@ class AgentTaskQueue:
             heapq.heappush(self._queues[task.priority], (priority_score, task.task_id))
             self._task_map[task.task_id] = task
             return True
+    
+    @property
+    def max_size(self) -> int:
+        """获取队列最大容量"""
+        return self._max_size
+    
+    @property
+    def rejected_count(self) -> int:
+        """获取拒绝任务计数"""
+        return self._rejected_count
+    
+    def get_stats(self) -> Dict[str, int]:
+        """
+        获取队列统计信息
+
+        Returns:
+            包含队列大小、容量、拒绝计数的字典
+        """
+        with self._lock:
+            return {
+                "size": len(self._task_map),
+                "max_size": self._max_size,
+                "rejected_count": self._rejected_count,
+                "utilization": len(self._task_map) / self._max_size if self._max_size > 0 else 0,
+            }
 
     def pop(self) -> Optional[AgentTask]:
         """

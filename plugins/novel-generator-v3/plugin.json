@@ -1,0 +1,25 @@
+{
+  "id": "novel-generator-v3",
+  "name": "小说生成器 V3",
+  "version": "3.0.0",
+  "description": "小说章节生成器V3，整合上下文构建、迭代生成、加权验证的完整流程",
+  "author": "项目组",
+  "plugin_type": "generator",
+  "api_version": "1.0",
+  "priority": 120,
+  "enabled": true,
+  "dependencies": [
+    "context-builder-v1",
+    "iterative-generator-v2",
+    "quality-validator-v1"
+  ],
+  "conflicts": [],
+  "permissions": [
+    "ai.call",
+    "file.read",
+    "file.write"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "NovelGeneratorPlugin",
+  "signature": "9e28585ab5d8531cb5d71700974d21e77c0d783abcde2895a738271f025c3f81"
+}

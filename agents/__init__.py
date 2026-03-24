@@ -1,8 +1,8 @@
 """
 Agent系统模块
 
-V2.0版本
-创建日期: 2026-03-21
+V2.1版本
+更新日期: 2026-03-24
 
 模块结构:
 - priority: 任务优先级定义
@@ -17,7 +17,10 @@ V2.0版本
 - agent_pool: Agent池管理
 - master_agent: MasterAgent总控调度器
 - adapters: V5模块适配器
+- plugins: 插件Agent（调用实际插件）
 - collaboration: Agent协作模式
+- pipeline_orchestrator: 流水线编排器（V2.1新增）
+- novel_generation_service: 小说生成服务（V2.1新增）
 """
 
 from .priority import AgentTask, TaskPriority
@@ -37,6 +40,32 @@ from .base_agent import BaseAgent
 from .agent_adapter import AgentAdapter
 from .agent_pool import AgentPool
 from .master_agent import MasterAgent
+
+# P0修复：导出plugins模块，支持 from agents.plugins import ... 导入
+from . import plugins
+
+# P0修复：从plugins模块导出4个Agent适配器，支持 from agents import OutlineAnalysisAgent 导入
+from .plugins import (
+    OutlineAnalysisAgent,
+    StyleLearningAgent,
+    NovelGenerationAgent,
+    QualityValidationAgent,
+)
+
+# P1修复：导出流水线相关类
+from .pipeline_orchestrator import (
+    PipelineOrchestrator,
+    PipelineState,
+    PipelineExecutionResult,
+    PipelineStageResult,
+    NovelGenerationConfig,
+    create_novel_generation_pipeline,
+)
+from .novel_generation_service import (
+    NovelGenerationService,
+    GenerationProgress,
+    get_generation_service,
+)
 
 __all__ = [
     # Priority
@@ -67,4 +96,21 @@ __all__ = [
     "AgentPool",
     # Master Agent
     "MasterAgent",
+    # P0修复：添加plugins模块导出
+    "plugins",
+    # P0修复：添加4个Agent适配器导出
+    "OutlineAnalysisAgent",
+    "StyleLearningAgent",
+    "NovelGenerationAgent",
+    "QualityValidationAgent",
+    # P1修复：添加流水线相关类导出
+    "PipelineOrchestrator",
+    "PipelineState",
+    "PipelineExecutionResult",
+    "PipelineStageResult",
+    "NovelGenerationConfig",
+    "create_novel_generation_pipeline",
+    "NovelGenerationService",
+    "GenerationProgress",
+    "get_generation_service",
 ]

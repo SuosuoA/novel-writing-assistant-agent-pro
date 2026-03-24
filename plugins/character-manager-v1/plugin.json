@@ -1,0 +1,22 @@
+{
+  "$schema": "../../schemas/plugin.schema.json",
+  "id": "character-manager-v1",
+  "name": "人物管理器 V1",
+  "version": "1.0.0",
+  "description": "人物设定管理器，提供人物创建、一致性检查、关系管理等功能",
+  "author": "项目组",
+  "plugin_type": "analyzer",
+  "api_version": "1.0",
+  "priority": 100,
+  "enabled": true,
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": [
+    "file.read",
+    "file.write"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "CharacterManagerPlugin",
+  "entry_module": "plugin",
+  "signature": "52e6d0ddf440a0faf2f51441d49d13f3c5da2573030e0ad6462cf45e98bb1dc7"
+}

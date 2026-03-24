@@ -1,0 +1,401 @@
+# 解决措施和参与人员清单
+
+> **项目**: Novel Writing Assistant-Agent Pro
+> **评估日期**: 2026-03-24
+> **评估类型**: Agent安全评估
+
+---
+
+## 一、发现的安全风险汇总
+
+### P0级问题（高危，必须立即修复）
+
+| 编号 | 问题 | 影响 | 修复工作量 | 责任人 |
+|------|------|------|-----------|--------|
+| P0-1 | Agent任务payload缺乏输入验证 | SQL注入、代码注入、路径遍历、敏感信息泄露 | 1天 | 安全工程师 |
+| P0-2 | 插件崩溃后无限重试导致资源耗尽 | 拒绝服务、资源耗尽、级联故障 | 0.5天 | 后端架构师 |
+
+### P1级问题（中危，应尽快修复）
+
+| 编号 | 问题 | 影响 | 修复工作量 | 责任人 |
+|------|------|------|-----------|--------|
+| P1-1 | 嵌套任务超时累积 | 用户等待时间不可预测、资源长时间占用 | 0.5天 | 后端架构师 |
+| P1-2 | ThreadPoolExecutor任务无法强制取消 | 超时后任务继续执行、资源泄漏 | 1天 | 后端架构师 |
+| P1-3 | 任务队列无容量限制 | 内存耗尽、拒绝服务 | 0.5天 | 后端架构师 |
+| P1-4 | Agent无权限模型 | 权限提升、越权执行 | 2天 | 安全工程师 |
+
+### P2级问题（低危，建议优化）
+
+| 编号 | 问题 | 影响 | 修复工作量 | 责任人 |
+|------|------|------|-----------|--------|
+| P2-1 | Agent注册/注销缺少审计日志 | 操作否认、审计追溯困难 | 0.5天 | 后端架构师 |
+| P2-2 | 错误处理差异导致信息泄露 | 错误堆栈包含敏感路径 | 1天 | 后端架构师 |
+| P2-3 | 依赖注入安全 | ServiceLocator可能被滥用 | 1天 | 后端架构师 |
+
+---
+
+## 二、详细解决措施
+
+### P0-1: Agent任务payload输入验证
+
+**修复位置**: `agents/master_agent.py:299-335` (submit_task方法)
+
+**修复方案**:
+
+1. **创建验证模型**（新文件 `agents/validation.py`）
+```python
+from pydantic import BaseModel, Field, field_validator
+import re
+
+class TaskPayload(BaseModel):
+    """任务payload验证模型"""
+    prompt: str = Field(..., min_length=1, max_length=10000)
+    options: Dict[str, Any] = Field(default_factory=dict)
+    
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, v: str) -> str:
+        # 检查危险模式
+        dangerous_patterns = [
+            r"__import__",
+            r"eval\s*\(",
+            r"exec\s*\(",
+            r"DROP\s+TABLE",
+            r"\.\./",  # 路径遍历
+            r"os\.system",
+            r"subprocess\.",
+        ]
+        for pattern in dangerous_patterns:
+            if re.search(pattern, v, re.IGNORECASE):
+                raise ValueError(f"Dangerous pattern detected: {pattern}")
+        
+        # 移除危险字符
+        v = re.sub(r'[<>\"\'\\]', '', v)
+        return v.strip()
+```
+
+2. **修改submit_task方法**
+```python
+from agents.validation import TaskPayload
+from pydantic import ValidationError
+
+def submit_task(self, task: AgentTask) -> str:
+    # ✅ 验证payload
+    try:
+        validated_payload = TaskPayload(**task.payload)
+        task.payload = validated_payload.model_dump()
+    except ValidationError as e:
+        logger.error(f"Invalid task payload: {e}")
+        raise ValueError(f"Payload validation failed: {e}")
+    
+    # ... 原有逻辑
+```
+
+**预期效果**: 防止SQL注入、代码注入、路径遍历等攻击
+
+**验证方法**: 编写单元测试，测试各种恶意payload
+
+---
+
+### P0-2: 插件崩溃重试控制
+
+**修复位置**: `agents/master_agent.py:240-297` (_handle_task_failure方法)
+
+**修复方案**:
+
+1. **定义不可重试异常类型**
+```python
+# agents/constants.py
+NON_RETRYABLE_ERRORS = (
+    ValueError,        # 输入验证错误
+    PermissionError,   # 权限错误
+    ImportError,       # 模块加载错误
+    SyntaxError,       # 语法错误
+    TypeError,         # 类型错误
+)
+```
+
+2. **修改_handle_task_failure方法**
+```python
+from agents.constants import NON_RETRYABLE_ERRORS
+
+def _handle_task_failure(self, task: AgentTask, error: str, constraints: Any) -> None:
+    # ✅ 检查失败原因
+    error_type = type(task.last_exception) if hasattr(task, 'last_exception') else None
+    
+    if error_type and issubclass(error_type, NON_RETRYABLE_ERRORS):
+        logger.warning(f"任务 {task.task_id} 因不可重试错误失败: {error_type.__name__}")
+        self._dependency_state.mark_failed(task.task_id)
+        # 直接使用降级策略
+        if constraints:
+            self._use_fallback_strategy(task, constraints)
+        return
+    
+    # ✅ 添加指数退避延迟
+    if task.can_retry:
+        import time
+        delay = min(2 ** task.retry_count, 60)  # 最大60秒
+        logger.info(f"任务 {task.task_id} 等待 {delay}秒后重试")
+        time.sleep(delay)
+        
+        task.retry_count += 1
+        self._task_queue.push(task)
+    else:
+        # ... 原有降级逻辑
+```
+
+**预期效果**: 避免无限重试导致的资源耗尽
+
+**验证方法**: 模拟插件崩溃，验证重试行为
+
+---
+
+### P1-1: 嵌套任务超时累积
+
+**修复位置**: `agents/priority.py` (AgentTask类)
+
+**修复方案**:
+
+1. **扩展AgentTask类**
+```python
+@dataclass
+class AgentTask:
+    # ... 原有字段
+    global_timeout: int = 60  # 全局超时限制（秒）
+    started_at: Optional[datetime] = None
+    
+    @property
+    def global_timeout_exceeded(self) -> bool:
+        """检查是否超过全局超时"""
+        if not self.started_at:
+            return False
+        elapsed = (datetime.now(timezone.utc) - self.started_at).total_seconds()
+        return elapsed > self.global_timeout
+```
+
+2. **修改_execute_task_sync方法**
+```python
+def _execute_task_sync(self, task: AgentTask) -> None:
+    # ✅ 检查全局超时
+    if task.global_timeout_exceeded:
+        logger.warning(f"任务 {task.task_id} 已超过全局超时，跳过执行")
+        self._dependency_state.mark_failed(task.task_id)
+        self._event_bus.publish(
+            "agent.task.global_timeout",
+            {"task_id": task.task_id, "elapsed": elapsed},
+            source="MasterAgent"
+        )
+        return
+    
+    # ... 原有逻辑
+```
+
+**预期效果**: 任务链总时间可控
+
+**验证方法**: 测试任务链执行时间
+
+---
+
+### P1-3: 任务队列容量限制
+
+**修复位置**: `agents/task_queue.py` (AgentTaskQueue类)
+
+**修复方案**:
+
+```python
+class AgentTaskQueue:
+    def __init__(self, max_size: int = 1000):
+        self._queues: Dict[TaskPriority, List[tuple]] = defaultdict(list)
+        self._task_map: Dict[str, AgentTask] = {}
+        self._lock = threading.RLock()
+        self._max_size = max_size  # ✅ 添加容量限制
+    
+    def push(self, task: AgentTask) -> bool:
+        with self._lock:
+            # ✅ 检查队列容量
+            if self.size() >= self._max_size:
+                logger.warning(
+                    f"任务队列已满 ({self._max_size})，拒绝任务: {task.task_id}"
+                )
+                return False
+            
+            # ... 原有逻辑
+```
+
+**预期效果**: 防止内存耗尽
+
+**验证方法**: 测试队列满时的拒绝行为
+
+---
+
+### P1-4: Agent权限模型
+
+**修复位置**: 新文件 `agents/permissions.py`
+
+**修复方案**:
+
+1. **定义权限枚举**
+```python
+from enum import Enum
+
+class AgentPermission(Enum):
+    """Agent权限枚举"""
+    READ = "read"          # 读取权限
+    WRITE = "write"        # 写入权限
+    EXECUTE = "execute"    # 执行权限
+    ADMIN = "admin"        # 管理权限
+
+# Agent默认权限配置
+DEFAULT_PERMISSIONS = {
+    "thinker": [AgentPermission.READ, AgentPermission.EXECUTE],
+    "optimizer": [AgentPermission.READ, AgentPermission.WRITE, AgentPermission.EXECUTE],
+    "validator": [AgentPermission.READ, AgentPermission.EXECUTE],
+    "planner": [AgentPermission.READ, AgentPermission.WRITE, AgentPermission.EXECUTE],
+}
+```
+
+2. **在AgentMetadata中添加permissions字段**
+```python
+@dataclass
+class AgentMetadata:
+    # ... 原有字段
+    permissions: List[AgentPermission] = field(default_factory=list)
+```
+
+3. **在MasterAgent中添加权限检查**
+```python
+def _check_permission(self, agent: BaseAgent, required_permission: AgentPermission) -> bool:
+    """检查Agent权限"""
+    if required_permission not in agent.metadata.permissions:
+        logger.warning(
+            f"Agent {agent.agent_type} 无 {required_permission.value} 权限"
+        )
+        self._event_bus.publish(
+            "agent.permission.denied",
+            {
+                "agent_type": agent.agent_type,
+                "required_permission": required_permission.value,
+            },
+            source="MasterAgent"
+        )
+        return False
+    return True
+```
+
+**预期效果**: 防止权限提升和越权执行
+
+**验证方法**: 测试Agent权限检查
+
+---
+
+## 三、参与人员清单
+
+### 评估团队
+
+| 角色 | 姓名 | 职责 | 联系方式 |
+|------|------|------|----------|
+| 安全工程师 | AI安全工程师 | 威胁建模、安全审查、渗透测试思维、报告编写 | - |
+| 后端架构师 | AI后端架构师 | 代码审查、架构安全评估、修复方案设计 | - |
+
+### 修复团队
+
+| 角色 | 姓名 | 职责 | 负责问题 |
+|------|------|------|----------|
+| 安全工程师 | AI安全工程师 | 实现安全验证和权限控制 | P0-1, P1-4, P2-1 |
+| 后端架构师 | AI后端架构师 | 实现资源限制和超时控制 | P0-2, P1-1, P1-2, P1-3, P2-2, P2-3 |
+
+### 审核团队
+
+| 角色 | 姓名 | 职责 | 审核内容 |
+|------|------|------|----------|
+| 技术文档工程师 | AI技术文档工程师 | 文档审核 | 安全评估报告、修复方案文档 |
+| 代码审查专家 | AI代码审查专家 | 代码审核 | 修复代码质量、安全性 |
+
+---
+
+## 四、修复进度跟踪
+
+### Sprint 1（本周）
+
+| 问题 | 状态 | 开始日期 | 完成日期 | 备注 |
+|------|------|----------|----------|------|
+| P0-1 | ⏳ 待开始 | - | - | 需创建验证模型 |
+| P0-2 | ⏳ 待开始 | - | - | 需修改重试逻辑 |
+
+### Sprint 2（下周）
+
+| 问题 | 状态 | 开始日期 | 完成日期 | 备注 |
+|------|------|----------|----------|------|
+| P1-1 | ⏳ 待开始 | - | - | 需扩展AgentTask类 |
+| P1-2 | ⏳ 待开始 | - | - | 需实现协作式取消 |
+| P1-3 | ⏳ 待开始 | - | - | 需修改AgentTaskQueue |
+| P1-4 | ⏳ 待开始 | - | - | 需创建权限模型 |
+
+### Sprint 3（按需）
+
+| 问题 | 状态 | 开始日期 | 完成日期 | 备注 |
+|------|------|----------|----------|------|
+| P2-1 | ⏳ 待开始 | - | - | 需添加审计日志 |
+| P2-2 | ⏳ 待开始 | - | - | 需统一错误处理 |
+| P2-3 | ⏳ 待开始 | - | - | 需增强ServiceLocator |
+
+---
+
+## 五、验证测试清单
+
+### 单元测试
+
+- [ ] 任务payload输入验证测试
+- [ ] 恶意pattern检测测试
+- [ ] 插件崩溃重试控制测试
+- [ ] 不可重试异常测试
+- [ ] 全局超时控制测试
+- [ ] 任务队列容量限制测试
+- [ ] Agent权限检查测试
+
+### 集成测试
+
+- [ ] 任务链执行时间测试
+- [ ] 资源耗尽场景测试
+- [ ] 权限越权场景测试
+- [ ] API超时场景测试
+- [ ] 插件崩溃场景测试
+
+### 安全测试
+
+- [ ] SQL注入测试
+- [ ] 代码注入测试
+- [ ] 路径遍历测试
+- [ ] DoS攻击测试
+- [ ] 权限提升测试
+
+---
+
+## 六、风险接受准则
+
+### 不可接受风险（必须修复）
+
+- **P0级问题**: 所有高危问题必须在发布前修复
+- **安全漏洞**: 任何可被利用的安全漏洞必须修复
+- **数据泄露风险**: 任何可能导致敏感信息泄露的问题必须修复
+
+### 可接受风险（可延后修复）
+
+- **P1级问题**: 可在下一个Sprint中修复
+- **P2级问题**: 可在后续版本中优化
+- **性能问题**: 可在性能优化阶段处理
+
+---
+
+## 七、交付物清单
+
+| 交付物 | 状态 | 路径 |
+|--------|------|------|
+| Agent安全评估报告 | ✅ 完成 | 经验文档/9.3Agent安全评估报告✅️.md |
+| 解决措施清单 | ✅ 完成 | 本文档 |
+| 验证测试代码 | ⏳ 待创建 | tests/test_agent_security.py |
+| 修复代码 | ⏳ 待实现 | agents/相关模块 |
+
+---
+
+**文档结束**

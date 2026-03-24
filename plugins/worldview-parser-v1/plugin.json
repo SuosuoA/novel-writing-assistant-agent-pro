@@ -1,0 +1,21 @@
+{
+  "$schema": "../../schemas/plugin.schema.json",
+  "id": "worldview-parser-v1",
+  "name": "世界观解析器 V1",
+  "version": "1.0.0",
+  "description": "通用世界观解析器，支持多种格式的世界观文件解析",
+  "author": "项目组",
+  "plugin_type": "analyzer",
+  "api_version": "1.0",
+  "priority": 100,
+  "enabled": true,
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": [
+    "file.read"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "WorldviewParserPlugin",
+  "entry_module": "plugin",
+  "signature": "5f2cff0e668f662200527e2f5bc8d525c4cff5247d6350fe6d22b6cf789f1dbb"
+}

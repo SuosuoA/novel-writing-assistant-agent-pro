@@ -147,6 +147,19 @@ from .bootstrap import (
     dispose_core_services,
 )
 
+# CacheManager（V1.4新增）
+from .cache_manager import (
+    CacheManager,
+    CacheConfig,
+    CacheEntry,
+    SimpleTTLCache,
+    generate_cache_key,
+    cached,
+    get_cache_manager,
+    init_cache_manager,
+    CACHETOOLS_AVAILABLE,
+)
+
 __all__ = [
     # EventBus
     "EventBus",
@@ -259,8 +272,18 @@ __all__ = [
     "get_bootstrap_service",
     "initialize_core_services",
     "dispose_core_services",
+    # CacheManager
+    "CacheManager",
+    "CacheConfig",
+    "CacheEntry",
+    "SimpleTTLCache",
+    "generate_cache_key",
+    "cached",
+    "get_cache_manager",
+    "init_cache_manager",
+    "CACHETOOLS_AVAILABLE",
 ]
 
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __author__ = "Novel Assistant Team"

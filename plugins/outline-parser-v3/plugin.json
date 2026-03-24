@@ -1,0 +1,23 @@
+{
+  "$schema": "../../schemas/plugin.schema.json",
+  "id": "outline-parser-v3",
+  "name": "大纲解析器 V3",
+  "version": "3.0.0",
+  "description": "基于LangChain和LLM的智能大纲解析，支持Markdown格式、层次化解析、LLM增强提取",
+  "author": "项目组",
+  "plugin_type": "analyzer",
+  "api_version": "1.0",
+  "priority": 100,
+  "enabled": true,
+  "dependencies": [],
+  "conflicts": [
+    "outline-parser-v1",
+    "outline-parser-v2"
+  ],
+  "permissions": [
+    "file.read"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "OutlineParserPlugin",
+  "signature": "41cdce72e6050934c7f91d73542a36228b8248af4d97e04af5182b6aa2c93105"
+}
