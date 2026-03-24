@@ -17,6 +17,7 @@ class AgentState(Enum):
     UNLOADED = "unloaded"  # 未加载
     LOADED = "loaded"  # 已加载(初始化中)
     ACTIVE = "active"  # 活跃(可接受任务)
+    BUSY = "busy"  # 忙碌(正在执行任务) - V2.1新增
     ERROR = "error"  # 错误(无法使用)
     SHUTTING_DOWN = "shutting_down"  # 正在关闭
 

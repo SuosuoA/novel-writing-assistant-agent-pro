@@ -1,0 +1,377 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://novel-writing-assistant-agent-pro.local/schemas/project.schema.json",
+  "title": "Project Schema",
+  "description": "Novel Writing Assistant-Agent Pro 项目文件Schema V1.0 - 支持章节管理和逆向反馈",
+  "type": "object",
+  "required": ["project_name", "created_at"],
+  "properties": {
+    "project_id": {
+      "type": "string",
+      "description": "项目唯一标识符",
+      "pattern": "^[a-zA-Z0-9-]+$",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "project_name": {
+      "type": "string",
+      "description": "项目名称",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "description": {
+      "type": "string",
+      "description": "项目描述",
+      "default": "",
+      "maxLength": 2048
+    },
+    "created_at": {
+      "type": "string",
+      "description": "创建时间（ISO 8601格式）",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "description": "最后更新时间（ISO 8601格式）",
+      "format": "date-time"
+    },
+    "author": {
+      "type": "string",
+      "description": "项目作者",
+      "default": "",
+      "maxLength": 128
+    },
+    "genre": {
+      "type": "string",
+      "description": "小说类型/题材",
+      "default": "",
+      "maxLength": 64,
+      "examples": ["玄幻", "都市", "科幻", "悬疑"]
+    },
+    "target_word_count": {
+      "type": "integer",
+      "description": "目标总字数",
+      "default": 0,
+      "minimum": 0
+    },
+    "current_word_count": {
+      "type": "integer",
+      "description": "当前总字数",
+      "default": 0,
+      "minimum": 0
+    },
+    "status": {
+      "type": "string",
+      "description": "项目状态",
+      "enum": ["draft", "in_progress", "completed", "paused", "archived"],
+      "default": "draft"
+    },
+    "chapters": {
+      "type": "array",
+      "description": "章节列表",
+      "items": {
+        "$ref": "#/definitions/chapter"
+      },
+      "default": []
+    },
+    "outline": {
+      "type": "string",
+      "description": "故事大纲",
+      "default": ""
+    },
+    "characters": {
+      "type": "array",
+      "description": "人物设定列表",
+      "items": {
+        "$ref": "#/definitions/character"
+      },
+      "default": []
+    },
+    "worldview": {
+      "type": "string",
+      "description": "世界观设定",
+      "default": ""
+    },
+    "style_reference": {
+      "type": "string",
+      "description": "风格参考文本（用于风格学习）",
+      "default": ""
+    },
+    "consistency_reports": {
+      "type": "array",
+      "description": "一致性分析报告历史",
+      "items": {
+        "$ref": "#/definitions/consistency_report"
+      },
+      "default": []
+    },
+    "metadata": {
+      "type": "object",
+      "description": "扩展元数据",
+      "additionalProperties": true,
+      "default": {}
+    }
+  },
+  "definitions": {
+    "chapter": {
+      "type": "object",
+      "description": "章节定义",
+      "required": ["id", "title"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "章节唯一标识符",
+          "pattern": "^chap_[a-zA-Z0-9]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "章节标题",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "content": {
+          "type": "string",
+          "description": "章节内容",
+          "default": ""
+        },
+        "word_count": {
+          "type": "integer",
+          "description": "章节字数",
+          "default": 0,
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "description": "章节状态",
+          "enum": ["draft", "generated", "verified", "revised", "finalized"],
+          "default": "draft"
+        },
+        "created_at": {
+          "type": "string",
+          "description": "创建时间",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "description": "最后更新时间",
+          "format": "date-time"
+        },
+        "generation_params": {
+          "type": "object",
+          "description": "生成参数（用于续写参考）",
+          "properties": {
+            "temperature": {
+              "type": "number",
+              "description": "温度参数",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "model": {
+              "type": "string",
+              "description": "使用的模型"
+            },
+            "style_direction": {
+              "type": "string",
+              "description": "风格方向"
+            }
+          }
+        },
+        "notes": {
+          "type": "string",
+          "description": "章节备注",
+          "default": ""
+        },
+        "order": {
+          "type": "integer",
+          "description": "章节顺序",
+          "default": 0,
+          "minimum": 0
+        }
+      }
+    },
+    "character": {
+      "type": "object",
+      "description": "人物设定定义",
+      "required": ["name"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "人物唯一标识符",
+          "pattern": "^char_[a-zA-Z0-9]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "人物姓名",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "gender": {
+          "type": "string",
+          "description": "性别",
+          "enum": ["男", "女", "其他", "未知"],
+          "default": "未知"
+        },
+        "age": {
+          "type": "integer",
+          "description": "年龄",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "personality": {
+          "type": "string",
+          "description": "性格描述",
+          "default": ""
+        },
+        "background": {
+          "type": "string",
+          "description": "背景故事",
+          "default": ""
+        },
+        "ability": {
+          "type": "string",
+          "description": "能力/技能",
+          "default": ""
+        },
+        "appearance": {
+          "type": "string",
+          "description": "外貌描述",
+          "default": ""
+        },
+        "relationships": {
+          "type": "array",
+          "description": "人物关系",
+          "items": {
+            "type": "object",
+            "properties": {
+              "target_char_id": {
+                "type": "string",
+                "description": "关联人物ID"
+              },
+              "relation_type": {
+                "type": "string",
+                "description": "关系类型"
+              }
+            }
+          },
+          "default": []
+        },
+        "first_appear_chapter": {
+          "type": "string",
+          "description": "首次出场章节ID"
+        },
+        "tags": {
+          "type": "array",
+          "description": "人物标签",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "consistency_report": {
+      "type": "object",
+      "description": "一致性分析报告",
+      "required": ["report_id"],
+      "properties": {
+        "report_id": {
+          "type": "string",
+          "description": "报告唯一标识符"
+        },
+        "project_name": {
+          "type": "string",
+          "description": "项目名称"
+        },
+        "chapters_analyzed": {
+          "type": "integer",
+          "description": "分析的章节数量",
+          "minimum": 0
+        },
+        "issues": {
+          "type": "array",
+          "description": "冲突项列表",
+          "items": {
+            "$ref": "#/definitions/consistency_issue"
+          }
+        },
+        "summary": {
+          "type": "string",
+          "description": "分析摘要"
+        },
+        "analyzed_at": {
+          "type": "string",
+          "description": "分析时间",
+          "format": "date-time"
+        },
+        "high_priority_count": {
+          "type": "integer",
+          "description": "高优先级冲突数量",
+          "minimum": 0
+        },
+        "medium_priority_count": {
+          "type": "integer",
+          "description": "中等优先级冲突数量",
+          "minimum": 0
+        },
+        "low_priority_count": {
+          "type": "integer",
+          "description": "低优先级冲突数量",
+          "minimum": 0
+        }
+      }
+    },
+    "consistency_issue": {
+      "type": "object",
+      "description": "冲突项定义",
+      "required": ["issue_id", "issue_type", "severity"],
+      "properties": {
+        "issue_id": {
+          "type": "string",
+          "description": "冲突项唯一标识符"
+        },
+        "issue_type": {
+          "type": "string",
+          "description": "冲突类型",
+          "enum": ["outline", "character", "worldview"]
+        },
+        "severity": {
+          "type": "string",
+          "description": "严重程度",
+          "enum": ["low", "medium", "high"]
+        },
+        "description": {
+          "type": "string",
+          "description": "冲突描述"
+        },
+        "suggested_fix": {
+          "type": "string",
+          "description": "建议修正方案"
+        },
+        "original_content": {
+          "type": "string",
+          "description": "原始设定内容"
+        },
+        "chapter_reference": {
+          "type": "string",
+          "description": "引发冲突的章节ID或标题"
+        },
+        "detected_at": {
+          "type": "string",
+          "description": "检测时间",
+          "format": "date-time"
+        },
+        "element_name": {
+          "type": "string",
+          "description": "冲突涉及的元素名称"
+        },
+        "confidence": {
+          "type": "number",
+          "description": "检测置信度",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

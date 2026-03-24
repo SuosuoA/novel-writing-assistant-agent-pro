@@ -1,0 +1,22 @@
+{
+  "id": "iterative-generator-v2",
+  "name": "迭代生成器 V2",
+  "version": "2.0.0",
+  "description": "迭代优化的章节生成器，支持评分反馈循环优化",
+  "author": "项目组",
+  "plugin_type": "generator",
+  "api_version": "1.0",
+  "priority": 110,
+  "enabled": true,
+  "dependencies": [
+    "quality-validator-v1"
+  ],
+  "conflicts": [],
+  "permissions": [
+    "ai.call",
+    "file.write"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "IterativeGeneratorPlugin",
+  "signature": "8b599064a870e3ee6667700f206713c3984b220f2fb2f2403c2012bef144dccc"
+}

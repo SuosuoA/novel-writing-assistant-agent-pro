@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "id": "quality-validator-v1",
+  "name": "质量验证器 V1",
+  "version": "1.0.0",
+  "description": "6维度加权评分验证器，用于章节内容质量评估",
+  "author": "项目组",
+  "plugin_type": "validator",
+  "api_version": "1.0",
+  "priority": 100,
+  "enabled": true,
+  "dependencies": [],
+  "conflicts": [
+    "quality-validator-v2"
+  ],
+  "permissions": [
+    "file.read"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "QualityValidatorPlugin",
+  "signature": "98c8ea2f74048eb4d960e9cf99a92063ae9078eb769d33f03574938fb2930cf9"
+}

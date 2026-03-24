@@ -1,0 +1,21 @@
+{
+  "$schema": "../../schemas/plugin.schema.json",
+  "id": "reverse-feedback-analyzer",
+  "name": "逆向反馈分析器",
+  "version": "1.1.0",
+  "description": "分析已生成章节与项目设定（大纲、人物、世界观）的一致性，利用AI进行深度语义比对，检测冲突并生成修正建议",
+  "author": "项目组",
+  "plugin_type": "analyzer",
+  "api_version": "1.0",
+  "priority": 100,
+  "enabled": true,
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": [
+    "ai.call",
+    "file.read",
+    "file.write"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "ReverseFeedbackAnalyzerPlugin"
+}

@@ -1,0 +1,20 @@
+{
+  "id": "context-builder-v1",
+  "name": "上下文构建器 V1",
+  "version": "1.0.0",
+  "description": "智能上下文构建器，基于RAG和智能检索构建优化的提示词",
+  "author": "项目组",
+  "plugin_type": "generator",
+  "api_version": "1.0",
+  "priority": 100,
+  "enabled": true,
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": [
+    "file.read",
+    "ai.call"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "ContextBuilderPlugin",
+  "signature": "cb46b9556ceaf38500f023eeecbd8706533318009993411d881c5214a483780a"
+}

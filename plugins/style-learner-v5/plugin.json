@@ -1,0 +1,23 @@
+{
+  "$schema": "../../schemas/plugin.schema.json",
+  "id": "style-learner-v5",
+  "name": "风格学习器 V5",
+  "version": "5.0.0",
+  "description": "深度风格分析，包括词汇特征、句式模式、修辞手法、情感色彩、语言风格等全方位分析",
+  "author": "项目组",
+  "plugin_type": "analyzer",
+  "api_version": "1.0",
+  "priority": 100,
+  "enabled": true,
+  "dependencies": [],
+  "conflicts": [
+    "style-learner-v1",
+    "style-learner-v2"
+  ],
+  "permissions": [
+    "file.read"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "StyleLearnerPlugin",
+  "signature": "6c867a73be23e3874a353bbda60e7b57bf92bab4a4b0b1a28288baafeb9e2d0b"
+}
