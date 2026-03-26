@@ -405,7 +405,7 @@ git push origin feature/your-feature-name
 
 **秒速五厘米** | 青海 西宁
 
-![微信二维码](./经验文档/微信二维码.jpg)
+![微信二维码](经验文档/微信二维码.jpg)
 
 ---
 
