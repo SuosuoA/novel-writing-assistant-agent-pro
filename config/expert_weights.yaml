@@ -1,0 +1,83 @@
+# 专家模式权重配置文件
+# 版本: 2.0
+# 创建日期: 2026-03-29
+# 描述: 九维度智能评分权重配置
+
+version: "2.0"
+description: "专家模式9维度评分权重"
+
+# 评分维度权重配置
+weights:
+  # 继承自V1.1的维度
+  worldview: 0.12          # 世界观一致性（12%）
+  character: 0.19          # 人设一致性（19%）
+  outline: 0.13            # 大纲符合度（13%）
+  style: 0.19              # 风格匹配度（19%）
+  word_count: 0.08         # 字数达标率（8%）
+  
+  # V2.0新增/调整的维度
+  context_continuation: 0.08   # 上下文衔接（8%，原reverse_feedback调整）
+  knowledge_base: 0.08         # 知识库引用（8%，原knowledge_reference调整）
+  writing_technique: 0.08      # 写作技巧应用（8%，全新维度）
+  ai_sense: 0.05               # AI感检测（5%，原naturalness调整）
+
+# 强制检查项（一票否决）
+mandatory_checks:
+  chapter_end_marker:
+    enabled: true
+    description: "章节必须以【本章完】结尾"
+    patterns:
+      - "【本章完】"
+      - "[本章完]"
+      - "（本章完）"
+      - "(本章完)"
+      - "本章完"
+    check_range: 100       # 检查最后100个字符
+    on_failure: "force_zero_score"  # 失败时强制返回0分
+
+# 质量阈值配置
+thresholds:
+  excellent: 0.9           # 优秀
+  good: 0.8                # 良好（达标）
+  acceptable: 0.6          # 可接受
+  poor: 0.4                # 较差
+
+# 迭代配置
+iteration:
+  max_iterations: 5        # 最大迭代次数
+  min_improvement: 0.05    # 最小改进阈值
+
+# 降级配置
+fallback:
+  validator_failure:
+    use_parent_class: true     # 使用父类评分器
+    default_score: 0.5         # 默认分数
+  
+  local_model_failure:
+    use_jaccard: true          # 使用Jaccard相似度
+    use_string_match: true     # 使用字符串匹配
+  
+  memory_failure:
+    disable_memory: true       # 禁用记忆功能
+    use_cache_only: true       # 仅使用缓存
+
+# 元数据
+metadata:
+  created_at: "2026-03-29"
+  updated_at: "2026-03-29"
+  author: "后端架构师"
+  version: "2.0"
+  description: |
+    九维度智能评分权重配置
+    
+    设计原则:
+    1. 继承不破坏 - 保留V1.1版本的核心维度
+    2. 扩展不冲突 - 新增维度不影响现有维度
+    3. 强制检查 - 【本章完】标记缺失即失败
+    
+    权重分布:
+    - 世界观+人设+大纲+风格 = 63%（核心创作质量）
+    - 知识库+写作技巧 = 16%（专业度）
+    - 字数+上下文衔接 = 16%（完整性）
+    - AI感 = 5%（自然度）
+    - 总计 = 100%

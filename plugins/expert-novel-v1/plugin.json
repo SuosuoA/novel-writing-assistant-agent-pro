@@ -1,0 +1,37 @@
+{
+  "id": "expert-novel-v1",
+  "name": "小说创作专家",
+  "version": "1.0.0",
+  "description": "专门优化小说创作质量，整合世界观/人设/大纲/风格/知识库/写作技巧",
+  "author": "Agent Pro Team",
+  "plugin_type": "generator",
+  "expert_type": "novel_creation",
+  "capabilities": [
+    "worldview_integration",
+    "character_enhancement",
+    "outline_alignment",
+    "style_optimization",
+    "knowledge_injection",
+    "technique_application"
+  ],
+  "evaluation_dimensions": {
+    "世界观": 0.12,
+    "人设": 0.19,
+    "大纲": 0.13,
+    "风格": 0.19,
+    "知识库": 0.08,
+    "写作技巧": 0.08,
+    "字数": 0.08,
+    "上下文衔接": 0.08,
+    "AI感": 0.05
+  },
+  "dependencies": [
+    "novel-generator-v3",
+    "iterative-generator-v2",
+    "enhanced-weighted-validator"
+  ],
+  "enabled": true,
+  "priority": 10,
+  "timeout": 300,
+  "retry_count": 3
+}

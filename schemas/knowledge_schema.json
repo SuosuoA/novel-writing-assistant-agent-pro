@@ -1,0 +1,266 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Knowledge Point Schema",
+  "description": "知识点数据结构定义 - OpenClaw文件即真相原则",
+  "version": "1.0.0",
+  "type": "object",
+  
+  "definitions": {
+    "knowledge_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+-[a-z0-9]+-[0-9]{3,}$",
+      "description": "知识点唯一标识，格式：{category}-{domain}-{序号}，如scifi-physics-001",
+      "examples": ["scifi-physics-001", "xuanhuan-religion-015", "history-events-203"]
+    },
+    
+    "category": {
+      "type": "string",
+      "enum": ["scifi", "xuanhuan", "history", "general", "writing_technique"],
+      "description": "知识库分类：scifi（科幻）、xuanhuan（玄幻）、history（历史）、general（通用）、writing_technique（写作技巧）"
+    },
+    
+    "domain": {
+      "type": "string",
+      "description": "知识领域，如physics（物理学）、chemistry（化学）、religion（宗教）、mythology（神话）等"
+    },
+    
+    "title": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 100,
+      "description": "知识点标题，简洁明了"
+    },
+    
+    "content": {
+      "type": "string",
+      "minLength": 50,
+      "maxLength": 5000,
+      "description": "知识点详细内容，支持Markdown格式"
+    },
+    
+    "keywords": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 20
+      },
+      "minItems": 2,
+      "maxItems": 10,
+      "description": "关键词列表，用于检索匹配"
+    },
+    
+    "embedding": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "description": "向量嵌入（由OpenAI text-embedding-3-small或本地模型生成），维度：OpenAI 1536维 / 本地模型 384维"
+    },
+    
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "参考来源，如《三体》《星际穿越》等"
+    },
+    
+    "difficulty": {
+      "type": "string",
+      "enum": ["basic", "intermediate", "advanced"],
+      "default": "intermediate",
+      "description": "知识难度：basic（基础）、intermediate（中级）、advanced（高级）"
+    },
+    
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "自定义标签，如硬科幻、软科幻、东方玄幻、西方奇幻等"
+    },
+    
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "知识来源，如用户输入、网络爬取、专家贡献等"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.8,
+          "description": "知识置信度，0-1之间"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["zh", "en", "mixed"],
+          "default": "zh",
+          "description": "语言：zh（中文）、en（英文）、mixed（混合）"
+        },
+        "author": {
+          "type": "string",
+          "description": "知识点贡献者"
+        },
+        "reference_type": {
+          "type": "string",
+          "enum": ["implicit", "explicit", "constraint", "mandatory"],
+          "default": "implicit",
+          "description": "引用类型：implicit（隐式引用）、explicit（显式引用）、constraint（约束检查）、mandatory（强制遵循，仅写作技巧）"
+        },
+        "priority": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.5,
+          "description": "知识点优先级，0-1之间。写作技巧mandatory类型固定为1.0"
+        }
+      }
+    }
+  },
+  
+  "properties": {
+    "knowledge_id": {
+      "$ref": "#/definitions/knowledge_id"
+    },
+    "category": {
+      "$ref": "#/definitions/category"
+    },
+    "domain": {
+      "$ref": "#/definitions/domain"
+    },
+    "title": {
+      "$ref": "#/definitions/title"
+    },
+    "content": {
+      "$ref": "#/definitions/content"
+    },
+    "keywords": {
+      "$ref": "#/definitions/keywords"
+    },
+    "embedding": {
+      "$ref": "#/definitions/embedding"
+    },
+    "references": {
+      "$ref": "#/definitions/references"
+    },
+    "difficulty": {
+      "$ref": "#/definitions/difficulty"
+    },
+    "tags": {
+      "$ref": "#/definitions/tags"
+    },
+    "metadata": {
+      "$ref": "#/definitions/metadata"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "创建时间，ISO 8601格式"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "更新时间，ISO 8601格式"
+    }
+  },
+  
+  "required": [
+    "knowledge_id",
+    "category",
+    "domain",
+    "title",
+    "content",
+    "keywords",
+    "created_at",
+    "updated_at"
+  ],
+  
+  "additionalProperties": false,
+  
+  "examples": [
+    {
+      "knowledge_id": "scifi-physics-001",
+      "category": "scifi",
+      "domain": "physics",
+      "title": "时间膨胀效应",
+      "content": "根据狭义相对论，当物体接近光速运动时，时间流速会变慢。这一效应被称为时间膨胀。\n\n时间膨胀公式：Δt' = Δt / √(1 - v²/c²)\n\n其中：\n- Δt' 为运动参考系中的时间\n- Δt 为静止参考系中的时间\n- v 为物体运动速度\n- c 为光速\n\n**实际应用**：\n- GPS卫星需要校正时间膨胀效应，否则定位误差会累积\n- 星际旅行中，飞船内的时间流逝比地球慢\n\n**科幻创作提示**：\n- 双生子悖论：飞船上的人回来后比地球上的兄弟年轻\n- 星际通讯延迟：由于时间膨胀，实时通讯变得不可能",
+      "keywords": ["相对论", "时间", "光速", "时间膨胀", "狭义相对论"],
+      "embedding": [0.123, 0.456, 0.789],
+      "references": ["《三体》", "《星际穿越》", "《相对论》"],
+      "difficulty": "intermediate",
+      "tags": ["硬科幻", "物理学", "相对论"],
+      "metadata": {
+        "source": "expert",
+        "confidence": 0.95,
+        "language": "zh",
+        "author": "后端架构师"
+      },
+      "created_at": "2026-03-25T19:00:00+08:00",
+      "updated_at": "2026-03-25T19:00:00+08:00"
+    },
+    {
+      "knowledge_id": "xuanhuan-religion-001",
+      "category": "xuanhuan",
+      "domain": "religion",
+      "title": "道教丹道修炼体系",
+      "content": "道教丹道是道教修炼的核心方法，分为外丹和内丹两大体系。\n\n**外丹术**：\n- 炼制金石药物以求长生\n- 代表著作：《周易参同契》《抱朴子》\n- 常见丹药：金丹、神丹、还丹\n\n**内丹术**：\n- 以人体为鼎炉，精气神为药物\n- 修炼阶段：炼精化气 → 炼气化神 → 炼神还虚\n- 三宝：精、气、神\n\n**玄幻创作应用**：\n- 修仙等级体系：练气、筑基、金丹、元婴、化神\n- 突破瓶颈：心魔、雷劫、天地规则\n- 丹药系统：筑基丹、金丹、渡劫丹",
+      "keywords": ["道教", "丹道", "修炼", "内丹", "外丹", "修仙"],
+      "embedding": [0.234, 0.567, 0.890],
+      "references": ["《道德经》", "《抱朴子》", "《周易参同契》"],
+      "difficulty": "intermediate",
+      "tags": ["东方玄幻", "修仙", "道教"],
+      "metadata": {
+        "source": "literature",
+        "confidence": 0.85,
+        "language": "zh",
+        "author": "后端架构师"
+      },
+      "created_at": "2026-03-25T19:00:00+08:00",
+      "updated_at": "2026-03-25T19:00:00+08:00"
+    },
+    {
+      "knowledge_id": "history-events-001",
+      "category": "history",
+      "domain": "events",
+      "title": "赤壁之战",
+      "content": "赤壁之战是东汉末年孙权、刘备联军于建安十三年（208年）在长江赤壁一带大破曹操大军的战役。\n\n**战役背景**：\n- 曹操统一北方后南下，意图统一天下\n- 孙刘联盟抵抗曹操\n- 双方兵力对比：曹军约20万，孙刘联军约5万\n\n**战役过程**：\n- 周瑜采用火攻计策\n- 黄盖诈降，火船突袭\n- 曹军战船被烧，大败而归\n\n**历史影响**：\n- 奠定三国鼎立格局\n- 曹操统一中国的计划失败\n- 孙权巩固江东，刘备占据荆州\n\n**历史小说创作提示**：\n- 人物塑造：诸葛亮的智慧、周瑜的谋略、曹操的野心\n- 战争描写：火攻的壮观、战船的燃烧、士兵的溃逃\n- 权谋斗争：诈降计、反间计、苦肉计",
+      "keywords": ["赤壁之战", "三国", "周瑜", "诸葛亮", "火攻", "曹操"],
+      "embedding": [0.345, 0.678, 0.901],
+      "references": ["《三国志》", "《三国演义》", "《资治通鉴》"],
+      "difficulty": "basic",
+      "tags": ["历史", "战争", "三国"],
+      "metadata": {
+        "source": "history",
+        "confidence": 0.95,
+        "language": "zh",
+        "author": "后端架构师"
+      },
+      "created_at": "2026-03-25T19:00:00+08:00",
+      "updated_at": "2026-03-25T19:00:00+08:00"
+    },
+    {
+      "knowledge_id": "general-philosophy-001",
+      "category": "general",
+      "domain": "philosophy",
+      "title": "电车难题",
+      "content": "电车难题是伦理学中最著名的思想实验之一，由哲学家菲利帕·福特于1967年提出。\n\n**经典场景**：\n一辆失控的电车即将撞上轨道上的5个人。你可以拉动拉杆，让电车转向另一条轨道，但那条轨道上也有1个人。你是否应该拉动拉杆？\n\n**哲学争议**：\n- **功利主义**：应该拉动拉杆，牺牲1人救5人，追求最大多数人的最大幸福\n- **义务论**：不应该拉动拉杆，主动杀人违反道德义务，即使结果是好的\n- **美德伦理**：关注行为者的品格，而非行为本身\n\n**变体场景**：\n- 胖子变体：把胖子推下桥阻止电车\n- 医生变体：杀死1个健康人，移植器官救5个病人\n- AI驾驶：自动驾驶汽车在紧急情况下的选择\n\n**小说创作应用**：\n- 道德困境设置：主角面临两难选择\n- 人物性格塑造：不同选择体现不同价值观\n- 情节冲突：价值观碰撞引发的矛盾",
+      "keywords": ["电车难题", "伦理学", "道德困境", "功利主义", "义务论"],
+      "embedding": [0.456, 0.789, 0.012],
+      "references": ["《伦理学》", "《功利主义》", "菲利帕·福特论文"],
+      "difficulty": "intermediate",
+      "tags": ["哲学", "伦理", "道德困境"],
+      "metadata": {
+        "source": "philosophy",
+        "confidence": 0.9,
+        "language": "zh",
+        "author": "后端架构师"
+      },
+      "created_at": "2026-03-25T19:00:00+08:00",
+      "updated_at": "2026-03-25T19:00:00+08:00"
+    }
+  ]
+}

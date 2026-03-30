@@ -17,6 +17,5 @@
     "file.read"
   ],
   "min_platform_version": "6.0.0",
-  "entry_class": "QualityValidatorPlugin",
-  "signature": "98c8ea2f74048eb4d960e9cf99a92063ae9078eb769d33f03574938fb2930cf9"
+  "entry_class": "QualityValidatorPlugin"
 }

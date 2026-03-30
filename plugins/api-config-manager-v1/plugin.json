@@ -1,0 +1,63 @@
+{
+  "id": "api-config-manager-v1",
+  "name": "API配置管理器",
+  "version": "1.0.0",
+  "description": "全局API配置管理，支持加密存储和实时同步",
+  "author": "Novel Writing Assistant Team",
+  "category": "tool",
+  "priority": 100,
+  "dependencies": [],
+  "provides": [
+    "api.config.get",
+    "api.config.save",
+    "api.config.test",
+    "api.keys.backup",
+    "api.keys.restore"
+  ],
+  "subscribes": [],
+  "config_schema": {
+    "service_mode": {
+      "type": "string",
+      "enum": [
+        "local",
+        "remote"
+      ],
+      "default": "remote"
+    },
+    "provider": {
+      "type": "string",
+      "enum": [
+        "DeepSeek",
+        "OpenAI",
+        "Anthropic",
+        "Ollama"
+      ],
+      "default": "DeepSeek"
+    },
+    "model": {
+      "type": "string",
+      "default": "deepseek-chat"
+    },
+    "temperature": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 2,
+      "default": 0.7
+    }
+  },
+  "security": {
+    "requires_encryption": true,
+    "handles_secrets": true,
+    "permission_level": "high"
+  },
+  "ui_integration": {
+    "settings_page": true,
+    "menu_items": [
+      {
+        "label": "API配置",
+        "action": "open_settings",
+        "icon": "settings"
+      }
+    ]
+  }
+}

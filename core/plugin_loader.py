@@ -509,11 +509,17 @@ class PluginLoader:
                 self._registry.register(plugin_id, metadata, instance)
 
                 # 初始化插件
-                context = {
-                    "event_bus": self._event_bus,
-                    "registry": self._registry,
-                    "loader": self,
-                }
+                # 创建PluginContext对象
+                from .plugin_interface import PluginContext
+                from .config_manager import get_config_manager
+                from .service_locator import get_service_locator
+                
+                context = PluginContext(
+                    event_bus=self._event_bus,
+                    service_locator=get_service_locator(),
+                    config_manager=get_config_manager(),
+                    plugin_registry=self._registry,
+                )
 
                 if hasattr(instance, "initialize"):
                     instance.initialize(context)

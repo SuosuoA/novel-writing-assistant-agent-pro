@@ -77,7 +77,23 @@ class PluginInfo(BaseModel):
 
 
 class ValidationScores(BaseModel):
-    """验证评分"""
+    """验证评分（V1.7版本 - 8维度评分体系）
+
+    权重分配（V1.7版本）：
+    - 字数: 8%
+    - 知识点引用: 8%
+    - 大纲: 13%
+    - 风格: 19%
+    - 人设: 19%
+    - 世界观: 12%
+    - 逆向反馈: 11%
+    - 自然度: 10%
+    总计: 100%
+
+    新增维度说明：
+    - knowledge_reference_score: 知识点引用评分（从知识库召回知识点并在生成中引用）
+    - reverse_feedback_score: 逆向反馈评分（章节与已设定内容的一致性检查）
+    """
 
     model_config = ConfigDict(frozen=False)
 
@@ -87,20 +103,112 @@ class ValidationScores(BaseModel):
     character_score: float = Field(0.0, ge=0, le=1, description="人设评分")
     worldview_score: float = Field(0.0, ge=0, le=1, description="世界观评分")
     naturalness_score: float = Field(0.0, ge=0, le=1, description="自然度评分")
+
+    # V1.7新增：知识点引用评分（知识库功能）
+    knowledge_reference_score: float = Field(
+        0.0, ge=0, le=1, description="知识点引用评分（V1.7新增，知识库召回和引用）"
+    )
+
+    # V1.7新增：逆向反馈评分（上下文衔接一致性）
+    reverse_feedback_score: float = Field(
+        0.0, ge=0, le=1, description="逆向反馈评分（V1.7新增，章节与设定一致性）"
+    )
+
+    # 保留旧字段用于向后兼容（已弃用，映射到knowledge_reference_score）
+    knowledge_consistency_score: float = Field(
+        0.0, ge=0, le=1, description="知识库一致性评分（已弃用，使用knowledge_reference_score）"
+    )
+
     total_score: float = Field(0.0, ge=0, le=1, description="总分")
     has_chapter_end: bool = Field(False, description="是否包含章节结束标记")
 
+    # 知识库验证详情
+    knowledge_conflicts: Optional[List[Dict[str, Any]]] = Field(
+        None, description="检测到的知识冲突列表"
+    )
+    recalled_knowledge: Optional[List[Dict[str, Any]]] = Field(
+        None, description="召回的相关知识列表"
+    )
+
+    # V1.7新增：逆向反馈详情
+    reverse_feedback_issues: Optional[List[Dict[str, Any]]] = Field(
+        None, description="逆向反馈检测到的问题列表"
+    )
+
     def calculate_total(self) -> float:
-        """计算总分（6维度加权）"""
-        self.total_score = (
-            self.word_count_score * 0.10
-            + self.outline_score * 0.15
-            + self.style_score * 0.25
-            + self.character_score * 0.25
-            + self.worldview_score * 0.20
-            + self.naturalness_score * 0.05
+        """计算总分（8维度加权）
+
+        权重分配（V1.7版本）：
+        - 字数: 8%
+        - 知识点引用: 8%
+        - 大纲: 13%
+        - 风格: 19%
+        - 人设: 19%
+        - 世界观: 12%
+        - 逆向反馈: 11%
+        - 自然度: 10%
+
+        总权重: 100%
+        """
+        raw_score = (
+            self.word_count_score * 0.08
+            + self.knowledge_reference_score * 0.08
+            + self.outline_score * 0.13
+            + self.style_score * 0.19
+            + self.character_score * 0.19
+            + self.worldview_score * 0.12
+            + self.reverse_feedback_score * 0.11
+            + self.naturalness_score * 0.10
         )
+
+        self.total_score = min(raw_score, 1.0)
         return self.total_score
+
+    def get_score_breakdown(self) -> Dict[str, float]:
+        """获取评分明细（包含各维度得分和权重）"""
+        return {
+            "字数": {
+                "score": self.word_count_score,
+                "weight": 0.08,
+                "weighted_score": self.word_count_score * 0.08,
+            },
+            "知识点引用": {
+                "score": self.knowledge_reference_score,
+                "weight": 0.08,
+                "weighted_score": self.knowledge_reference_score * 0.08,
+            },
+            "大纲": {
+                "score": self.outline_score,
+                "weight": 0.13,
+                "weighted_score": self.outline_score * 0.13,
+            },
+            "风格": {
+                "score": self.style_score,
+                "weight": 0.19,
+                "weighted_score": self.style_score * 0.19,
+            },
+            "人设": {
+                "score": self.character_score,
+                "weight": 0.19,
+                "weighted_score": self.character_score * 0.19,
+            },
+            "世界观": {
+                "score": self.worldview_score,
+                "weight": 0.12,
+                "weighted_score": self.worldview_score * 0.12,
+            },
+            "逆向反馈": {
+                "score": self.reverse_feedback_score,
+                "weight": 0.11,
+                "weighted_score": self.reverse_feedback_score * 0.11,
+            },
+            "自然度": {
+                "score": self.naturalness_score,
+                "weight": 0.10,
+                "weighted_score": self.naturalness_score * 0.10,
+            },
+            "总分": {"score": self.total_score, "weight": 1.0, "weighted_score": self.total_score},
+        }
 
 
 class GenerationRequest(BaseModel):

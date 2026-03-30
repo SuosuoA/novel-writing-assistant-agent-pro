@@ -42,6 +42,13 @@ from core.models import (
     PlotResult
 )
 
+# V1.4新增：导入全局缓存管理器
+try:
+    from core.cache_manager import get_cache_manager, generate_cache_key
+    CACHE_MANAGER_AVAILABLE = True
+except ImportError:
+    CACHE_MANAGER_AVAILABLE = False
+
 # 支持相对导入和绝对导入（修复动态加载问题）
 try:
     from .reference_parser import ReferenceTextParser, ReferenceFusion, ParsedReference
@@ -194,6 +201,9 @@ class QuickCreationPlugin(BasePlugin):
         
         # 结果存储管理器（V1.3新增）
         self._storage_manager: Optional[ResultStorageManager] = None
+        
+        # V1.4新增：全局缓存管理器引用
+        self._cache_manager: Optional[Any] = None
     
     @classmethod
     def get_metadata(cls) -> PluginMetadata:
@@ -212,6 +222,14 @@ class QuickCreationPlugin(BasePlugin):
         """
         self._context = context
         self.config = getattr(context, 'config', {}) or {}
+        
+        # V1.4新增：初始化全局缓存管理器
+        if CACHE_MANAGER_AVAILABLE:
+            try:
+                self._cache_manager = get_cache_manager()
+                logger.info("[QuickCreator] 全局缓存管理器初始化成功")
+            except Exception as e:
+                logger.warning(f"[QuickCreator] 全局缓存管理器初始化失败: {e}")
         
         # 设置缓存文件路径
         if hasattr(context, 'config_manager'):
@@ -489,18 +507,35 @@ class QuickCreationPlugin(BasePlugin):
         返回:
             生成的文本
         """
-        response = self.api_client.chat.completions.create(
-            model=self.config.get("model", "deepseek-chat"),
+        # 使用AIServiceManager统一调用
+        from core.ai_service_manager import get_ai_service_manager
+        from core.ai_provider import GenerationConfig
+
+        ai_manager = get_ai_service_manager()
+        
+        config = GenerationConfig(
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        
+        result = ai_manager.generate_text(
+            prompt=user_prompt,
+            config=config,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=False
+            ]
         )
         
-        return response.choices[0].message.content
+        # 检查生成结果
+        if not result.success:
+            logger.error(f"快捷创作生成失败: {result.error}")
+            raise RuntimeError(f"AI生成失败: {result.error}")
+        
+        # 记录Token使用情况
+        logger.info(f"生成完成，Token使用: {result.usage}")
+        
+        return result.text
     
     def _parse_json_response(self, response: str) -> Dict[str, Any]:
         """
@@ -538,6 +573,8 @@ class QuickCreationPlugin(BasePlugin):
         """
         生成世界观设定
         
+        V1.4新增：集成全局缓存，提升缓存命中率
+        
         Args:
             keywords: 关键词列表
             reference_text: 参考文本
@@ -548,6 +585,32 @@ class QuickCreationPlugin(BasePlugin):
             世界观数据
         """
         logger.info(f"开始生成世界观: keywords={keywords}, genre={genre}")
+        
+        # V1.4新增：缓存检查
+        cache_key = None
+        if self._cache_manager and CACHE_MANAGER_AVAILABLE:
+            cache_key = generate_cache_key(
+                tuple(keywords),
+                reference_text[:100] if reference_text else "",
+                genre,
+                generation_type
+            )
+            
+            cached_result = self._cache_manager.get("worldview", cache_key)
+            if cached_result:
+                logger.info(
+                    f"[QuickCreator] 世界观缓存命中 "
+                    f"(命中率: {self._cache_manager.get_stats()['global']['hit_rate']:.2%})"
+                )
+                # 重建WorldviewResult
+                return WorldviewResult(
+                    success=True,
+                    data=cached_result.get("data", {}),
+                    error=None,
+                    generation_time=0.0,
+                    model_used=cached_result.get("model_used", ""),
+                    tokens_used=0
+                )
         
         # 解析参考文本（V1.2增强）
         parsed = None
@@ -581,6 +644,21 @@ class QuickCreationPlugin(BasePlugin):
         
         # 缓存生成结果
         self._generation_history["worldview"] = worldview_dict
+        
+        # V1.4新增：存储到全局缓存
+        if self._cache_manager and cache_key:
+            cache_data = {
+                "data": worldview_dict,
+                "model_used": self.config.get("model", "deepseek-chat"),
+                "keywords": keywords,
+                "genre": genre,
+                "generation_type": generation_type,
+                "cached_at": datetime.now().isoformat()
+            }
+            self._cache_manager.set("worldview", cache_key, cache_data)
+            
+            # 记录API调用
+            self._cache_manager.record_api_call()
         
         logger.info("世界观生成完成")
         

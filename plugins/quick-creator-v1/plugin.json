@@ -1,38 +1,58 @@
 {
-    "id": "quick-creator-v1",
-    "name": "快捷创作生成器 V1",
-    "version": "1.3.0",
-    "description": "快速生成世界观、大纲、人设、关键情节等设定，支持结果保存与导入",
-    "author": "AI工程师",
-    "plugin_type": "generator",
-    "api_version": "1.0",
-    "priority": 100,
-    "enabled": true,
-    "main": "plugin.py",
-    "entry_class": "QuickCreationPlugin",
-    "tags": ["创作", "设定生成", "世界观", "大纲", "人设", "结果存储"],
-    "dependencies": [],
-    "conflicts": [],
-    "permissions": ["llm.call", "cache.readwrite", "file.write"],
-    "min_platform_version": "6.0.0",
-    "config_schema": {
-        "default_generation_type": {
-            "type": "string",
-            "default": "standard",
-            "enum": ["quick", "standard", "detailed"]
-        },
-        "max_retries": {
-            "type": "integer",
-            "default": 3
-        },
-        "timeout": {
-            "type": "integer",
-            "default": 120
-        },
-        "default_conflict_strategy": {
-            "type": "string",
-            "default": "keep_original",
-            "enum": ["keep_original", "overwrite", "merge", "rename_new"]
-        }
+  "id": "quick-creator-v1",
+  "name": "快捷创作生成器 V1",
+  "version": "1.3.0",
+  "description": "快速生成世界观、大纲、人设、关键情节等设定，支持结果保存与导入",
+  "author": "AI工程师",
+  "plugin_type": "generator",
+  "api_version": "1.0",
+  "priority": 100,
+  "enabled": true,
+  "main": "plugin.py",
+  "entry_class": "QuickCreationPlugin",
+  "tags": [
+    "创作",
+    "设定生成",
+    "世界观",
+    "大纲",
+    "人设",
+    "结果存储"
+  ],
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": [
+    "llm.call",
+    "cache.readwrite",
+    "file.write"
+  ],
+  "min_platform_version": "6.0.0",
+  "config_schema": {
+    "default_generation_type": {
+      "type": "string",
+      "default": "standard",
+      "enum": [
+        "quick",
+        "standard",
+        "detailed"
+      ]
+    },
+    "max_retries": {
+      "type": "integer",
+      "default": 3
+    },
+    "timeout": {
+      "type": "integer",
+      "default": 120
+    },
+    "default_conflict_strategy": {
+      "type": "string",
+      "default": "keep_original",
+      "enum": [
+        "keep_original",
+        "overwrite",
+        "merge",
+        "rename_new"
+      ]
     }
+  }
 }

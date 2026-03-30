@@ -1,0 +1,83 @@
+{
+  "id": "knowledge-validator",
+  "name": "知识库验证器 V1",
+  "version": "1.0.0",
+  "description": "知识库一致性验证器（OpenClaw向量召回）- 集成到ValidationScores评分维度",
+  "author": "高级项目工程师",
+  "plugin_type": "validator",
+  "api_version": "1.0",
+  "priority": 90,
+  "enabled": true,
+  "dependencies": [],
+  "conflicts": [
+    "knowledge-validator-v2"
+  ],
+  "permissions": [
+    "knowledge.read"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "KnowledgeValidatorPlugin",
+  "entry_point": "plugin.py",
+  "config": {
+    "max_recalled_knowledge": 10,
+    "min_recall_score": 0.5,
+    "severity_weights": {
+      "high": 0.3,
+      "medium": 0.2,
+      "low": 0.1
+    },
+    "genre_keywords": {
+      "scifi": [
+        "飞船",
+        "星际",
+        "宇宙",
+        "光速",
+        "虫洞",
+        "黑洞",
+        "量子",
+        "基因"
+      ],
+      "fantasy": [
+        "修仙",
+        "炼丹",
+        "飞剑",
+        "灵气",
+        "渡劫",
+        "宗门",
+        "道友",
+        "因果"
+      ],
+      "history": [
+        "皇帝",
+        "将军",
+        "朝代",
+        "战争",
+        "宫廷",
+        "藩王",
+        "御史",
+        "翰林"
+      ]
+    }
+  },
+  "metadata": {
+    "created_at": "2026-03-25",
+    "created_by": "高级项目工程师",
+    "sprint": "Sprint 5-6: 评分反馈优化",
+    "reference_docs": [
+      "10.升级方案✅️.md",
+      "10.6设计知识库Schema（OpenClaw文件即真相）说明✅️.md",
+      "10.11实现知识库检索接口（OpenClaw向量召回）说明✅️.md",
+      "10.13 扩展ValidationScores维度说明✅️.md"
+    ],
+    "features": [
+      "题材识别（科幻/玄幻/历史/通用）",
+      "知识点关键词提取",
+      "向量检索召回top-10相关知识",
+      "冲突检测与修复建议生成",
+      "知识库一致性评分（0-1）",
+      "召回准确率≥80%"
+    ],
+    "architecture": "OpenClaw mem9 L2温记忆（LanceDB向量库）",
+    "adr": "ADR-003: 知识库双层设计"
+  }
+}

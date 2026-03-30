@@ -34,7 +34,7 @@ if exist "venv\Scripts\activate.bat" (
 )
 
 REM 检查依赖是否安装
-echo [检查] 正在检查依赖...
+echo [INFO] Checking dependencies...
 python -c "import sv_ttk" >nul 2>&1
 if errorlevel 1 (
     echo [警告] 依赖未完全安装，正在安装依赖...
@@ -48,7 +48,7 @@ if errorlevel 1 (
 
 echo [完成] 依赖检查通过
 echo.
-echo [启动] 正在启动GUI界面...
+echo [START] Launching GUI...
 echo.
 
 REM 启动主程序
@@ -57,6 +57,6 @@ python gui_main.py
 REM 如果程序异常退出，暂停以显示错误信息
 if errorlevel 1 (
     echo.
-    echo [错误] 程序异常退出，错误代码: %errorlevel%
+    echo [ERROR] Program exited abnormally. Error code: %errorlevel%
     pause
 )

@@ -1,0 +1,30 @@
+{
+  "id": "ai-service-router-v1",
+  "name": "AI服务路由器",
+  "version": "1.0.0",
+  "description": "统一AI服务路由，支持本地/线上切换",
+  "author": "Novel Writing Assistant Team",
+  "category": "ai",
+  "priority": 90,
+  "dependencies": [
+    "api-config-manager-v1"
+  ],
+  "provides": [
+    "ai.llm.client",
+    "ai.chat",
+    "ai.provider.info"
+  ],
+  "subscribes": [
+    "api.config.changed"
+  ],
+  "config_schema": {},
+  "security": {
+    "requires_encryption": false,
+    "handles_secrets": false,
+    "permission_level": "medium"
+  },
+  "ui_integration": {
+    "settings_page": false,
+    "menu_items": []
+  }
+}

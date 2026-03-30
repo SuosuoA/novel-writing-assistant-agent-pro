@@ -4,9 +4,20 @@
 # Core
 pydantic>=2.10.6
 pyyaml>=6.0
+requests>=2.32.0
+cryptography>=46.0.0
+beautifulsoup4>=4.12.0    # 热榜爬虫 HTML 解析
+lxml>=5.0.0               # BeautifulSoup 解析器后端
 
 # LLM Client
 openai>=1.60.0
+
+# Vector Store (L2温记忆)
+lancedb>=0.12.0
+sentence-transformers>=2.2.2
+
+# Scheduling (每日冥想定时任务)
+apscheduler>=3.10.0
 
 # GUI
 sv-ttk>=2.2.0

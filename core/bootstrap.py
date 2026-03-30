@@ -96,6 +96,24 @@ class BootstrapService:
                 logging.error(f"LoggingService初始化失败: {e}", exc_info=True)
                 # LoggingService失败不影响核心功能，继续标记为已初始化
 
+            # 3. 初始化并注册 AIServiceManager（V2.23新增：支持本地大模型）
+            try:
+                from .ai_service_manager import AIServiceManager, get_ai_service_manager
+                ai_service = get_ai_service_manager()
+                # 注册为类型和名称两种方式，方便插件获取
+                self._service_locator.register(
+                    service_type=AIServiceManager,
+                    instance=ai_service,
+                )
+                # 同时注册为名称"ai_service"供插件使用
+                self._service_locator.register_service("ai_service", ai_service)
+                results["AIServiceManager"] = True
+                logging.info("AIServiceManager初始化并注册成功")
+            except Exception as e:
+                results["AIServiceManager"] = False
+                logging.error(f"AIServiceManager初始化失败: {e}", exc_info=True)
+                # AIServiceManager失败会导致AI功能不可用，但程序可以继续运行
+
             # P1-7修复：只有ConfigService成功才标记为已初始化
             self._initialized = results.get("ConfigService", False)
             return results

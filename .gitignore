@@ -59,6 +59,88 @@ logs/
 *.local.yaml
 *.local.yml
 
+# ========================================
+# API密钥保护 - 多层防护体系
+# ========================================
+
+# 第1层：配置文件（包含敏感信息）
+config.yaml
+config.*.yaml
+secrets.yaml
+*.secret.yaml
+secrets.json
+api_keys.txt
+
+# 第2层：加密存储目录
+.secrets/
+*.enc
+*.key
+master_key
+.master_key
+api_keys.enc
+
+# 第3层：环境变量文件
+.env
+.env.local
+.env.*.local
+
+# 第4层：备份文件
+*_backup/
+*.backup
+*.bak
+*.old
+
+# 第5层：临时文件（可能包含敏感日志）
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# ========================================
+# 知识库生成进度文件（临时数据）
+# ========================================
+data/knowledge/.progress/
+data/knowledge/.temp/
+
+# ========================================
+# 临时测试文件清理规则 - 保证项目根目录干净
+# ========================================
+
+# 临时测试脚本
+temp_*.py
+test_*.py
+*_test.py
+check_*.py
+verify_*.py
+fix_*.py
+quick_*.py
+clear_*.py
+debug_*.py
+
+# 临时输出文件
+temp_*.txt
+temp_*.json
+temp_*.log
+test_output*.txt
+test_result*.json
+
+# 临时批处理文件（除一键启动.bat外）
+*.bat
+!一键启动.bat
+!Novel*启动.bat
+
+# 临时文档
+*报告.md
+*说明.md
+*总结.md
+!经验文档/**/
+!docs/**/
+
+# ========================================
+# 以下为原有规则
+# ========================================
+
 # Database
 *.db
 *.sqlite3

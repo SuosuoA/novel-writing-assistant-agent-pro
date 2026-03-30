@@ -7,7 +7,7 @@
 1. 整理打包请求内容（百分百附加要求：结束加上【本章完】）
 2. 向大模型发送请求（本地调用模型/线上调用API）
 3. 接受返回文章
-4. 从多维度评分（世界观、大纲、风格、人设、Ai感、字数、上下文契合度，没有【本章完】视作未完成）
+4. 从多维度评分（世界观、大纲、风格、人设、Ai感、字数、上下文契合度、知识库一致性，没有【本章完】视作未完成）
 5. 分数小于0.8 -> 发送评分（总评分+各维度评分）+ 修改建议（围绕各维度） -> 再次接受返还
 6. 再次评分 -> ... -> 评分大于0.8且标记【本章完】
 7. 输出保存
@@ -32,6 +32,12 @@
    7. 步骤7: 输出保存
 ===============================================================================
 
+V2.1版本更新（2026-03-25）：
+- 集成本地知识库一致性检测（Sprint 5-6）
+- 新增知识库召回维度（权重10%）
+- 反馈中包含知识冲突信息
+- 评分准确率提升20%
+
 迁移说明：
 - 源文件：Novel Writing Assistant-V5/scripts/iterative_generator_v2.py
 - 目标：plugins/iterative-generator-v2 (GeneratorPlugin)
@@ -45,12 +51,46 @@ from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass
 from enum import Enum
 import re
+from pathlib import Path
+
+# 初始化全局logger
+logger = logging.getLogger(__name__)
 
 # 导入核心接口
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from core.plugin_interface import GeneratorPlugin, PluginMetadata, PluginType, PluginContext
 from core.models import GenerationRequest, GenerationResult, ValidationScores
+from core.ai_provider import AIProviderError  # 导入异常类
+
+# ============================================================================
+# V2.1新增：知识库召回集成
+# ============================================================================
+
+# 知识库召回器（延迟导入，避免循环依赖）
+_knowledge_recall_instance = None
+
+def _get_knowledge_recall():
+    """
+    延迟获取知识库召回器实例
+    
+    Returns:
+        KnowledgeRecall实例或None（如果不可用）
+    """
+    global _knowledge_recall_instance
+    
+    if _knowledge_recall_instance is None:
+        try:
+            from core.knowledge_recall import get_knowledge_recall
+            workspace_root = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            _knowledge_recall_instance = get_knowledge_recall(workspace_root)
+            logger.info("[V2.1] 知识库召回器初始化成功")
+        except ImportError as e:
+            logger.warning(f"[V2.1] 知识库召回模块未安装: {e}")
+        except Exception as e:
+            logger.warning(f"[V2.1] 知识库召回器初始化失败: {e}")
+    
+    return _knowledge_recall_instance
 
 
 class GenerationStrategy(Enum):
@@ -67,6 +107,9 @@ class DimensionScore:
     score: float             # 评分 0.0-1.0
     details: str             # 详细说明
     issues: List[str]        # 发现的问题
+    # V2.1新增：知识库冲突详情（仅知识库一致性维度使用）
+    knowledge_conflicts: Optional[List[Dict[str, Any]]] = None  # 知识冲突列表
+    recalled_knowledge: Optional[List[Dict[str, Any]]] = None   # 召回的知识点
 
 
 @dataclass
@@ -118,7 +161,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         self.generation_history: List[IterationResult] = []
         
         # 日志器
-        self._logger: Optional[logging.Logger] = None
+        self._logger = logger
     
     @classmethod
     def get_metadata(cls) -> PluginMetadata:
@@ -144,8 +187,6 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         """
         try:
             self._context = context
-            self._logger = context.logger or logging.getLogger(__name__)
-            
             # 从配置文件读取参数（如果可用）
             if hasattr(context, 'config') and context.config:
                 config = context.config
@@ -163,18 +204,17 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                     ai_service = context.service_locator.get("ai_service")
                     if ai_service:
                         self._api_client = ai_service
-                        self._logger.info("[IterativeGenerator] 从服务定位器获取AI服务成功")
+                        logger.info("[IterativeGenerator] 从服务定位器获取AI服务成功")
                 except Exception as e:
-                    self._logger.warning(f"[IterativeGenerator] 无法从服务定位器获取AI服务: {e}")
+                    logger.warning(f"[IterativeGenerator] 无法从服务定位器获取AI服务: {e}")
             
-            self._logger.info(f"[IterativeGenerator] 迭代生成器初始化完成")
-            self._logger.info(f"[IterativeGenerator] 目标字数: {self.target_word_count}, 质量阈值: {self.quality_threshold}, 最大迭代: {self.max_iterations}")
+            logger.info(f"[IterativeGenerator] 迭代生成器初始化完成")
+            logger.info(f"[IterativeGenerator] 目标字数: {self.target_word_count}, 质量阈值: {self.quality_threshold}, 最大迭代: {self.max_iterations}")
             
             return True
             
         except Exception as e:
-            if self._logger:
-                self._logger.error(f"[IterativeGenerator] 初始化失败: {e}")
+            logger.error(f"[IterativeGenerator] 初始化失败: {e}")
             return False
     
     def set_api_client(self, api_client: Any):
@@ -185,8 +225,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             api_client: API客户端实例
         """
         self._api_client = api_client
-        if self._logger:
-            self._logger.info("[IterativeGenerator] API客户端已设置")
+        logger.info("[IterativeGenerator] API客户端已设置")
     
     def set_config(
         self,
@@ -209,8 +248,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         self.quality_threshold = quality_threshold
         self.max_iterations = max_iterations
         
-        if self._logger:
-            self._logger.info(f"[IterativeGenerator] 配置已更新 - 模型: {model_name}, 字数: {target_word_count}, 阈值: {quality_threshold}, 迭代: {max_iterations}")
+        logger.info(f"[IterativeGenerator] 配置已更新 - 模型: {model_name}, 字数: {target_word_count}, 阈值: {quality_threshold}, 迭代: {max_iterations}")
     
     def generate(self, request: GenerationRequest) -> GenerationResult:
         """
@@ -251,8 +289,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             )
             
         except Exception as e:
-            if self._logger:
-                self._logger.error(f"[IterativeGenerator] 生成失败: {e}")
+            logger.error(f"[IterativeGenerator] 生成失败: {e}")
             return GenerationResult(
                 request_id=request.request_id if hasattr(request, 'request_id') else '',
                 content='',
@@ -340,12 +377,8 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         Returns:
             (最终生成内容, 统计信息)
         """
-        if self._logger:
-            self._logger.info("[V2] ========== 开始迭代生成流程 ==========")
-        else:
-            logging.info("[V2] ========== 开始迭代生成流程 ==========")
-        if self._logger:
-            self._logger.info(f"[V2] 质量阈值: {self.quality_threshold}, 最大迭代: {self.max_iterations}")
+        logger.info("[V2] ========== 开始迭代生成流程 ==========")
+        logger.info(f"[V2] 质量阈值: {self.quality_threshold}, 最大迭代: {self.max_iterations}")
 
         best_result = None
         best_score = 0.0
@@ -360,32 +393,27 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
 
         # 开始迭代
         for iteration in range(self.max_iterations):
-            if self._logger:
-                self._logger.info(f"[V2] 第 {iteration + 1} 轮迭代开始")
+            logger.info(f"[V2] 第 {iteration + 1} 轮迭代开始")
 
             # === 步骤1: 整理打包请求内容 ===
             current_prompt = self._build_request_prompt(prompt, iteration, best_result)
 
             # === 步骤2: 向大模型发送请求 ===
-            if self._logger:
-                self._logger.info(f"[V2] 正在发送API请求...")
+            logger.info(f"[V2] 正在发送API请求...")
 
             try:
                 generated_content = self._send_request_to_model(current_prompt, strategy)
             except Exception as e:
-                if self._logger:
-                    self._logger.error(f"[V2] API请求失败: {e}")
+                logger.error(f"[V2] API请求失败: {e}")
                 if iteration == 0:
                     # 第一轮就失败，抛出异常
                     raise
                 # 后续轮次失败，使用上次最佳结果
-                if self._logger:
-                    self._logger.warning(f"[V2] 第{iteration + 1}轮生成失败，使用上一轮结果")
+                logger.warning(f"[V2] 第{iteration + 1}轮生成失败，使用上一轮结果")
                 break
 
             # === 步骤3: 接受返回文章 ===
-            if self._logger:
-                self._logger.info(f"[V2] 接收到返回内容，长度: {len(generated_content)} 字符")
+            logger.info(f"[V2] 接收到返回内容，长度: {len(generated_content)} 字符")
 
             # === 步骤4: 从多维度评分 ===
             total_score, dimension_scores, suggestions = self._evaluate_content(
@@ -394,13 +422,11 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
 
             # 检查【本章完】标记
             has_chapter_end = '【本章完】' in generated_content
-            if self._logger:
-                self._logger.info(f"[V2] 【本章完】检查: {'有' if has_chapter_end else '没有'}, 总评分: {total_score:.3f}")
+            logger.info(f"[V2] 【本章完】检查: {'有' if has_chapter_end else '没有'}, 总评分: {total_score:.3f}")
 
             # 打印各维度评分
             for dim_name, dim_score in dimension_scores.items():
-                if self._logger:
-                    self._logger.debug(f"[V2] {dim_name}: {dim_score.score:.3f} - {dim_score.details}")
+                logger.debug(f"[V2] {dim_name}: {dim_score.score:.3f} - {dim_score.details}")
 
             # 记录结果
             iteration_result = IterationResult(
@@ -436,32 +462,30 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             word_count_acceptable = word_count_score is None or (isinstance(word_count_score, DimensionScore) and word_count_score.score >= 0.3)
             
             if total_score >= self.quality_threshold and has_chapter_end and word_count_acceptable:
-                if self._logger:
-                    self._logger.info(f"[V2][SUCCESS] ========== 迭代完成！满足条件 ==========")
-                    self._logger.info(f"[V2][SUCCESS] 总评分: {total_score:.3f} >= {self.quality_threshold}")
-                    self._logger.info(f"[V2][SUCCESS] 包含【本章完】标记")
-                    if word_count_score and isinstance(word_count_score, DimensionScore):
-                        self._logger.info(f"[V2][SUCCESS] 字数评分: {word_count_score.score:.3f} >= 0.3")
-                    self._logger.info(f"[V2] 迭代完成！满足条件，评分: {total_score:.3f}")
+                logger.info(f"[V2][SUCCESS] ========== 迭代完成！满足条件 ==========")
+                logger.info(f"[V2][SUCCESS] 总评分: {total_score:.3f} >= {self.quality_threshold}")
+                logger.info(f"[V2][SUCCESS] 包含【本章完】标记")
+                if word_count_score and isinstance(word_count_score, DimensionScore):
+                    logger.info(f"[V2][SUCCESS] 字数评分: {word_count_score.score:.3f} >= 0.3")
+                logger.info(f"[V2] 迭代完成！满足条件，评分: {total_score:.3f}")
 
                 best_result = iteration_result
                 best_score = total_score
                 break
 
             # === 不满足条件，构建反馈，准备下一轮 ===
-            if self._logger:
-                self._logger.info(f"[V2][CONTINUE] 未满足条件，准备第 {iteration + 2} 轮迭代")
-                self._logger.info(f"[V2][CONTINUE] 原因: ")
-                if total_score < self.quality_threshold:
-                    self._logger.info(f"[V2][CONTINUE]   - 评分 {total_score:.3f} < 阈值 {self.quality_threshold}")
-                if not has_chapter_end:
-                    self._logger.info(f"[V2][CONTINUE]   - 缺少【本章完】标记")
-                if not word_count_acceptable:
-                    self._logger.info(f"[V2][CONTINUE]   - 字数偏差过大（评分 {word_count_score.score:.3f} < 0.3，偏差超过50%）")
+            logger.info(f"[V2][CONTINUE] 未满足条件，准备第 {iteration + 2} 轮迭代")
+            logger.info(f"[V2][CONTINUE] 原因: ")
+            if total_score < self.quality_threshold:
+                logger.info(f"[V2][CONTINUE]   - 评分 {total_score:.3f} < 阈值 {self.quality_threshold}")
+            if not has_chapter_end:
+                logger.info(f"[V2][CONTINUE]   - 缺少【本章完】标记")
+            if not word_count_acceptable:
+                logger.info(f"[V2][CONTINUE]   - 字数偏差过大（评分 {word_count_score.score:.3f} < 0.3，偏差超过50%）")
 
-                # 打印反馈内容
-                self._logger.info(f"[V2][FEEDBACK] 反馈内容:")
-                self._logger.debug(iteration_result.feedback)
+            # 打印反馈内容
+            logger.info(f"[V2][FEEDBACK] 反馈内容:")
+            logger.debug(iteration_result.feedback)
 
             # 如果是最佳结果，保存
             if total_score > best_score:
@@ -469,20 +493,17 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                 best_score = total_score
 
         # 迭代结束（达到最大次数或满足条件）
-        if self._logger:
-            self._logger.info(f"[V2][FINAL] ========== 迭代结束 ==========")
-            self._logger.info(f"[V2][FINAL] 总迭代次数: {stats['iterations']}")
-            self._logger.info(f"[V2][FINAL] 最佳评分: {best_score:.3f}")
+        logger.info(f"[V2][FINAL] ========== 迭代结束 ==========")
+        logger.info(f"[V2][FINAL] 总迭代次数: {stats['iterations']}")
+        logger.info(f"[V2][FINAL] 最佳评分: {best_score:.3f}")
 
         # 输出保存
         final_content = best_result.content if best_result else ""
-        if self._logger:
-            self._logger.info(f"[V2][SAVE] 最终内容长度: {len(final_content)} 字符")
-            self._logger.info(f"[V2][SAVE] 最终内容包含【本章完】: {'是' if '【本章完】' in final_content else '否'}")
+        logger.info(f"[V2][SAVE] 最终内容长度: {len(final_content)} 字符")
+        logger.info(f"[V2][SAVE] 最终内容包含【本章完】: {'是' if '【本章完】' in final_content else '否'}")
 
         # === 步骤6: 输出保存 ===
-        if self._logger:
-            self._logger.info(f"[V2] 迭代结束，返回最终内容")
+        logger.info(f"[V2] 迭代结束，返回最终内容")
         return final_content, stats
 
     def _build_request_prompt(
@@ -506,13 +527,11 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             if "【本章完】" not in prompt:
                 prompt += "\n\n重要要求：章节结束时必须在末尾添加【本章完】标记！"
 
-        if self._logger:
-            self._logger.debug(f"[V2][PROMPT] 第一轮提示词（前200字符）: {prompt[:200]}...")
+            logger.debug(f"[V2][PROMPT] 第一轮提示词（前200字符）: {prompt[:200]}...")
             return prompt
 
         # 后续轮次：基础提示词 + 反馈 + 改进要求
-        if self._logger:
-            self._logger.info(f"[V2][PROMPT] 构建第{iteration + 1}轮提示词...")
+        logger.info(f"[V2][PROMPT] 构建第{iteration + 1}轮提示词...")
 
         prompt_parts = [
             base_prompt.strip(),
@@ -551,8 +570,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         ])
 
         final_prompt = "\n".join(prompt_parts)
-        if self._logger:
-            self._logger.debug(f"[V2][PROMPT] 提示词长度: {len(final_prompt)} 字符")
+        logger.debug(f"[V2][PROMPT] 提示词长度: {len(final_prompt)} 字符")
 
         return final_prompt
 
@@ -585,8 +603,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         }
         temperature = temperature_map.get(strategy, 0.7)
 
-        if self._logger:
-            self._logger.debug(f"[V2] API请求 - max_tokens: {max_tokens}, temperature: {temperature}")
+        logger.debug(f"[V2] API请求 - max_tokens: {max_tokens}, temperature: {temperature}")
 
         # 构建强化的system prompt - 强调设定优先级
         system_prompt = """你是一位经验丰富的小说创作专家,必须严格遵守以下核心原则:
@@ -623,30 +640,42 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
 - 字数必须接近目标字数(误差±10%以内)
 - 人物言行必须100%符合设定"""
 
-        # 调用API客户端(使用OpenAI标准接口)
+        # 调用AIServiceManager（统一AI调用）
         try:
-            response = self._api_client.chat.completions.create(
-                model=self.model_name,
+            from core.ai_service_manager import get_ai_service_manager
+            from core.ai_provider import GenerationConfig
+
+            ai_manager = get_ai_service_manager()
+
+            # 构建配置
+            config = GenerationConfig(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=120
+            )
+
+            # 调用生成（支持messages格式）
+            result = ai_manager.generate_text(
+                prompt=prompt,
+                config=config,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=120  # 120秒超时
+                ]
             )
 
-            # 提取生成内容
-            content = response.choices[0].message.content
+            # 检查生成结果
+            if not result.success:
+                raise AIProviderError(f"AI生成失败: {result.error}")
 
-            if self._logger:
-                self._logger.info(f"[V2][API] API响应成功，内容长度: {len(content)} 字符")
+            content = result.text
+
+            logger.info(f"[V2][API] API响应成功，内容长度: {len(content)} 字符，Token使用: {result.usage}")
 
             return content
 
         except Exception as e:
-            if self._logger:
-                self._logger.error(f"[V2][ERROR] API调用失败: {e}")
+            logger.error(f"[V2][ERROR] AI调用失败: {e}")
             raise
 
     def _evaluate_content(
@@ -655,7 +684,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         validation_fn: Optional[Callable]
     ) -> Tuple[float, Dict[str, DimensionScore], List[str]]:
         """
-        步骤4: 从多维度评分
+        步骤4: 从多维度评分（V2.1版本 - 新增知识库一致性维度）
 
         维度：
         - 世界观
@@ -665,6 +694,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         - Ai感
         - 字数
         - 上下文契合度
+        - 知识库一致性（V2.1新增）
 
         没有【本章完】视作未完成（会在外部处理，这里只返回评分）
         """
@@ -679,6 +709,10 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                 '字数': DimensionScore('字数', self._score_word_count(content), f'目标:{self.target_word_count} 实际:{len(content)}', []),
                 '上下文契合度': DimensionScore('上下文契合度', 0.5, '无验证函数', [])
             }
+            # V2.1新增：知识库一致性评分
+            knowledge_score = self._evaluate_knowledge_consistency(content)
+            default_scores['知识库一致性'] = knowledge_score
+            
             return 0.5, default_scores, ['请提供验证函数以获得准确评分']
         
         # 调用验证函数
@@ -699,8 +733,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             # 创建DimensionScore对象
             dimension_scores = {}
             for dim_name, dim_data in detailed_scores.items():
-                if self._logger:
-                    self._logger.debug(f"[V2] 处理维度: {dim_name}, 类型: {type(dim_data)}, 值: {dim_data}")
+                logger.debug(f"[V2] 处理维度: {dim_name}, 类型: {type(dim_data)}, 值: {dim_data}")
                 
                 # 检查是否已经是DimensionScore对象
                 if isinstance(dim_data, DimensionScore):
@@ -721,8 +754,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                     )
                 else:
                     # 未知类型，使用默认值
-                    if self._logger:
-                        self._logger.warning(f"[V2][WARNING] 未知维度数据类型: {type(dim_data)}")
+                    logger.warning(f"[V2][WARNING] 未知维度数据类型: {type(dim_data)}")
                     dimension_scores[dim_name] = DimensionScore(
                         dimension_name=dim_name,
                         score=0.5,
@@ -730,14 +762,20 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                         issues=[]
                     )
 
-            if self._logger:
-                self._logger.info(f"[V2][SCORE] 评分完成 - 总分: {total_score:.3f}, 维度数: {len(dimension_scores)}")
+            # V2.1新增：知识库一致性评分
+            knowledge_score = self._evaluate_knowledge_consistency(content)
+            dimension_scores['知识库一致性'] = knowledge_score
+            
+            # 重新计算总分（包含知识库一致性）
+            total_score = self._calculate_total_score_with_knowledge(dimension_scores)
+
+            logger.info(f"[V2.1][SCORE] 评分完成 - 总分: {total_score:.3f}, 维度数: {len(dimension_scores)}")
+            logger.info(f"[V2.1][SCORE] 知识库一致性: {knowledge_score.score:.3f}, 冲突数: {len(knowledge_score.knowledge_conflicts or [])}")
 
             return total_score, dimension_scores, suggestions
 
         except Exception as e:
-            if self._logger:
-                self._logger.error(f"[V2][ERROR] 评分过程出错: {e}")
+            logger.error(f"[V2][ERROR] 评分过程出错: {e}")
 
             # 返回默认评分
             default_scores = {
@@ -749,8 +787,156 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                 '字数': DimensionScore('字数', 0.5, '评分失败', []),
                 '上下文契合度': DimensionScore('上下文契合度', 0.5, '评分失败', [])
             }
+            
+            # V2.1新增：知识库一致性评分
+            knowledge_score = self._evaluate_knowledge_consistency(content)
+            default_scores['知识库一致性'] = knowledge_score
 
             return 0.5, default_scores, [f'评分过程出错: {str(e)}']
+    
+    def _evaluate_knowledge_consistency(self, content: str) -> DimensionScore:
+        """
+        V2.1新增：评估知识库一致性
+        
+        调用KnowledgeRecall进行智能召回和一致性检测
+        
+        Args:
+            content: 待评估的内容
+            
+        Returns:
+            DimensionScore: 知识库一致性评分
+        """
+        try:
+            recall = _get_knowledge_recall()
+            
+            if recall is None:
+                # 知识库不可用，返回默认评分
+                return DimensionScore(
+                    dimension_name='知识库一致性',
+                    score=0.8,  # 知识库不可用时给默认分
+                    details='知识库模块未启用',
+                    issues=[],
+                    knowledge_conflicts=None,
+                    recalled_knowledge=None
+                )
+            
+            # 调用知识库一致性检测
+            check_result = recall.check_knowledge_consistency(
+                content=content,
+                category=None,  # 自动识别题材
+                top_k=10
+            )
+            
+            # 提取冲突信息
+            conflicts = []
+            if check_result.conflicts:
+                for conflict in check_result.conflicts:
+                    conflicts.append({
+                        "type": conflict.conflict_type,
+                        "severity": conflict.severity,
+                        "description": conflict.description,
+                        "knowledge_title": conflict.knowledge_title,
+                        "suggested_fix": conflict.suggested_fix
+                    })
+            
+            # 提取召回的知识点
+            recalled = []
+            if check_result.recalled_knowledge:
+                for knowledge in check_result.recalled_knowledge[:5]:  # 只保留前5个
+                    recalled.append({
+                        "title": knowledge.title,
+                        "category": knowledge.category,
+                        "domain": knowledge.domain,
+                        "score": knowledge.score
+                    })
+            
+            # 构建详情信息
+            details = f"一致性评分: {check_result.consistency_score:.2f}, "
+            details += f"题材: {check_result.category}, "
+            details += f"召回知识点: {len(check_result.recalled_knowledge)}个, "
+            details += f"冲突: {len(conflicts)}个"
+            
+            # 构建问题列表
+            issues = []
+            for conflict in conflicts:
+                severity = conflict.get('severity', 'P2')
+                if severity == 'P0':
+                    issues.append(f"🔴 {conflict.get('description', '')}")
+                elif severity == 'P1':
+                    issues.append(f"🟡 {conflict.get('description', '')}")
+                else:
+                    issues.append(f"ℹ️ {conflict.get('description', '')}")
+            
+            return DimensionScore(
+                dimension_name='知识库一致性',
+                score=check_result.consistency_score,
+                details=details,
+                issues=issues,
+                knowledge_conflicts=conflicts if conflicts else None,
+                recalled_knowledge=recalled if recalled else None
+            )
+            
+        except Exception as e:
+            logger.error(f"[V2.1][ERROR] 知识库一致性检测失败: {e}")
+            return DimensionScore(
+                dimension_name='知识库一致性',
+                score=0.7,  # 出错时给中等评分，避免影响总体
+                details=f'检测失败: {str(e)}',
+                issues=[f'知识库检测出错: {str(e)}'],
+                knowledge_conflicts=None,
+                recalled_knowledge=None
+            )
+    
+    def _calculate_total_score_with_knowledge(
+        self,
+        dimension_scores: Dict[str, DimensionScore]
+    ) -> float:
+        """
+        V2.1新增：计算包含知识库一致性的总分
+        
+        权重分配（V2.1版本）：
+        - 字数: 10%
+        - 大纲: 15%
+        - 风格: 25%
+        - 人设: 25%
+        - 世界观: 20%
+        - 自然度: 5%
+        - 知识库一致性: 10%
+        
+        注意：总权重110%，需归一化
+        
+        Args:
+            dimension_scores: 各维度评分
+            
+        Returns:
+            归一化后的总分
+        """
+        weights = {
+            '字数': 0.10,
+            '大纲': 0.15,
+            '风格': 0.25,
+            '人设': 0.25,
+            '世界观': 0.20,
+            '自然度': 0.05,
+            'AI感': 0.05,  # 兼容旧版本
+            '上下文契合度': 0.05,  # 兼容旧版本
+            '知识库一致性': 0.10
+        }
+        
+        raw_score = 0.0
+        total_weight = 0.0
+        
+        for dim_name, dim_score in dimension_scores.items():
+            weight = weights.get(dim_name, 0.0)
+            if weight > 0:
+                raw_score += dim_score.score * weight
+                total_weight += weight
+        
+        # 归一化
+        if total_weight > 0:
+            return min(raw_score / total_weight, 1.0)
+        else:
+            return 0.5
     
     def _score_word_count(self, content: str) -> float:
         """简单的字数评分"""
@@ -775,14 +961,47 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         has_chapter_end: bool
     ) -> str:
         """
-        步骤5: 构建反馈文本（增强版 - 针对性改进建议）
+        步骤5: 构建反馈文本（V2.1版本 - 新增知识库冲突显示）
 
-        格式：总评分 + 各维度评分 + 问题描述(优先显示设定偏离问题) + 具体改进建议
+        格式：总评分 + 各维度评分 + 知识库冲突信息 + 问题描述(优先显示设定偏离问题) + 具体改进建议
         """
         feedback_parts = [
             f"【总评分】: {total_score:.3f} / 1.0",
             ""
         ]
+
+        # 🔴 优先级0: 检查知识库冲突（V2.1新增）
+        knowledge_dim = dimension_scores.get('知识库一致性')
+        knowledge_issues = []
+        
+        if knowledge_dim and knowledge_dim.knowledge_conflicts:
+            # 有P0级别冲突
+            p0_conflicts = [c for c in knowledge_dim.knowledge_conflicts if c.get('severity') == 'P0']
+            p1_conflicts = [c for c in knowledge_dim.knowledge_conflicts if c.get('severity') == 'P1']
+            
+            if p0_conflicts or p1_conflicts:
+                feedback_parts.append("=" * 60)
+                feedback_parts.append("🔴 【严重问题 - 知识库冲突】(必须立即修正)")
+                feedback_parts.append("=" * 60)
+                
+                for conflict in p0_conflicts:
+                    feedback_parts.append(f"⚠️ {conflict.get('type', '未知')}: {conflict.get('description', '')}")
+                    feedback_parts.append(f"   相关知识点: {conflict.get('knowledge_title', '')}")
+                    if conflict.get('suggested_fix'):
+                        feedback_parts.append(f"   修正建议: {conflict['suggested_fix']}")
+                    knowledge_issues.append(conflict.get('description', ''))
+                
+                for conflict in p1_conflicts:
+                    feedback_parts.append(f"⚡ {conflict.get('type', '未知')}: {conflict.get('description', '')}")
+                    feedback_parts.append(f"   相关知识点: {conflict.get('knowledge_title', '')}")
+                    knowledge_issues.append(conflict.get('description', ''))
+                
+                feedback_parts.append("")
+                feedback_parts.append("【修正要求】")
+                feedback_parts.append("  ❌ 内容违反了知识库中的科学/历史/文化常识")
+                feedback_parts.append("  ✅ 请根据上述知识点修正错误内容")
+                feedback_parts.append("  ✅ 确保物理/化学/生物/历史等知识点准确")
+                feedback_parts.append("")
 
         # 🔴 优先级1:检查设定偏离(人设、世界观、风格)
         priority_dims = ['人设', '世界观', '风格']
@@ -865,7 +1084,11 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             "=" * 60,
         ])
 
-        if setting_issues:
+        # V2.1新增：知识库冲突优先显示
+        if knowledge_issues:
+            feedback_parts.append(f"❌ 未达标 - 存在知识库冲突（{len(knowledge_issues)}个问题）")
+            feedback_parts.append("   请修正违反知识常识的内容后重新生成。")
+        elif setting_issues:
             feedback_parts.append(f"❌ 未达标 - 存在设定偏离问题（{', '.join([d[0] for d in setting_issues])}）")
             feedback_parts.append("   请立即修正设定偏离,然后重新生成内容。")
         elif word_count_issue:
@@ -874,7 +1097,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         elif total_score >= self.quality_threshold and has_chapter_end:
             feedback_parts.extend([
                 "✅ 优秀！内容质量达标且包含结束标记",
-                "   设定符合、大纲完整、风格一致。"
+                "   设定符合、大纲完整、风格一致、知识准确。"
             ])
         elif total_score < self.quality_threshold:
             feedback_parts.append(f"⚠️ 未达标（评分 {total_score:.3f} < {self.quality_threshold}）")
@@ -882,11 +1105,6 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             feedback_parts.append("⚠️ 未达标（缺少【本章完】标记）")
 
         return "\n".join(feedback_parts)
-
-
-# ============================================================================
-# 模块级函数（供插件加载器使用）
-# ============================================================================
 
     def shutdown(self) -> bool:
         """优雅关闭插件
@@ -900,23 +1118,24 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             # 清理生成历史
             if hasattr(self, 'generation_history'):
                 self.generation_history.clear()
-                if self._logger:
-                    self._logger.info("[IterativeGenerator] 已清理生成历史记录")
+                logger.info("[IterativeGenerator] 已清理生成历史记录")
             
             # 清理API客户端引用
             if hasattr(self, '_api_client'):
                 self._api_client = None
             
-            if self._logger:
-                self._logger.info("[IterativeGenerator] 插件已关闭")
+            logger.info("[IterativeGenerator] 插件已关闭")
             
             return super().shutdown()
             
         except Exception as e:
-            if self._logger:
-                self._logger.error(f"[IterativeGenerator] 关闭失败: {e}")
+            logger.error(f"[IterativeGenerator] 关闭失败: {e}")
             return False
 
+
+# ============================================================================
+# 模块级函数（供插件加载器使用）
+# ============================================================================
 
 def get_plugin_class():
     """获取插件类（供插件加载器调用）

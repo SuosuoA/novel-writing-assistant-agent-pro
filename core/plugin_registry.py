@@ -37,16 +37,16 @@ V5_PROTECTED_MODULES = frozenset(
     [
         # 四大核心板块
         "outline-parser-v3",  # 大纲解析
-        "style-learner-v2",  # 风格学习
-        "character-manager",  # 人物管理
-        "worldview-parser",  # 世界观解析
+        "style-learner-v5",  # 风格学习（注意：实际ID是v5，不是v2）
+        "character-manager-v1",  # 人物管理（添加后缀）
+        "worldview-parser-v1",  # 世界观解析（添加后缀）
         # 评分反馈循环优化生成流程
-        "context-builder",  # 上下文构建
+        "context-builder-v1",  # 上下文构建（添加后缀）
         "iterative-generator-v2",  # 迭代生成
-        "weighted-validator",  # 加权验证
-        "optimized-generator-v2",  # 生成入口
+        "quality-validator-v1",  # 质量验证（weighted-validator改名）
+        "novel-generator-v3",  # 生成入口（optimized-generator改名）
         # 热榜功能
-        "hot-ranking",  # 热榜功能
+        "hot-ranking-v1",  # 热榜功能（添加后缀）
     ]
 )
 
@@ -430,6 +430,19 @@ class PluginRegistry:
         with self._lock:
             plugin_info = self._plugins.get(plugin_id)
             return plugin_info.state if plugin_info else None
+
+    def list_plugins(self) -> List[str]:
+        """
+        列出所有已注册插件ID
+
+        Returns:
+            插件ID列表
+
+        参考：
+            - 《4.5核心框架使用指南✅️.md》第96行
+        """
+        with self._lock:
+            return list(self._plugins.keys())
 
     def get_plugins_by_type(self, plugin_type: PluginType) -> List[Any]:
         """

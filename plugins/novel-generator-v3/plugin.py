@@ -346,7 +346,10 @@ class NovelGeneratorPlugin(GeneratorPlugin):
         target_word_count: int = 3500,
         strategy: Optional[Any] = None,
         use_context_memory: bool = True,
-        style_profile: Optional[Dict] = None
+        style_profile: Optional[Dict] = None,
+        knowledge_categories: Optional[List[str]] = None,  # V2.12新增
+        knowledge_domains: Optional[List[str]] = None,     # V2.12新增
+        writing_techniques: Optional[List[str]] = None,    # V2.12新增
     ) -> Tuple[str, Dict]:
         """
         生成章节内容 - 完整流程
@@ -367,6 +370,11 @@ class NovelGeneratorPlugin(GeneratorPlugin):
             characters: 人物列表
             target_word_count: 目标字数
             strategy: 生成策略
+            use_context_memory: 是否使用上下文记忆
+            style_profile: 风格档案
+            knowledge_categories: 选中的知识库分类（V2.12新增）
+            knowledge_domains: 选中的知识领域（V2.12新增）
+            writing_techniques: 选中的写作技巧（V2.12新增）
             use_context_memory: 是否使用上下文记忆
             style_profile: 风格档案
 
@@ -400,9 +408,11 @@ class NovelGeneratorPlugin(GeneratorPlugin):
                 target_word_count=target_word_count
             )
         else:
-            # 简化版提示词
+            # 简化版提示词（V2.12新增：支持知识库和写作技巧）
             base_prompt = self._build_simple_prompt(
-                chapter_title, chapter_outline, world_view, style, characters
+                chapter_title, chapter_outline, world_view, style, characters,
+                knowledge_categories=knowledge_categories,
+                writing_techniques=writing_techniques
             )
 
         # 强制附加【本章完】要求（百分百保证）
@@ -476,9 +486,14 @@ class NovelGeneratorPlugin(GeneratorPlugin):
         chapter_outline: str,
         world_view: str,
         style: str,
-        characters: List[Dict]
+        characters: List[Dict],
+        knowledge_categories: Optional[List[str]] = None,
+        writing_techniques: Optional[List[str]] = None,
     ) -> str:
-        """构建简化的提示词（当ContextBuilder不可用时）"""
+        """构建简化的提示词（当ContextBuilder不可用时）
+        
+        V2.12新增：支持知识库和写作技巧注入
+        """
         parts = [
             f"请创作小说章节：{chapter_title}",
             "",
@@ -500,6 +515,24 @@ class NovelGeneratorPlugin(GeneratorPlugin):
                 name = char.get('basic_info', {}).get('name', '未知')
                 role = char.get('basic_info', {}).get('role', '未知')
                 parts.append(f"  - {name}（{role}）")
+            parts.append("")
+        
+        # V2.12新增：注入知识库内容
+        if knowledge_categories:
+            parts.append("【知识库参考】")
+            parts.append("以下是相关的知识库内容，请在创作时参考：")
+            knowledge_content = self._retrieve_knowledge(knowledge_categories)
+            if knowledge_content:
+                parts.append(knowledge_content)
+            parts.append("")
+        
+        # V2.12新增：注入写作技巧
+        if writing_techniques:
+            parts.append("【写作技巧要求】")
+            parts.append("以下是必须遵循的写作技巧，请在创作时严格遵守：")
+            techniques_content = self._retrieve_writing_techniques(writing_techniques)
+            if techniques_content:
+                parts.append(techniques_content)
             parts.append("")
         
         parts.extend([
@@ -526,6 +559,125 @@ class NovelGeneratorPlugin(GeneratorPlugin):
             prompt += "\n\n【重要要求】章节结束时必须在末尾添加【本章完】标记！\n这是章节完成的必要条件，请务必遵守。"
 
         return prompt
+    
+    def _retrieve_knowledge(self, knowledge_categories: List[str]) -> str:
+        """
+        检索知识库内容（V2.12新增）
+        
+        Args:
+            knowledge_categories: 知识库分类列表
+            
+        Returns:
+            格式化的知识库内容
+        """
+        try:
+            # 尝试导入知识库召回器
+            from core.knowledge_recall import get_knowledge_recall
+            from pathlib import Path
+            
+            workspace_root = Path(__file__).parent.parent.parent
+            recall = get_knowledge_recall(workspace_root)
+            
+            if not recall:
+                if self._logger:
+                    self._logger.warning("[V3] 知识库召回器不可用")
+                return ""
+            
+            # 检索每个分类的知识点
+            all_knowledge = []
+            for category in knowledge_categories:
+                try:
+                    results = recall.recall_by_category(category, top_k=5)
+                    if results:
+                        for item in results:
+                            knowledge_text = f"- [{item.get('category', category)}] {item.get('name', '未知知识点')}"
+                            if 'definition' in item:
+                                knowledge_text += f": {item['definition']}"
+                            all_knowledge.append(knowledge_text)
+                except Exception as e:
+                    if self._logger:
+                        self._logger.warning(f"[V3] 检索知识库 {category} 失败: {e}")
+            
+            if all_knowledge:
+                return "\n".join(all_knowledge[:20])  # 最多20条知识点
+            else:
+                return ""
+                
+        except ImportError:
+            if self._logger:
+                self._logger.warning("[V3] 知识库召回模块未安装")
+            return ""
+        except Exception as e:
+            if self._logger:
+                self._logger.error(f"[V3] 知识库检索异常: {e}")
+            return ""
+    
+    def _retrieve_writing_techniques(self, techniques: List[str]) -> str:
+        """
+        检索写作技巧内容（V2.12新增）
+        
+        Args:
+            techniques: 写作技巧列表
+            
+        Returns:
+            格式化的写作技巧内容
+        """
+        try:
+            import json
+            from pathlib import Path
+            
+            # 写作技巧库路径
+            workspace_root = Path(__file__).parent.parent.parent
+            technique_dir = workspace_root / "data" / "knowledge"
+            
+            if not technique_dir.exists():
+                if self._logger:
+                    self._logger.warning(f"[V3] 写作技巧库目录不存在: {technique_dir}")
+                return ""
+            
+            # 遍历所有写作技巧领域文件
+            all_techniques = []
+            technique_files = [
+                "writing_technique_narrative.json",
+                "writing_technique_description.json",
+                "writing_technique_rhetoric.json",
+                "writing_technique_structure.json",
+                "writing_technique_special_sentence.json",
+                "writing_technique_advanced.json",
+            ]
+            
+            for filename in technique_files:
+                file_path = technique_dir / filename
+                if not file_path.exists():
+                    continue
+                
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    # 查找匹配的技巧
+                    for item in data:
+                        if item.get('name') in techniques:
+                            # 提取AI强制遵循规则
+                            rules = item.get('ai_mandatory_rules', [])
+                            if rules:
+                                technique_text = f"\n【{item.get('name')}】\n"
+                                technique_text += "\n".join([f"  {i+1}. {rule}" for i, rule in enumerate(rules[:5])])
+                                all_techniques.append(technique_text)
+                                
+                except Exception as e:
+                    if self._logger:
+                        self._logger.warning(f"[V3] 读取技巧文件失败 {filename}: {e}")
+            
+            if all_techniques:
+                return "\n".join(all_techniques)
+            else:
+                return ""
+                
+        except Exception as e:
+            if self._logger:
+                self._logger.error(f"[V3] 写作技巧检索异常: {e}")
+            return ""
     
     def _validate_content(
         self,
@@ -596,15 +748,21 @@ class NovelGeneratorPlugin(GeneratorPlugin):
         # 7. 上下文契合度
         scores['上下文契合度'] = 0.8
         
-        # 计算总分（加权平均）
+        # 8. 知识点引用评分（V5.3修复 - P1-1）
+        # 调用知识库一致性检测
+        knowledge_score = self._evaluate_knowledge_reference(content, knowledge_categories if 'knowledge_categories' in dir() else [])
+        scores['知识点引用'] = knowledge_score
+        
+        # 计算总分（加权平均 - V5.3更新为8维度）
         weights = {
-            '字数': 0.10,
-            '大纲': 0.15,
-            '风格': 0.25,
-            '人设': 0.25,
-            '世界观': 0.20,
-            'AI感': 0.05,
-            '上下文契合度': 0.05  # 新增维度
+            '字数': 0.08,      # V1.7版本 - 8%
+            '知识点引用': 0.08, # V1.7版本 - 8% (V5.3新增)
+            '大纲': 0.13,      # V1.7版本 - 13%
+            '风格': 0.19,      # V1.7版本 - 19%
+            '人设': 0.19,      # V1.7版本 - 19%
+            '世界观': 0.12,    # V1.7版本 - 12%
+            'AI感': 0.11,      # V1.7版本 - 逆向反馈11%
+            '上下文契合度': 0.10  # V1.7版本 - 自然度10%
         }
         
         total_score = sum(scores.get(k, 0.5) * w for k, w in weights.items())
@@ -619,6 +777,56 @@ class NovelGeneratorPlugin(GeneratorPlugin):
         
         return total_score, dimension_scores, suggestions
     
+    def _evaluate_knowledge_reference(self, content: str, knowledge_categories: List[str]) -> float:
+        """
+        知识点引用评分（V5.3修复 - P1-1）
+        
+        评估内容中对知识点的引用情况：
+        1. 知识点关键词匹配
+        2. 知识库一致性检测
+        3. 返回0-1的评分
+        
+        参考：plugins/iterative-generator-v2/plugin.py 第797-869行
+        """
+        try:
+            # 如果没有选择知识库，返回默认分
+            if not knowledge_categories:
+                return 0.7
+            
+            # 尝试调用知识库一致性检测
+            try:
+                from core.knowledge_recall import get_knowledge_recall
+                recall = get_knowledge_recall(Path(__file__).parent.parent.parent)
+                
+                # 调用一致性检测
+                check_result = recall.check_knowledge_consistency(
+                    content=content,
+                    category=None,  # 自动识别题材
+                    top_k=10
+                )
+                
+                # 返回一致性评分
+                return check_result.consistency_score
+                
+            except Exception as e:
+                logger.warning(f"知识库一致性检测失败，使用简化评分: {e}")
+                
+                # 简化评分：检测知识点关键词
+                knowledge_keywords = [
+                    '物理', '化学', '生物', '数学', '历史', '地理',
+                    '天文', '心理', '哲学', '经济', '技术', '文化',
+                    '魔法', '神话', '宗教', '修炼', '道家', '佛家'
+                ]
+                
+                matched = sum(1 for kw in knowledge_keywords if kw in content)
+                score = min(1.0, matched / 5.0)  # 每匹配5个关键词得1分
+                
+                return max(0.5, score)  # 最低0.5分
+                
+        except Exception as e:
+            logger.error(f"知识点引用评分失败: {e}")
+            return 0.5  # 默认评分
+
     def _score_context_fit(self, content: str, previous_chapters: List[str]) -> float:
         """
         上下文契合度评分（V5.3新增）

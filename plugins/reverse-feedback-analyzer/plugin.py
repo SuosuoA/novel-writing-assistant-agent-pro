@@ -13,8 +13,26 @@ V1.1版本（重构版）
 """
 
 from typing import Dict, Any, Optional
+import os
+import sys
+import importlib.util
 
-# 导入核心实现（支持两种导入方式）
+# 动态导入核心实现（支持连字符目录名）
+def _load_core_module():
+    """动态加载核心模块"""
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
+    core_file = os.path.join(plugin_dir, "reverse_feedback_analyzer.py")
+    
+    if not os.path.exists(core_file):
+        raise ImportError(f"Core module not found: {core_file}")
+    
+    spec = importlib.util.spec_from_file_location("reverse_feedback_analyzer", core_file)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["reverse_feedback_analyzer"] = module
+    spec.loader.exec_module(module)
+    return module
+
+# 尝试相对导入，失败则动态加载
 try:
     from .reverse_feedback_analyzer import (
         ReverseFeedbackAnalyzer,
@@ -22,11 +40,13 @@ try:
         LLMAnalyzer,
     )
 except ImportError:
-    from reverse_feedback_analyzer import (
-        ReverseFeedbackAnalyzer,
-        AnalysisCache,
-        LLMAnalyzer,
-    )
+    try:
+        _core_module = _load_core_module()
+        ReverseFeedbackAnalyzer = _core_module.ReverseFeedbackAnalyzer
+        AnalysisCache = _core_module.AnalysisCache
+        LLMAnalyzer = _core_module.LLMAnalyzer
+    except Exception as e:
+        raise ImportError(f"Failed to load reverse_feedback_analyzer: {e}")
 
 try:
     from core.plugin_interface import (

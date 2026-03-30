@@ -129,6 +129,13 @@ class NovelGenerationConfig:
     # 前文上下文
     previous_chapters: List[str] = field(default_factory=list)
     previous_chapter_text: str = ""
+    
+    # 知识库相关（V2.12新增）
+    knowledge_categories: List[str] = field(default_factory=list)  # 选中的知识库分类
+    knowledge_domains: List[str] = field(default_factory=list)     # 选中的知识领域
+    
+    # 写作技巧（V2.12新增）
+    writing_techniques: List[str] = field(default_factory=list)    # 选中的写作技巧
 
 
 class PipelineOrchestrator:
@@ -570,6 +577,9 @@ class PipelineOrchestrator:
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
             "previous_chapter_text": config.previous_chapter_text,
+            "knowledge_categories": config.knowledge_categories,  # V2.12新增
+            "knowledge_domains": config.knowledge_domains,        # V2.12新增
+            "writing_techniques": config.writing_techniques,      # V2.12新增
         })
         
         return context
@@ -595,6 +605,9 @@ class PipelineOrchestrator:
             "model": config.model,
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
+            "knowledge_categories": config.knowledge_categories,  # V2.12新增
+            "knowledge_domains": config.knowledge_domains,        # V2.12新增
+            "writing_techniques": config.writing_techniques,      # V2.12新增
             # 从上下文获取之前的结果
             "shared_memory": context.shared_memory,
         }

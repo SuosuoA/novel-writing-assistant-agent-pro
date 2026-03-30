@@ -1,37 +1,41 @@
 """
-质量验证器插件 V1.1
+质量验证器插件 V1.2
 
-版本: 1.1.0
+版本: 1.2.0
 创建日期: 2026-03-23
-最后更新: 2026-03-24
+最后更新: 2026-03-26
 迁移来源: V5 scripts/enhanced_weighted_validator.py
 
-功能:
-- 6维度加权评分系统
-- 字数符合性评分 (10%)
-- 大纲符合性评分 (15%)
-- 风格一致性评分 (25%)
-- 人设一致性评分 (25%)
-- 世界观一致性评分 (20%，一票否决)
-- 自然度评分 (5%)
+功能（V1.7版本 - 8维度评分体系）:
+- 字数符合性评分 (8%)
+- 知识点引用评分 (8%) - V1.7新增
+- 大纲符合性评分 (13%)
+- 风格一致性评分 (19%)
+- 人设一致性评分 (19%)
+- 世界观一致性评分 (12%)
+- 逆向反馈评分 (11%) - V1.7新增
+- 自然度评分 (10%)
 
-V1.1 新增功能:
-- 集成逆向反馈分析器，实现"上下文不违背"维度评分
-- 调用逆向反馈分析器检查章节与设定的一致性
-- 将冲突数量/严重程度转化为评分（0-1）
-- 支持高/中/低优先级冲突的差异化扣分
+V1.2 新增功能:
+- 升级为8维度评分体系（V1.7版本）
+- 新增知识点引用评分维度（knowledge_reference_score）
+- 新增逆向反馈评分维度（reverse_feedback_score）
+- 动态权重配置支持（通过enhanced_weighted_validator.py）
+- 集成逆向反馈分析器，实现上下文衔接一致性检查
+- 集成知识库检索，验证知识点引用
 
 核心规则（强制保护）:
 1. 章节结束必须添加【本章完】标记
 2. 评分阈值 >= 0.8 才能输出
 3. 迭代上限 5 次
-4. 6维度评分权重固定
+4. 8维度评分权重可通过配置文件调整
 5. 世界观严重违背一票否决
 
 参考文档:
-- 《项目总体架构设计说明书V1.2》第四章
+- 《项目总体架构设计说明书V1.5》第四章
 - 《插件接口定义V2.1》
 - 《逆向反馈分析器插件实现说明》
+- 《11.1生成和评分完善计划✅️.md》
 """
 
 import re
@@ -106,30 +110,35 @@ class WeightedValidationResult:
 class QualityValidatorPlugin(ValidatorPlugin):
     """质量验证器插件 - V5核心模块迁移
 
-    实现 ValidatorPlugin 接口，提供6维度加权评分验证。
+    实现 ValidatorPlugin 接口，提供8维度加权评分验证（V1.7版本）。
 
     验证维度:
-    - word_count: 字数符合性 (10%)
-    - outline: 大纲符合性 (15%)
-    - style: 风格一致性 (25%)
-    - character: 人设一致性 (25%)
-    - worldview: 世界观一致性 (20%)
-    - naturalness: 自然度 (5%)
+    - word_count: 字数符合性 (8%)
+    - knowledge_reference: 知识点引用 (8%) - V1.7新增
+    - outline: 大纲符合性 (13%)
+    - style: 风格一致性 (19%)
+    - character: 人设一致性 (19%)
+    - worldview: 世界观一致性 (12%)
+    - reverse_feedback: 逆向反馈 (11%) - V1.7新增
+    - naturalness: 自然度 (10%)
     """
 
     # 类常量
     PLUGIN_ID = "quality-validator-v1"
     PLUGIN_NAME = "质量验证器 V1"
-    PLUGIN_VERSION = "1.1.0"
+    PLUGIN_VERSION = "1.2.0"
 
-    # 评分权重配置（强制保护 - 不可变更）
-    WEIGHTS = {
-        'word_count': 0.10,
-        'outline': 0.15,
-        'style': 0.25,
-        'character': 0.25,
-        'worldview': 0.20,
-        'naturalness': 0.05
+    # 评分权重配置（V1.7版本 - 8维度）
+    # 实际权重从config/validator_weights.yaml动态加载
+    DEFAULT_WEIGHTS = {
+        'word_count': 0.08,
+        'knowledge_reference': 0.08,
+        'outline': 0.13,
+        'style': 0.19,
+        'character': 0.19,
+        'worldview': 0.12,
+        'reverse_feedback': 0.11,
+        'naturalness': 0.10
     }
 
     def __init__(self):
@@ -154,8 +163,14 @@ class QualityValidatorPlugin(ValidatorPlugin):
 
         self._logger = logging.getLogger(__name__)
 
+        # 动态权重验证器引用（在initialize中设置）
+        self._weight_validator = None
+
         # 逆向反馈分析器引用（在initialize中设置）
         self._reverse_feedback_analyzer = None
+
+        # 知识检索器引用（在initialize中设置）
+        self._knowledge_retriever = None
 
         # AI痕迹检测模式
         self.ai_patterns = {
@@ -219,6 +234,15 @@ class QualityValidatorPlugin(ValidatorPlugin):
         if not super().initialize(context):
             return False
 
+        # 初始化动态权重验证器
+        try:
+            from scripts.enhanced_weighted_validator import get_validator_instance
+            self._weight_validator = get_validator_instance()
+            self._logger.info(f"[{self.PLUGIN_ID}] 成功初始化动态权重验证器")
+        except Exception as e:
+            self._logger.warning(f"[{self.PLUGIN_ID}] 初始化动态权重验证器失败，使用默认配置: {e}")
+            self._weight_validator = None
+
         # 获取逆向反馈分析器插件引用
         self._reverse_feedback_analyzer = None
         try:
@@ -230,6 +254,18 @@ class QualityValidatorPlugin(ValidatorPlugin):
                     self._logger.warning("[质量验证器] 逆向反馈分析器插件未找到，上下文一致性检查将跳过")
         except Exception as e:
             self._logger.warning(f"[质量验证器] 获取逆向反馈分析器插件失败: {e}")
+
+        # 初始化知识检索器引用
+        self._knowledge_retriever = None
+        try:
+            from core.knowledge_retriever import get_knowledge_retriever
+            from pathlib import Path
+            workspace_root = Path(__file__).parent.parent.parent
+            self._knowledge_retriever = get_knowledge_retriever(workspace_root)
+            if self._knowledge_retriever:
+                self._logger.info("[质量验证器] 成功初始化知识检索器")
+        except Exception as e:
+            self._logger.warning(f"[质量验证器] 初始化知识检索器失败: {e}")
 
         self._logger.info(f"[{self.PLUGIN_ID}] 插件初始化成功")
         return True
@@ -254,6 +290,10 @@ class QualityValidatorPlugin(ValidatorPlugin):
         """
         context = context or {}
         self._logger.info("开始加权评分验证...")
+
+        # 获取动态权重配置
+        weights = self._get_current_weights()
+        self._logger.info(f"当前权重配置: {weights}")
 
         # 检查章节结束标记
         has_ending_marker = "【本章完】" in content
@@ -301,14 +341,17 @@ class QualityValidatorPlugin(ValidatorPlugin):
         # 6. 自然度评分
         naturalness = self._score_naturalness(content)
 
-        # 7. 上下文一致性评分（集成逆向反馈分析器）
-        context_consistency, context_issues = self._score_context_consistency(content, context)
+        # 7. 逆向反馈评分（V1.7新增维度 - 上下文衔接一致性）
+        reverse_feedback_score, reverse_feedback_issues = self._score_reverse_feedback(content, context)
 
         # 如果存在高优先级冲突，记录警告
-        if context_consistency < 0.6:
-            self._logger.warning(f"上下文一致性评分较低: {context_consistency:.2f}")
-            for issue in context_issues:
+        if reverse_feedback_score < 0.6:
+            self._logger.warning(f"逆向反馈评分较低: {reverse_feedback_score:.2f}")
+            for issue in reverse_feedback_issues:
                 self._logger.warning(f"  - {issue}")
+
+        # 8. 知识点引用评分（V1.7新增维度 - 知识库功能）
+        knowledge_reference_score, recalled_knowledge = self._score_knowledge_reference(content, context)
 
         # 检查严重违背世界观（一票否决）
         if worldview_violation:
@@ -316,41 +359,47 @@ class QualityValidatorPlugin(ValidatorPlugin):
             total_score = 0.0
             passed = False
         else:
-            # 计算加权总分
+            # 计算加权总分（V1.7版本 - 8维度）
             total_score = (
-                word_count_score.score * self.WEIGHTS['word_count'] +
-                outline_compliance.score * self.WEIGHTS['outline'] +
-                style_consistency * self.WEIGHTS['style'] +
-                character_consistency * self.WEIGHTS['character'] +
-                worldview_consistency * self.WEIGHTS['worldview'] +
-                naturalness.score * self.WEIGHTS['naturalness']
+                word_count_score.score * weights['word_count'] +
+                knowledge_reference_score * weights['knowledge_reference'] +
+                outline_compliance.score * weights['outline'] +
+                style_consistency * weights['style'] +
+                character_consistency * weights['character'] +
+                worldview_consistency * weights['worldview'] +
+                reverse_feedback_score * weights['reverse_feedback'] +
+                naturalness.score * weights['naturalness']
             )
-
-            # 上下文一致性作为额外加权因子（影响总分但不参与权重计算）
-            # 如果上下文一致性评分较低，会降低总分
-            if context_consistency < 0.7:
-                # 应用惩罚因子：每低于0.1扣减5%的总分
-                penalty_factor = max(0.7, context_consistency)
-                total_score = total_score * penalty_factor
-                self._logger.info(f"上下文一致性惩罚因子: {penalty_factor:.2f}")
 
             # 必须同时满足：总分达标 + 包含结束标记
             passed = (total_score >= 0.8 and has_ending_marker)
 
-        # 创建ValidationScores对象
+        # 创建ValidationScores对象（V1.7版本 - 8维度）
         scores = ValidationScores(
             word_count_score=word_count_score.score,
+            knowledge_reference_score=knowledge_reference_score,
             outline_score=outline_compliance.score,
             style_score=style_consistency,
             character_score=character_consistency,
             worldview_score=worldview_consistency,
+            reverse_feedback_score=reverse_feedback_score,
             naturalness_score=naturalness.score,
             total_score=total_score,
             has_chapter_end=has_ending_marker
         )
+        # 设置逆向反馈详情
+        if reverse_feedback_issues:
+            scores.reverse_feedback_issues = [
+                {"description": issue, "severity": "medium"}
+                for issue in reverse_feedback_issues
+            ]
+        # 设置召回的知识点
+        if recalled_knowledge:
+            scores.recalled_knowledge = recalled_knowledge
+
         scores.calculate_total()
 
-        self._logger.info(f"验证完成: 总分={total_score:.2f}, 通过={passed}, 上下文一致性={context_consistency:.2f}")
+        self._logger.info(f"验证完成: 总分={total_score:.2f}, 通过={passed}, 逆向反馈={reverse_feedback_score:.2f}")
         return scores
 
     def validate_with_weights(
@@ -469,13 +518,64 @@ class QualityValidatorPlugin(ValidatorPlugin):
     def get_validation_dimensions(self) -> List[str]:
         """获取验证维度"""
         return [
-            "word_count",      # 字数（10%）
-            "outline",         # 大纲（15%）
-            "style",           # 风格（25%）
-            "character",       # 人设（25%）
-            "worldview",       # 世界观（20%）
-            "naturalness"      # 自然度（5%）
+            "word_count",          # 字数（8%）
+            "knowledge_reference", # 知识点引用（8%）- V1.7新增
+            "outline",             # 大纲（13%）
+            "style",               # 风格（19%）
+            "character",           # 人设（19%）
+            "worldview",           # 世界观（12%）
+            "reverse_feedback",    # 逆向反馈（11%）- V1.7新增
+            "naturalness",         # 自然度（10%）
         ]
+    
+    def _get_current_weights(self) -> Dict[str, float]:
+        """获取当前权重配置（支持动态配置和热更新）
+        
+        Returns:
+            权重配置字典
+        """
+        # 如果动态权重验证器可用，使用动态配置
+        if self._weight_validator:
+            # 检查配置文件是否修改
+            self._weight_validator.check_and_reload_if_modified()
+            return self._weight_validator.weights
+        
+        # 否则使用默认配置（V1.7版本 - 8维度）
+        return self.DEFAULT_WEIGHTS
+    
+    def update_weights(self, new_weights: Dict[str, float], updated_by: str = "api") -> bool:
+        """热更新权重配置
+        
+        Args:
+            new_weights: 新的权重配置字典
+            updated_by: 更新来源标识
+        
+        Returns:
+            是否更新成功
+        """
+        if not self._weight_validator:
+            self._logger.warning("动态权重验证器未初始化，无法热更新")
+            return False
+        
+        return self._weight_validator.update_weights(new_weights, updated_by)
+    
+    def get_weight_config_info(self) -> Dict[str, Any]:
+        """获取权重配置信息
+        
+        Returns:
+            配置信息字典
+        """
+        if not self._weight_validator:
+            return {
+                'config_path': None,
+                'config_version': 'default',
+                'last_updated': 'N/A',
+                'updated_by': 'system',
+                'weights': self._get_current_weights(),
+                'total_weight': sum(self._get_current_weights().values()),
+            }
+        
+        return self._weight_validator.get_config_info()
 
     # ===== 内部评分方法 =====
 
@@ -795,12 +895,12 @@ class QualityValidatorPlugin(ValidatorPlugin):
 
         return 1.0, False
 
-    def _score_context_consistency(
+    def _score_reverse_feedback(
         self,
         text: str,
         context: Dict[str, Any]
     ) -> Tuple[float, List[str]]:
-        """上下文一致性评分（集成逆向反馈分析器）
+        """逆向反馈评分（V1.7新增维度 - 上下文衔接一致性）
 
         调用逆向反馈分析器检查章节与设定的一致性，将冲突数量和严重程度转化为评分。
 
@@ -885,6 +985,93 @@ class QualityValidatorPlugin(ValidatorPlugin):
         except Exception as e:
             self._logger.error(f"逆向反馈分析失败: {e}")
             return 0.7, [f"逆向反馈分析异常: {str(e)}"]
+
+    def _score_knowledge_reference(
+        self,
+        text: str,
+        context: Dict[str, Any]
+    ) -> Tuple[float, List[Dict[str, Any]]]:
+        """知识点引用评分（V1.7新增维度 - 知识库功能）
+
+        验证生成内容是否正确引用知识库知识点。
+
+        评分逻辑：
+        - 基础分：0.5（默认分）
+        - 成功召回知识点：+0.2
+        - 知识点在文本中被引用：+0.3
+        - 最高分：1.0
+
+        Args:
+            text: 章节文本内容
+            context: 验证上下文，需包含：
+                - genre: 题材类型（科幻/玄幻/都市等）
+                - knowledge_retriever: 知识检索器实例（可选）
+
+        Returns:
+            Tuple[float, List[Dict]]: (评分, 召回的知识点列表)
+        """
+        recalled_knowledge = []
+
+        # 尝试获取知识检索器（优先使用实例变量，其次从context获取）
+        knowledge_retriever = self._knowledge_retriever or context.get('knowledge_retriever')
+        genre = context.get('genre', '通用')
+
+        if not knowledge_retriever:
+            self._logger.debug("知识检索器不可用，返回默认知识点引用评分")
+            return 0.7, []
+
+        try:
+            # 从文本中提取关键词
+            keywords = self._extract_keywords(text)[:10]
+
+            if not keywords:
+                return 0.6, []
+
+            # 调用知识检索器召回知识点（方法名：recall_knowledge）
+            self._logger.info(f"调用知识检索器召回知识点，题材: {genre}, 关键词: {keywords[:5]}")
+            results = knowledge_retriever.recall_knowledge(
+                query=" ".join(keywords),
+                category=genre,
+                top_k=5
+            )
+
+            if not results:
+                return 0.6, []
+
+            # 计算评分
+            base_score = 0.5
+            recall_bonus = min(0.2, len(results) * 0.05)  # 每个召回的知识点加0.05
+
+            # 检查知识点是否在文本中被引用
+            reference_bonus = 0.0
+            for result in results:
+                knowledge_text = result.content if hasattr(result, 'content') else result.get('content', '')
+                # 简单匹配：检查知识点关键词是否出现在文本中
+                knowledge_keywords = self._extract_keywords(knowledge_text)[:3]
+                if any(kw in text for kw in knowledge_keywords):
+                    reference_bonus += 0.1
+                    recalled_knowledge.append({
+                        "id": result.knowledge_id if hasattr(result, 'knowledge_id') else result.get('id', ''),
+                        "content": knowledge_text[:100],
+                        "referenced": True
+                    })
+                else:
+                    recalled_knowledge.append({
+                        "id": result.knowledge_id if hasattr(result, 'knowledge_id') else result.get('id', ''),
+                        "content": knowledge_text[:100],
+                        "referenced": False
+                    })
+
+            reference_bonus = min(0.3, reference_bonus)
+            score = min(1.0, base_score + recall_bonus + reference_bonus)
+
+            self._logger.info(f"知识点引用评分: {score:.2f}, 召回{len(results)}个知识点, 引用{len([k for k in recalled_knowledge if k['referenced']])}个")
+
+            return score, recalled_knowledge
+
+        except Exception as e:
+            self._logger.error(f"知识点引用评分失败: {e}")
+            return 0.6, []
 
     def _score_naturalness(self, text: str) -> NaturalnessScore:
         """自然度评分"""

@@ -94,6 +94,7 @@ class ServiceLocator:
         """初始化服务定位器"""
         self._services: Dict[Type, Any] = {}
         self._descriptors: Dict[Type, ServiceDescriptor] = {}
+        self._named_services: Dict[str, Any] = {}  # V2.23新增：支持名称访问
         self._lock = threading.RLock()
         self._initializing: Set[Type] = set()  # 用于检测循环依赖
 
@@ -124,6 +125,36 @@ class ServiceLocator:
 
             if scope == ServiceScope.SINGLETON:
                 self._services[service_type] = instance
+
+    def register_service(self, name: str, instance: Any) -> None:
+        """
+        按名称注册服务实例（V2.23新增：支持字符串名称访问）
+
+        Args:
+            name: 服务名称（如"ai_service"）
+            instance: 服务实例
+        """
+        with self._lock:
+            self._named_services[name] = instance
+            logger.debug(f"注册命名服务: {name}")
+
+    def get_service(self, name: str) -> Any:
+        """
+        按名称获取服务实例（V2.23新增：支持字符串名称访问）
+
+        Args:
+            name: 服务名称（如"ai_service"）
+
+        Returns:
+            服务实例
+
+        Raises:
+            ServiceNotFoundError: 服务未注册
+        """
+        with self._lock:
+            if name in self._named_services:
+                return self._named_services[name]
+            raise ServiceNotFoundError(f"服务 '{name}' 未注册")
 
     def register_factory(
         self,
@@ -187,6 +218,22 @@ class ServiceLocator:
             if service_type in self._services:
                 del self._services[service_type]
             return True
+
+    def has(self, service_type: Type) -> bool:
+        """
+        检查服务是否已注册
+
+        Args:
+            service_type: 服务类型
+
+        Returns:
+            是否已注册
+
+        参考：
+            - 《4.5核心框架使用指南✅️.md》
+        """
+        with self._lock:
+            return service_type in self._descriptors
 
     def get(self, service_type: Type) -> Any:
         """

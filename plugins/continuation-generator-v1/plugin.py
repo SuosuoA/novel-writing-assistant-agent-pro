@@ -96,6 +96,13 @@ from core.models import (
     GenerationResult,
 )
 
+# V1.3新增：导入全局缓存管理器
+try:
+    from core.cache_manager import get_cache_manager, generate_cache_key
+    CACHE_MANAGER_AVAILABLE = True
+except ImportError:
+    CACHE_MANAGER_AVAILABLE = False
+
 
 # ============================================================================
 # 项目上下文管理器
@@ -900,6 +907,9 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
         
         # V1.2新增：超时时间
         self._timeout: int = self.DEFAULT_TIMEOUT
+        
+        # V1.3新增：全局缓存管理器引用
+        self._cache_manager: Optional[Any] = None
     
     @classmethod
     def get_metadata(cls) -> PluginMetadata:
@@ -931,6 +941,14 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
             # V1.1新增: 初始化上下文管理器
             self._context_manager = ProjectContextManager()
             self._context_manager.set_logger(self._logger)
+            
+            # V1.3新增: 初始化全局缓存管理器
+            if CACHE_MANAGER_AVAILABLE:
+                try:
+                    self._cache_manager = get_cache_manager()
+                    self._logger.info("[ContinuationGenerator] 全局缓存管理器初始化成功")
+                except Exception as e:
+                    self._logger.warning(f"[ContinuationGenerator] 全局缓存管理器初始化失败: {e}")
             
             # 从服务定位器获取API客户端
             if hasattr(context, 'service_locator') and context.service_locator:
@@ -1120,6 +1138,8 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
         
         基于起始文本和上下文，生成续写内容。
         
+        V1.3新增：集成全局缓存，提升缓存命中率
+        
         Args:
             request: 续写请求参数
             
@@ -1129,6 +1149,47 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
         start_time = time.time()
         
         try:
+            # V1.3新增：生成缓存键
+            cache_key = None
+            if self._cache_manager and CACHE_MANAGER_AVAILABLE:
+                cache_key = generate_cache_key(
+                    request.starting_text[:100],  # 只取前100字符
+                    request.direction,
+                    request.word_count,
+                    request.temperature or self.default_temperature
+                )
+                
+                # 尝试从缓存获取
+                cached_result = self._cache_manager.get("continuation", cache_key)
+                if cached_result and isinstance(cached_result, dict):
+                    # 缓存命中，直接返回
+                    if self._logger:
+                        self._logger.info(
+                            f"[ContinuationGenerator] 缓存命中，跳过API调用 "
+                            f"(命中率: {self._cache_manager.get_stats()['global']['hit_rate']:.2%})"
+                        )
+                    
+                    # 重建ContinuationResult
+                    return ContinuationResult(
+                        text=cached_result.get("text", ""),
+                        word_count=cached_result.get("word_count", 0),
+                        metadata=ContinuationMetadata(
+                            model_name=cached_result.get("model_name", ""),
+                            provider=cached_result.get("provider", ""),
+                            generation_time=0.0,  # 缓存结果
+                            tokens_used=0,
+                            iterations=1,
+                            coherence_score=cached_result.get("coherence_score", 0.8),
+                            style_match_score=0.8,
+                            context_length=0,
+                            starting_text_length=len(request.starting_text),
+                            timestamp=datetime.now()
+                        ),
+                        success=True,
+                        error=None,
+                        suggestions=cached_result.get("suggestions")
+                    )
+            
             # 1. 构建Prompt
             prompt = self._build_continuation_prompt(request)
             
@@ -1141,6 +1202,10 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
             # 4. 调用大模型API
             if self._logger:
                 self._logger.info(f"[ContinuationGenerator] 开始续写 - 方向: {request.direction}, 字数: {request.word_count}")
+            
+            # V1.3新增：记录API调用
+            if self._cache_manager:
+                self._cache_manager.record_api_call()
             
             generated_text = self._call_llm_api(
                 prompt=prompt,
@@ -1174,6 +1239,28 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
             
             # 记录历史
             self._record_generation(request, processed_text, metadata)
+            
+            # V1.3新增：存储到缓存
+            if self._cache_manager and cache_key:
+                cache_data = {
+                    "text": processed_text,
+                    "word_count": word_count,
+                    "model_name": metadata.model_name,
+                    "provider": metadata.provider,
+                    "coherence_score": metadata.coherence_score,
+                    "suggestions": suggestions,
+                    "direction": request.direction,
+                    "cached_at": datetime.now().isoformat()
+                }
+                self._cache_manager.set("continuation", cache_key, cache_data)
+                
+                # 记录性能摘要日志
+                if self._logger:
+                    stats = self._cache_manager.get_stats()
+                    self._logger.debug(
+                        f"[ContinuationGenerator] 结果已缓存 - "
+                        f"命中率: {stats['global']['hit_rate']:.2%}"
+                    )
             
             return ContinuationResult(
                 text=processed_text,
@@ -1287,27 +1374,40 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
             # 构建系统提示词
             system_prompt = self._build_system_prompt(request)
             
-            # 流式调用API
-            response = self._api_client.chat.completions.create(
-                model=self.default_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
+            # 使用AIServiceManager统一调用（流式）
+            from core.ai_service_manager import get_ai_service_manager
+            from core.ai_provider import GenerationConfig, AIProviderUnavailableError
+
+            ai_manager = get_ai_service_manager()
+            
+            config = GenerationConfig(
                 temperature=request.temperature or self.default_temperature,
                 max_tokens=max_tokens,
-                stream=True,
                 timeout=self._timeout
             )
             
-            # 流式输出
-            for chunk in response:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    full_text += content
-                    if callback:
-                        callback(content)
-                    yield content
+            try:
+                # 流式生成
+                result = ai_manager.generate_text_stream(
+                    prompt=prompt,
+                    callback=callback,
+                    config=config,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                
+                # 检查生成结果
+                if not result.success:
+                    logger.error(f"流式生成失败: {result.error}")
+                    raise LLMError(f"续写失败: {result.error}")
+                
+                full_text = result.text
+                
+            except AIProviderUnavailableError as e:
+                logger.error(f"AI服务不可用: {e}")
+                raise LLMConnectionError("AI服务暂时不可用，请稍后重试")
             
             # 后处理
             processed_text = self._post_process(full_text, request)
@@ -1937,18 +2037,33 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
         返回:
             生成的文本
         """
-        response = self._api_client.chat.completions.create(
-            model=self.default_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
+        # 使用AIServiceManager统一调用
+        from core.ai_service_manager import get_ai_service_manager
+        from core.ai_provider import GenerationConfig
+
+        ai_manager = get_ai_service_manager()
+        
+        config = GenerationConfig(
             temperature=temperature,
             max_tokens=max_tokens,
             timeout=self._timeout
         )
         
-        return response.choices[0].message.content
+        result = ai_manager.generate_text(
+            prompt=prompt,
+            config=config,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        # 检查生成结果
+        if not result.success:
+            logger.error(f"续写生成失败: {result.error}")
+            raise LLMError(f"续写失败: {result.error}")
+        
+        return result.text
     
     # =========================================================================
     # 辅助方法

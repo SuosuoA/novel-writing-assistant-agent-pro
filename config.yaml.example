@@ -1,0 +1,87 @@
+# Novel Writing Assistant - Agent Pro 配置文件示例
+# 
+# 使用方法：
+# 1. 复制此文件并重命名为 config.yaml
+# 2. 填入你自己的 DeepSeek API Key
+# 3. 根据需要调整其他参数
+#
+# 重要提示：
+# - config.yaml 已被添加到 .gitignore，不会被上传到GitHub
+# - 请妥善保管你的API密钥，不要分享给他人
+
+# AI 服务配置
+provider: DeepSeek              # 提供商：DeepSeek / OpenAI / Anthropic / Ollama / Qwen
+model: deepseek-chat           # 模型：deepseek-chat / deepseek-reasoner / gpt-4o / qwen2.5-14b-gptq
+# ⚠️ API Key 已加密存储在 .secrets/api_keys.enc 中
+# ⚠️ 此字段仅作占位符，请勿在此填写真实API Key
+# ⚠️ 如需配置API Key，请：
+#    1. 启动程序后，在设置页面填写API Key
+#    2. 系统会自动加密存储到 .secrets/api_keys.enc
+#    3. 或使用 plugins/api-config-manager-v1 插件管理
+api_key: YOUR_API_KEY_ENCRYPTED
+service_mode: remote           # 服务模式：remote（线上API）/ local（本地模型）
+temperature: 0.7               # 温度参数：0.0-1.0（越高越随机）
+
+# 本地模型配置（仅当 service_mode: local 时生效）
+# ========================================
+# 方案1：使用Ollama（推荐，简单易用）
+# ========================================
+# local_url: http://localhost:11434/v1
+# provider: Ollama
+# model: qwen2.5:14b
+
+# ========================================
+# 方案2：使用本地Qwen服务（F:\Qwen）
+# ========================================
+# local_url: http://localhost:8000
+# provider: Qwen
+# model: qwen2.5-14b-gptq
+
+local_url: http://localhost:11434/v1  # Ollama 默认地址
+
+# 界面配置
+theme: dark                    # 主题：dark / light / system
+font_size: '14'                # 字体大小
+window_size: 1280x720          # 窗口大小
+
+# 功能配置
+auto_save: true                # 自动保存
+backup_interval: '30'          # 备份间隔（分钟）
+ai_learning: true              # AI学习功能
+save_path: E:\WorkBuddyworkspace\Novel Writing Assistant-Agent Pro  # 保存路径
+
+# ========================================
+# 记忆配置（OpenClaw mem9）
+# ========================================
+memory:
+  wal_auto_save: true          # WAL自动保存（AI调用前保存会话状态）
+  auto_recovery: true          # 会话自动恢复（程序启动时恢复上次会话）
+  vector_recall_topk: 10       # 向量召回数量（上下文召回时返回的相似章节数）
+  daily_meditation_time: '23:00'  # 每日冥想时间（自动提炼当日重要事件）
+  embedding_model: local       # Embedding模型（local=本地模型，openai=OpenAI API，deepseek=DeepSeek API）
+
+# ========================================
+# DeepSeek API 使用说明
+# ========================================
+# 
+# 1. 申请API Key：
+#    访问 https://platform.deepseek.com/api_keys 创建API密钥
+#
+# 2. 支持的模型：
+#    - deepseek-chat: DeepSeek-V3.2 非思考模式（128K上下文）
+#    - deepseek-reasoner: DeepSeek-V3.2 思考模式（128K上下文）
+#
+# 3. 费用说明：
+#    - deepseek-chat: 约 0.14元/百万token（输入），0.28元/百万token（输出）
+#    - deepseek-reasoner: 约 0.55元/百万token（输入），2.19元/百万token（输出）
+#
+# 4. 官方文档：
+#    https://api-docs.deepseek.com/zh-cn/
+#
+# ========================================
+# 安全提示
+# ========================================
+#
+# ⚠️ 请勿将包含真实 API Key 的 config.yaml 文件上传到 GitHub 或其他公开平台
+# ⚠️ API Key 应该妥善保管，不要分享给他人
+# ⚠️ 如果 API Key 泄露，请立即前往平台重新生成

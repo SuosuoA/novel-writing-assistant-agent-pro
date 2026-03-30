@@ -12,6 +12,7 @@ V1.0版本
 - 事件发布（热插拔事件）
 """
 
+import os
 import hashlib
 import json
 import logging
@@ -45,6 +46,11 @@ try:
     logger = get_logger("core.hot_swap_manager")
 except ImportError:
     logger = logging.getLogger(__name__)
+
+# 开发模式：允许跳过签名验证（通过环境变量控制）
+# 设置 SKIP_PLUGIN_SIGNATURE=1 或 DEV_MODE=1 启用
+SKIP_SIGNATURE_CHECK = os.getenv('SKIP_PLUGIN_SIGNATURE', '').lower() in ('1', 'true', 'yes')
+DEV_MODE = os.getenv('DEV_MODE', '').lower() in ('1', 'true', 'yes')
 
 
 class HotSwapAction(Enum):
@@ -201,6 +207,11 @@ class HotSwapPermission:
         """
         # V5保护模块禁止热插拔
         if plugin_id in self.V5_PROTECTED_MODULES:
+            return "L2"  # 允许加载，但禁止热重载和卸载
+
+        # 开发模式：跳过签名验证
+        if SKIP_SIGNATURE_CHECK or DEV_MODE:
+            logger.warning(f"[DEV MODE] Skipping signature check for plugin: {plugin_id}")
             return "L2"  # 允许加载，但禁止热重载和卸载
 
         # 未签名插件禁止加载

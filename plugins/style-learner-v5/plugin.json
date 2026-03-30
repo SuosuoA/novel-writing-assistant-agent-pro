@@ -18,6 +18,5 @@
     "file.read"
   ],
   "min_platform_version": "6.0.0",
-  "entry_class": "StyleLearnerPlugin",
-  "signature": "6c867a73be23e3874a353bbda60e7b57bf92bab4a4b0b1a28288baafeb9e2d0b"
+  "entry_class": "StyleLearnerPlugin"
 }

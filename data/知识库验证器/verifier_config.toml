@@ -1,0 +1,65 @@
+# 知识库验证器配置
+# 用于控制查重和质量评估的各项阈值
+
+[duplicates]
+# 语义相似度阈值（0-1），高于此值视为重复
+similarity_threshold = 0.85
+
+# 内容重叠度阈值（0-1），Jaccard相似度高于此值视为重复
+overlap_threshold = 0.70
+
+# SimHash汉明距离阈值，小于此值可能相似
+simhash_hamming_threshold = 10
+
+# SimHash分桶前缀长度（位数）
+simhash_prefix_bits = 8
+
+[quality]
+# 质量评分阈值（0-10分），低于此值视为低质量
+quality_threshold = 6.0
+
+# 自动删除阈值（0-10分），低于此值自动删除
+auto_delete_threshold = 4.0
+
+# 各维度权重（总和必须为1.0）
+content_length_weight = 0.25
+keyword_count_weight = 0.20
+reference_count_weight = 0.20
+content_relevance_weight = 0.20
+language_quality_weight = 0.15
+
+# 内容长度评分参数（字数）
+content_length_excellent = 2500   # 优秀：≥2500字
+content_length_good = 1000        # 良好：≥1000字
+content_length_poor = 500         # 较差：<500字
+
+# 关键词数量评分参数（个数）
+keyword_count_excellent = 8       # 优秀：≥8个
+keyword_count_good = 5            # 良好：≥5个
+keyword_count_poor = 3            # 较差：<3个
+
+# 参考作品数量评分参数（个数）
+reference_count_excellent = 3     # 优秀：≥3个
+reference_count_good = 2          # 良好：≥2个
+reference_count_poor = 1          # 较差：<1个
+
+[backup]
+# 备份自动清理天数，超过此天数的备份自动删除
+auto_cleanup_days = 30
+
+# 最大备份数量限制
+max_backup_count = 10
+
+[security]
+# 危险路径模式（逗号分隔）
+dangerous_patterns = "../, ..\\, /, C:\\, ~/"
+
+# 是否启用路径白名单
+enable_whitelist = true
+
+[monitoring]
+# 是否启用统计看板
+enable_dashboard = true
+
+# 统计数据保存天数
+stats_retention_days = 90

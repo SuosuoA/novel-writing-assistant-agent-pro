@@ -1,0 +1,64 @@
+{
+  "total_tests": 14,
+  "passed": 14,
+  "failed": 0,
+  "issues": [],
+  "details": {
+    "文件结构完整性": {
+      "passed": true,
+      "detail": "完整"
+    },
+    "models.py导入": {
+      "passed": true,
+      "detail": ""
+    },
+    "validator.py导入": {
+      "passed": true,
+      "detail": ""
+    },
+    "optimizer.py导入": {
+      "passed": true,
+      "detail": ""
+    },
+    "memory.py导入": {
+      "passed": true,
+      "detail": ""
+    },
+    "local_model.py导入": {
+      "passed": true,
+      "detail": ""
+    },
+    "九维度评分": {
+      "passed": true,
+      "detail": ""
+    },
+    "【本章完】强制检查": {
+      "passed": true,
+      "detail": ""
+    },
+    "优化建议生成": {
+      "passed": true,
+      "detail": ""
+    },
+    "Claw记忆集成": {
+      "passed": true,
+      "detail": ""
+    },
+    "本地模型辅助": {
+      "passed": true,
+      "detail": ""
+    },
+    "GUI集成": {
+      "passed": true,
+      "detail": ""
+    },
+    "降级方案": {
+      "passed": true,
+      "detail": ""
+    },
+    "完整数据流": {
+      "passed": true,
+      "detail": ""
+    }
+  }
+}

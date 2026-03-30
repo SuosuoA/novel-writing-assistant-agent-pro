@@ -13,6 +13,5 @@
   "conflicts": [],
   "permissions": [],
   "min_platform_version": "1.0.0",
-  "entry_class": "HelloWorldPlugin",
-  "signature": "8a731b2c18b26a95bb97d9cbfb7d14225fcfcf05cabc8a25ac2c6d7304c6694e"
+  "entry_class": "HelloWorldPlugin"
 }

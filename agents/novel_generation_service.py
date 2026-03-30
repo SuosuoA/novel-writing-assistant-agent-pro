@@ -1,18 +1,21 @@
 """
 小说生成服务
 
-V1.0版本
+V1.1版本（异步支持）
 创建日期: 2026-03-24
+更新日期: 2026-03-28
 
 特性:
 - 封装流水线调用逻辑
 - 管理Agent注册表
 - 提供GUI回调接口
+- 异步生成支持（解决卡顿问题）
 """
 
 import logging
 import threading
 import os
+import asyncio
 from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass
 
@@ -162,6 +165,9 @@ class NovelGenerationService:
         previous_chapter_text: str = "",
         max_iterations: int = 5,
         callback: Callable[[PipelineExecutionResult], None] = None,
+        knowledge_categories: List[str] = None,  # V2.12新增
+        knowledge_domains: List[str] = None,      # V2.12新增
+        writing_techniques: List[str] = None,     # V2.12新增
     ) -> str:
         """
         生成章节内容（异步）
@@ -179,6 +185,9 @@ class NovelGenerationService:
             previous_chapter_text: 上一章内容
             max_iterations: 最大迭代次数
             callback: 完成回调
+            knowledge_categories: 选中的知识库分类（V2.12新增）
+            knowledge_domains: 选中的知识领域（V2.12新增）
+            writing_techniques: 选中的写作技巧（V2.12新增）
             
         Returns:
             流水线ID
@@ -195,6 +204,9 @@ class NovelGenerationService:
             worldview=worldview or {},
             max_iterations=max_iterations,
             previous_chapter_text=previous_chapter_text,
+            knowledge_categories=knowledge_categories or [],
+            knowledge_domains=knowledge_domains or [],
+            writing_techniques=writing_techniques or [],
         )
         
         # 包装回调
@@ -245,6 +257,144 @@ class NovelGenerationService:
     def cancel_generation(self) -> bool:
         """取消当前生成"""
         return self._orchestrator.cancel()
+    
+    # === 异步生成接口（V1.1新增 - 解决卡顿问题）===
+    
+    async def generate_chapter_async(
+        self,
+        chapter_title: str,
+        chapter_number: int,
+        outline_content: str,
+        chapter_outline: str,
+        target_word_count: int = 2000,
+        style_sample_path: str = "",
+        style_profile: Dict[str, Any] = None,
+        characters: List[Dict[str, Any]] = None,
+        worldview: Dict[str, Any] = None,
+        previous_chapter_text: str = "",
+        max_iterations: int = 5,
+        on_progress: Callable[[GenerationProgress], None] = None,
+        on_chunk: Callable[[str], None] = None,
+        knowledge_categories: List[str] = None,
+        knowledge_domains: List[str] = None,
+        writing_techniques: List[str] = None,
+    ) -> PipelineExecutionResult:
+        """
+        异步生成章节内容（新增方法）
+        
+        核心设计：
+        - Service层负责异步调度
+        - 使用统一线程池执行
+        - 支持进度回调和流式输出
+        - 不阻塞UI线程
+        
+        Args:
+            chapter_title: 章节标题
+            chapter_number: 章节编号
+            outline_content: 完整大纲内容
+            chapter_outline: 当前章节大纲
+            target_word_count: 目标字数
+            style_sample_path: 风格样本路径
+            style_profile: 风格档案
+            characters: 人物设定
+            worldview: 世界观设定
+            previous_chapter_text: 上一章内容
+            max_iterations: 最大迭代次数
+            on_progress: 进度回调
+            on_chunk: 流式输出回调（逐字显示）
+            knowledge_categories: 选中的知识库分类
+            knowledge_domains: 选中的知识领域
+            writing_techniques: 选中的写作技巧
+            
+        Returns:
+            PipelineExecutionResult: 流水线执行结果
+        """
+        from core.thread_pool_manager import thread_pool_manager
+        
+        config = NovelGenerationConfig(
+            chapter_title=chapter_title,
+            chapter_number=chapter_number,
+            target_word_count=target_word_count,
+            outline_content=outline_content,
+            chapter_outline=chapter_outline,
+            style_sample_path=style_sample_path,
+            style_profile=style_profile or {},
+            characters=characters or [],
+            worldview=worldview or {},
+            max_iterations=max_iterations,
+            previous_chapter_text=previous_chapter_text,
+            knowledge_categories=knowledge_categories or [],
+            knowledge_domains=knowledge_domains or [],
+            writing_techniques=writing_techniques or [],
+        )
+        
+        # 添加进度回调（如果有）
+        if on_progress:
+            self.add_progress_callback(on_progress)
+        
+        try:
+            # 在统一线程池中执行同步方法
+            result = await thread_pool_manager.run_in_executor(
+                self._orchestrator.execute_novel_generation,
+                config
+            )
+            
+            return result
+            
+        finally:
+            # 移除进度回调
+            if on_progress:
+                self.remove_progress_callback(on_progress)
+    
+    def submit_async_generation(
+        self,
+        chapter_title: str,
+        chapter_number: int,
+        outline_content: str,
+        chapter_outline: str,
+        on_complete: Callable[[PipelineExecutionResult], None] = None,
+        on_error: Callable[[Exception], None] = None,
+        on_progress: Callable[[GenerationProgress], None] = None,
+        **kwargs
+    ) -> str:
+        """
+        提交异步生成任务（便捷方法）
+        
+        使用ThreadPoolManager提交异步任务，适合GUI层调用
+        
+        Args:
+            chapter_title: 章节标题
+            chapter_number: 章节编号
+            outline_content: 完整大纲内容
+            chapter_outline: 当前章节大纲
+            on_complete: 完成回调
+            on_error: 错误回调
+            on_progress: 进度回调
+            **kwargs: 其他参数
+            
+        Returns:
+            str: 任务ID（可用于取消）
+        """
+        from core.thread_pool_manager import thread_pool_manager
+        
+        # 创建异步任务
+        coro = self.generate_chapter_async(
+            chapter_title=chapter_title,
+            chapter_number=chapter_number,
+            outline_content=outline_content,
+            chapter_outline=chapter_outline,
+            on_progress=on_progress,
+            **kwargs
+        )
+        
+        # 提交到统一线程池
+        future = thread_pool_manager.submit_async(
+            coro,
+            on_complete=on_complete,
+            on_error=on_error
+        )
+        
+        return str(id(future))
     
     def get_generation_state(self) -> PipelineState:
         """获取当前生成状态"""

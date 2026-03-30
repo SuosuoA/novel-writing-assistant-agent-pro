@@ -1,0 +1,79 @@
+{
+  "timestamp": "2026-03-29T00:23:02.056448",
+  "total_target": 1130,
+  "total_actual": 5,
+  "completion_rate": 0.004424778761061947,
+  "categories": {
+    "scifi": {
+      "target": 559,
+      "actual": 5,
+      "domains": {
+        "physics": {
+          "target": 209,
+          "actual": 5,
+          "completion_rate": 0.023923444976076555
+        },
+        "biology": {
+          "target": 150,
+          "actual": 0,
+          "completion_rate": 0.0
+        },
+        "space": {
+          "target": 100,
+          "actual": 0,
+          "completion_rate": 0.0
+        },
+        "technology": {
+          "target": 100,
+          "actual": 0,
+          "completion_rate": 0.0
+        }
+      },
+      "completion_rate": 0.008944543828264758
+    },
+    "xuanhuan": {
+      "target": 334,
+      "actual": 0,
+      "domains": {
+        "magic": {
+          "target": 120,
+          "actual": 0,
+          "completion_rate": 0.0
+        },
+        "mythology": {
+          "target": 114,
+          "actual": 0,
+          "completion_rate": 0.0
+        },
+        "cultivation": {
+          "target": 100,
+          "actual": 0,
+          "completion_rate": 0.0
+        }
+      },
+      "completion_rate": 0.0
+    },
+    "general": {
+      "target": 237,
+      "actual": 0,
+      "domains": {
+        "writing": {
+          "target": 80,
+          "actual": 0,
+          "completion_rate": 0.0
+        },
+        "narrative": {
+          "target": 77,
+          "actual": 0,
+          "completion_rate": 0.0
+        },
+        "character": {
+          "target": 80,
+          "actual": 0,
+          "completion_rate": 0.0
+        }
+      },
+      "completion_rate": 0.0
+    }
+  }
+}

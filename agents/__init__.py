@@ -1,8 +1,8 @@
 """
 Agent系统模块
 
-V2.1版本
-更新日期: 2026-03-24
+V2.2版本
+更新日期: 2026-03-25
 
 模块结构:
 - priority: 任务优先级定义
@@ -21,6 +21,7 @@ V2.1版本
 - collaboration: Agent协作模式
 - pipeline_orchestrator: 流水线编排器（V2.1新增）
 - novel_generation_service: 小说生成服务（V2.1新增）
+- consistency_checker_agent: 一致性检查Agent（V2.2新增）
 """
 
 from .priority import AgentTask, TaskPriority
@@ -65,6 +66,16 @@ from .novel_generation_service import (
     NovelGenerationService,
     GenerationProgress,
     get_generation_service,
+)
+
+# V2.2新增：一致性检查Agent
+from .consistency_checker_agent import (
+    ConsistencyCheckerAgent,
+    Conflict,
+    ConsistencyCheckResult,
+    ConsistencyStats,
+    get_consistency_checker_agent,
+    reset_consistency_checker_agent,
 )
 
 __all__ = [
@@ -113,4 +124,11 @@ __all__ = [
     "NovelGenerationService",
     "GenerationProgress",
     "get_generation_service",
+    # V2.2新增：一致性检查Agent
+    "ConsistencyCheckerAgent",
+    "Conflict",
+    "ConsistencyCheckResult",
+    "ConsistencyStats",
+    "get_consistency_checker_agent",
+    "reset_consistency_checker_agent",
 ]

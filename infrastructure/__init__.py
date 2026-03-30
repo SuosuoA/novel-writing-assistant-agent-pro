@@ -48,6 +48,16 @@ from .database import (
     get_database_pool,
     init_database,
 )
+from .vector_store import (
+    NovelVectorStore,
+    ChapterVector,
+    KnowledgeVector,
+    StyleVector,
+    VectorSearchResult,
+    EmbeddingFunction,
+    get_vector_store,
+    reset_vector_store,
+)
 
 __all__ = [
     # Logger
@@ -79,4 +89,13 @@ __all__ = [
     "DatabasePool",
     "get_database_pool",
     "init_database",
+    # Vector Store
+    "NovelVectorStore",
+    "ChapterVector",
+    "KnowledgeVector",
+    "StyleVector",
+    "VectorSearchResult",
+    "EmbeddingFunction",
+    "get_vector_store",
+    "reset_vector_store",
 ]

@@ -18,6 +18,5 @@
     "file.read"
   ],
   "min_platform_version": "6.0.0",
-  "entry_class": "OutlineParserPlugin",
-  "signature": "41cdce72e6050934c7f91d73542a36228b8248af4d97e04af5182b6aa2c93105"
+  "entry_class": "OutlineParserPlugin"
 }

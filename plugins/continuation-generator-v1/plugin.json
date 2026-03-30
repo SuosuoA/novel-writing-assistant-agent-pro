@@ -1,16 +1,19 @@
 {
-    "id": "continuation-generator-v1",
-    "name": "续写生成器 V1",
-    "version": "1.2.0",
-    "description": "智能小说续写功能，支持多种续写方向和上下文智能感知",
-    "author": "AI工程师",
-    "plugin_type": "generator",
-    "api_version": "1.0",
-    "priority": 100,
-    "enabled": true,
-    "dependencies": [],
-    "conflicts": [],
-    "permissions": ["llm.call", "cache.readwrite"],
-    "min_platform_version": "6.0.0",
-    "entry_class": "ContinuationGeneratorPlugin"
+  "id": "continuation-generator-v1",
+  "name": "续写生成器 V1",
+  "version": "1.2.0",
+  "description": "智能小说续写功能，支持多种续写方向和上下文智能感知",
+  "author": "AI工程师",
+  "plugin_type": "generator",
+  "api_version": "1.0",
+  "priority": 100,
+  "enabled": true,
+  "dependencies": [],
+  "conflicts": [],
+  "permissions": [
+    "llm.call",
+    "cache.readwrite"
+  ],
+  "min_platform_version": "6.0.0",
+  "entry_class": "ContinuationGeneratorPlugin"
 }

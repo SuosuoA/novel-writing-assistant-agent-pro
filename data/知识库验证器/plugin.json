@@ -1,0 +1,20 @@
+{
+  "id": "knowledge-verifier-v1",
+  "name": "知识库验证器",
+  "version": "1.0.0",
+  "description": "批量检查和清理低质量、重复的知识词条",
+  "author": "Novel Writing Assistant Team",
+  "plugin_type": "tool",
+  "entry_class": "KnowledgeVerifierPlugin",
+  "enabled": true,
+  "api_version": "1.0",
+  "priority": 100,
+  "permissions": [
+    "read:knowledge",
+    "write:knowledge",
+    "read:memory",
+    "write:memory"
+  ],
+  "dependencies": [],
+  "conflicts": []
+}

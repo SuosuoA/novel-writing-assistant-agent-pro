@@ -133,7 +133,7 @@ from .app_launcher import (
     get_optimized_launcher,
 )
 
-# ConfigService（V1.3新增）
+# ConfigService（V1.3新增，V1.2监听器模式增强）
 from .config_service import ConfigService, AppConfig, get_config_service
 
 # LoggingService（V1.3新增）
@@ -152,12 +152,154 @@ from .cache_manager import (
     CacheManager,
     CacheConfig,
     CacheEntry,
+    CacheStats,
     SimpleTTLCache,
     generate_cache_key,
     cached,
     get_cache_manager,
     init_cache_manager,
     CACHETOOLS_AVAILABLE,
+)
+
+# CacheWarmup（V1.5新增）
+from .cache_warmup import (
+    CacheWarmupService,
+    get_warmup_service,
+)
+
+# AIProvider（V1.7新增）
+from .ai_provider import (
+    AIProvider,
+    AIProviderType,
+    AIProviderState,
+    AIModelInfo,
+    GenerationConfig,
+    GenerationResult,
+    AIProviderError,
+    AIProviderTimeoutError,
+    AIProviderUnavailableError,
+    AIProviderConfigError,
+)
+
+# AIServiceManager（V1.7新增）
+from .ai_service_manager import AIServiceManager, get_ai_service_manager
+
+# OnlineProvider（V1.7新增）
+from .online_provider import OnlineProvider
+
+# LocalProvider（V1.7新增）
+from .local_provider import LocalProvider
+
+# QwenProvider（V2.23新增 - 本地Qwen模型支持）
+from .qwen_provider import QwenProvider
+
+# SessionState（V1.9新增 - OpenClaw L1热记忆）
+from .session_state import (
+    SessionStateManager,
+    SessionState,
+    ActiveTask,
+    TempContext,
+    ErrorState,
+    PendingData,
+    get_session_state_manager,
+    reset_session_state_manager,
+)
+
+# WALManager（V1.10新增 - OpenClaw核心机制）
+from .wal_manager import (
+    WALManager,
+    WALRecord,
+    WALState,
+    get_wal_manager,
+    reset_wal_manager,
+)
+
+# GitNotesManager（V1.11新增 - OpenClaw L3冷记忆）
+from .git_notes_manager import (
+    GitNotesManager,
+    GitNote,
+    BranchMemory,
+    GitNotesState,
+    get_git_notes_manager,
+    reset_git_notes_manager,
+)
+
+# KnowledgeManager（V1.12新增 - 知识库CRUD接口）
+from .knowledge_manager import (
+    KnowledgeManager,
+    KnowledgePoint,
+    KnowledgeCreateResult,
+    KnowledgeSearchResult,
+    ImportResult,
+    get_knowledge_manager,
+    reset_knowledge_manager,
+)
+
+# KnowledgeRetriever（V1.13新增 - 知识库检索接口）
+from .knowledge_retriever import (
+    KnowledgeRetriever,
+    RetrievalRequest,
+    RetrievalResult,
+    RetrievalStats,
+    get_knowledge_retriever,
+    reset_knowledge_retriever,
+)
+
+# KnowledgeRecall（V1.14新增 - 知识库召回机制）
+from .knowledge_recall import (
+    KnowledgeRecall,
+    KnowledgeConflict,
+    RecallResult,
+    ConsistencyCheckResult,
+    GenreRecognizer,
+    get_knowledge_recall,
+    reset_knowledge_recall,
+)
+
+# ChapterEncoder（V1.15新增 - 章节向量编码）
+from .chapter_encoder import (
+    ChapterEncoder,
+    ChapterEncodingResult,
+    BatchEncodingResult,
+    EncodingStats,
+    get_chapter_encoder,
+    reset_chapter_encoder,
+)
+
+# ContextRecaller（V1.16新增 - 上下文智能召回）
+from .context_recall import (
+    ContextRecaller,
+    RecalledChapter,
+    RecalledKnowledge,
+    RecalledStyle,
+    ContextSummary,
+    TokenBudget,
+    RecallStats,
+    get_context_recaller,
+    reset_context_recaller,
+)
+
+# ConflictFixer（V1.17新增 - 冲突修复建议生成）
+from .conflict_fixer import (
+    ConflictFixer,
+    FixOption,
+    ConflictFix,
+    FixGenerationResult,
+    FixStats,
+    get_conflict_fixer,
+    reset_conflict_fixer,
+)
+
+# ThreadPoolManager（V1.18新增 - 统一线程池管理器，解决卡顿问题）
+from .thread_pool_manager import (
+    ThreadPoolManager,
+    thread_pool_manager,
+)
+
+# GUIAsyncHelper（V1.19新增 - GUI异步任务辅助）
+from .gui_async_helper import (
+    GUIAsyncHelper,
+    create_async_helper,
 )
 
 __all__ = [
@@ -276,14 +418,111 @@ __all__ = [
     "CacheManager",
     "CacheConfig",
     "CacheEntry",
+    "CacheStats",
     "SimpleTTLCache",
     "generate_cache_key",
     "cached",
     "get_cache_manager",
     "init_cache_manager",
     "CACHETOOLS_AVAILABLE",
+    # CacheWarmup
+    "CacheWarmupService",
+    "get_warmup_service",
+    # AIProvider & AIServiceManager
+    "AIProvider",
+    "AIProviderType",
+    "AIProviderState",
+    "AIModelInfo",
+    "GenerationConfig",
+    "GenerationResult",
+    "AIProviderError",
+    "AIProviderTimeoutError",
+    "AIProviderUnavailableError",
+    "AIProviderConfigError",
+    "AIServiceManager",
+    "get_ai_service_manager",
+    # OnlineProvider
+    "OnlineProvider",
+    # LocalProvider
+    "LocalProvider",
+    # SessionState (L1热记忆)
+    "SessionStateManager",
+    "SessionState",
+    "ActiveTask",
+    "TempContext",
+    "ErrorState",
+    "PendingData",
+    "get_session_state_manager",
+    "reset_session_state_manager",
+    # WALManager (WAL协议)
+    "WALManager",
+    "WALRecord",
+    "WALState",
+    "get_wal_manager",
+    "reset_wal_manager",
+    # GitNotesManager (L3冷记忆)
+    "GitNotesManager",
+    "GitNote",
+    "BranchMemory",
+    "GitNotesState",
+    "get_git_notes_manager",
+    "reset_git_notes_manager",
+    # KnowledgeManager (知识库CRUD)
+    "KnowledgeManager",
+    "KnowledgePoint",
+    "KnowledgeCreateResult",
+    "KnowledgeSearchResult",
+    "ImportResult",
+    "get_knowledge_manager",
+    "reset_knowledge_manager",
+    # KnowledgeRetriever (知识库检索)
+    "KnowledgeRetriever",
+    "RetrievalRequest",
+    "RetrievalResult",
+    "RetrievalStats",
+    "get_knowledge_retriever",
+    "reset_knowledge_retriever",
+    # KnowledgeRecall (知识库召回)
+    "KnowledgeRecall",
+    "KnowledgeConflict",
+    "RecallResult",
+    "ConsistencyCheckResult",
+    "GenreRecognizer",
+    "get_knowledge_recall",
+    "reset_knowledge_recall",
+    # ChapterEncoder (章节向量编码)
+    "ChapterEncoder",
+    "ChapterEncodingResult",
+    "BatchEncodingResult",
+    "EncodingStats",
+    "get_chapter_encoder",
+    "reset_chapter_encoder",
+    # ContextRecaller (上下文智能召回)
+    "ContextRecaller",
+    "RecalledChapter",
+    "RecalledKnowledge",
+    "RecalledStyle",
+    "ContextSummary",
+    "TokenBudget",
+    "RecallStats",
+    "get_context_recaller",
+    "reset_context_recaller",
+    # ConflictFixer (冲突修复建议生成)
+    "ConflictFixer",
+    "FixOption",
+    "ConflictFix",
+    "FixGenerationResult",
+    "FixStats",
+    "get_conflict_fixer",
+    "reset_conflict_fixer",
+    # ThreadPoolManager (统一线程池管理器)
+    "ThreadPoolManager",
+    "thread_pool_manager",
+    # GUIAsyncHelper (GUI异步任务辅助)
+    "GUIAsyncHelper",
+    "create_async_helper",
 ]
 
 
-__version__ = "1.4.0"
+__version__ = "1.19.0"
 __author__ = "Novel Assistant Team"

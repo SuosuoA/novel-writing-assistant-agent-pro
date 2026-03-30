@@ -44,7 +44,6 @@ from .result_storage import (
     ConflictStrategy,
     ConflictInfo,
     ImportResult,
-    StorageError,
     save_quick_creation_result,
     import_quick_creation_result,
     WORLDVIEW_SCHEMA,
@@ -53,6 +52,9 @@ from .result_storage import (
     PLOT_SCHEMA,
     SCHEMA_VERSION
 )
+
+# StorageError是ResultStorageManager的内部类
+StorageError = ResultStorageManager.StorageError
 
 __all__ = [
     # 插件主类
