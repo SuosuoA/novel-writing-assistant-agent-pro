@@ -114,6 +114,40 @@ class BootstrapService:
                 logging.error(f"AIServiceManager初始化失败: {e}", exc_info=True)
                 # AIServiceManager失败会导致AI功能不可用，但程序可以继续运行
 
+            # 4. 初始化并注册 ProjectManager（V2.24新增：项目数据管理外迁）
+            try:
+                from .service_locator import get_service_locator
+                from services.project_manager import ProjectManager
+
+                # 创建项目管理器实例（修复参数错误）
+                project_manager = ProjectManager(
+                    event_bus=None  # EventBus在GUI层初始化
+                )
+
+                # 注册为名称"project_manager"供GUI使用
+                self._service_locator.register_service("project_manager", project_manager)
+                results["ProjectManager"] = True
+                logging.info("ProjectManager初始化并注册成功")
+            except Exception as e:
+                results["ProjectManager"] = False
+                logging.warning(f"ProjectManager初始化失败: {e}", exc_info=True)
+                # ProjectManager失败会导致项目保存功能异常，但程序可以继续运行
+
+            # 5. V3.2.1修复：注册EventBus到ServiceLocator
+            try:
+                from .event_bus import EventBus, get_event_bus
+                
+                event_bus = get_event_bus()
+                self._service_locator.register(
+                    service_type=EventBus,
+                    instance=event_bus,
+                )
+                results["EventBus"] = True
+                logging.info("EventBus已注册到ServiceLocator")
+            except Exception as e:
+                results["EventBus"] = False
+                logging.error(f"EventBus注册失败: {e}", exc_info=True)
+
             # P1-7修复：只有ConfigService成功才标记为已初始化
             self._initialized = results.get("ConfigService", False)
             return results

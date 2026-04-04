@@ -1,0 +1,25 @@
+{
+  "id": "local-service-v1",
+  "name": "本地服务管理插件",
+  "version": "1.0.0",
+  "description": "管理本地大模型服务（Qwen、Ollama等）的启动、停止和健康检查",
+  "author": "高级开发工程师",
+  "created": "2026-04-04",
+  "type": "tool",
+  "priority": 5,
+  "dependencies": [],
+  "capabilities": [
+    "local_service_start",
+    "local_service_stop",
+    "local_service_health_check",
+    "local_service_auto_restart"
+  ],
+  "config": {
+    "qwen_service_path": "F:\\Qwen\\start_server_v2.py",
+    "qwen_endpoint": "http://localhost:8000",
+    "auto_start_on_demand": true,
+    "auto_stop_on_exit": true,
+    "health_check_interval": 30,
+    "max_restart_attempts": 3
+  }
+}

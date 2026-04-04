@@ -875,6 +875,12 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
     MAX_KEY_SENTENCES = 5           # 概要最大关键句数
     SUMMARY_MAX_LENGTH = 500        # 概要最大长度
     
+    # V1.3新增：Claw化相关常量
+    QUALITY_THRESHOLD = 0.8         # 质量评分阈值
+    MAX_RETRY_COUNT = 3             # 最大重试次数
+    HIGH_QUALITY_THRESHOLD = 0.85   # 高质量阈值（续写略低）
+    L4_TRIGGER_COUNT = 5            # L4触发连续章节数
+    
     def __init__(self):
         """初始化续写生成器插件"""
         metadata = PluginMetadata(
@@ -910,6 +916,14 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
         
         # V1.3新增：全局缓存管理器引用
         self._cache_manager: Optional[Any] = None
+        
+        # V1.3新增：Claw化组件引用
+        self._validator: Optional[Any] = None  # 评分器
+        self._session_manager: Optional[Any] = None  # L1热记忆
+        self._git_notes_manager: Optional[Any] = None  # L3冷记忆
+        
+        # V1.3新增：评分历史（用于L4触发）
+        self._continuation_scores: List[float] = []
     
     @classmethod
     def get_metadata(cls) -> PluginMetadata:
@@ -953,7 +967,8 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
             # 从服务定位器获取API客户端
             if hasattr(context, 'service_locator') and context.service_locator:
                 try:
-                    ai_service = context.service_locator.get("ai_service")
+                    # 使用get_service()按名称获取（不是get()按类型获取）
+                    ai_service = context.service_locator.get_service("ai_service")
                     if ai_service:
                         self._api_client = ai_service
                         self._logger.info("[ContinuationGenerator] 从服务定位器获取AI服务成功")
@@ -2265,3 +2280,318 @@ def get_plugin_class():
 def register_plugin():
     """注册插件（供插件加载器调用）"""
     return ContinuationGeneratorPlugin
+
+
+# ============================================================================
+# V1.3新增：Claw化增强方法
+# ============================================================================
+
+# 以下方法添加到ContinuationGeneratorPlugin类中
+# 由于文件较长，使用猴子补丁方式添加
+
+def _get_validator_claw(self) -> Optional[Any]:
+    """
+    延迟获取评分器实例（Claw化）
+    
+    Returns:
+        QualityValidatorPlugin实例或None
+    """
+    if self._validator is None:
+        try:
+            from plugins.quality_validator_v1.plugin import QualityValidatorPlugin
+            if self._context and hasattr(self._context, 'service_locator'):
+                self._validator = self._context.service_locator.get_service("quality_validator")
+            if self._validator is None:
+                self._logger.debug("[ContinuationGenerator] 评分器服务不可用")
+        except Exception as e:
+            self._logger.warning(f"[ContinuationGenerator] 获取评分器失败: {e}")
+    return self._validator
+
+def _get_session_manager_claw(self) -> Optional[Any]:
+    """
+    延迟获取SESSION-STATE管理器（L1热记忆）
+    
+    Returns:
+        SessionStateManager实例或None
+    """
+    if self._session_manager is None:
+        try:
+            from core.session_state import get_session_state_manager
+            self._session_manager = get_session_state_manager()
+            self._logger.debug("[ContinuationGenerator] L1热记忆管理器初始化成功")
+        except Exception as e:
+            self._logger.warning(f"[ContinuationGenerator] 获取L1热记忆管理器失败: {e}")
+    return self._session_manager
+
+def _get_git_notes_manager_claw(self) -> Optional[Any]:
+    """
+    延迟获取Git-Notes管理器（L3冷记忆）
+    
+    Returns:
+        GitNotesManager实例或None
+    """
+    if self._git_notes_manager is None:
+        try:
+            from core.git_notes_manager import get_git_notes_manager
+            workspace_root = Path(__file__).parent.parent.parent
+            self._git_notes_manager = get_git_notes_manager(workspace_root)
+            self._logger.debug("[ContinuationGenerator] L3冷记忆Git-Notes管理器初始化成功")
+        except Exception as e:
+            self._logger.warning(f"[ContinuationGenerator] 获取L3冷记忆失败: {e}")
+    return self._git_notes_manager
+
+def _publish_event(self, event_type: str, data: Dict[str, Any]):
+    """
+    发布EventBus事件
+    
+    Args:
+        event_type: 事件类型(started/completed/failed)
+        data: 事件数据
+    """
+    try:
+        if self._context and hasattr(self._context, 'event_bus'):
+            self._context.event_bus.publish(
+                f"continuation.{event_type}",
+                data,
+                source="ContinuationGeneratorPlugin"
+            )
+            self._logger.debug(f"[ContinuationGenerator] 事件发布成功: {event_type}")
+    except Exception as e:
+        self._logger.warning(f"[ContinuationGenerator] 事件发布失败: {e}")
+
+def _evaluate_continuation(self, content: str, request: ContinuationRequest) -> float:
+    """
+    评估续写质量
+    
+    维度:
+    1. 情节连贯性
+    2. 人物一致性
+    3. 世界观一致性
+    4. 风格一致性
+    5. 字数达标
+    
+    Args:
+        content: 续写内容
+        request: 续写请求
+        
+    Returns:
+        总评分(0-1)
+    """
+    validator = self._get_validator_claw()
+    if validator is None:
+        self._logger.debug("[ContinuationGenerator] 评分器不可用，返回默认评分0.8")
+        return 0.8
+    
+    try:
+        # 调用评分器
+        validation_result = validator.validate_chapter(
+            content=content,
+            metadata={
+                "generation_type": "continuation",
+                "word_count": len(content),
+                "target_word_count": request.word_count,
+                "direction": request.direction
+            }
+        )
+        
+        score = getattr(validation_result, 'total_score', 0.8)
+        self._logger.info(f"[ContinuationGenerator] 续写评分: {score:.2f}")
+        return score
+        
+    except Exception as e:
+        self._logger.warning(f"[ContinuationGenerator] 评分失败: {e}，返回默认评分0.8")
+        return 0.8
+
+def _record_to_l1_continuation(self, request: ContinuationRequest, 
+                                content: str, score: float):
+    """
+    记录续写到L1热记忆
+    
+    Args:
+        request: 续写请求
+        content: 续写内容
+        score: 评分
+    """
+    session_manager = self._get_session_manager_claw()
+    if session_manager is None:
+        return
+    
+    try:
+        # 设置活跃任务
+        session_manager.set_active_task(
+            function="续写生成",
+            file="",
+            operation=f"续写章节",
+            task_id=f"cont-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        )
+        
+        # WAL协议
+        session_manager.write_before_ai_call({
+            "direction": request.direction,
+            "word_count_target": request.word_count,
+            "score": score,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # 记录评分
+        session_manager.record_score(score)
+        
+        # 更新生成上下文
+        session_manager.update_generation_context(
+            chapter=f"续写-{datetime.now().strftime('%H%M%S')}",
+            word_count=len(content),
+            characters=self._extract_characters(content),
+            worldview_elements=[]
+        )
+        
+        self._logger.debug("[ContinuationGenerator] L1热记忆记录完成")
+        
+    except Exception as e:
+        self._logger.warning(f"[ContinuationGenerator] L1热记忆记录失败: {e}")
+
+def _record_to_l3_continuation(self, request: ContinuationRequest,
+                                content: str, score: float, retry_count: int):
+    """
+    记录续写决策到L3冷记忆
+    
+    Args:
+        request: 续写请求
+        content: 续写内容
+        score: 评分
+        retry_count: 重试次数
+    """
+    git_notes = self._get_git_notes_manager_claw()
+    if git_notes is None:
+        return
+    
+    try:
+        if score >= self.HIGH_QUALITY_THRESHOLD:
+            git_notes.record_milestone(
+                title=f"高质量续写",
+                content=f"续写方向: {request.direction}, 评分: {score:.2f}, 字数: {len(content)}"
+            )
+        
+        # 人物一致性检查
+        if request.characters:
+            consistency_issues = self._check_character_consistency(
+                content, request.characters
+            )
+            if consistency_issues:
+                git_notes.record_lesson(
+                    title=f"续写人物一致性问题",
+                    content=f"问题: {', '.join(consistency_issues)}"
+                )
+        
+        self._logger.debug("[ContinuationGenerator] L3冷记忆记录完成")
+        
+    except Exception as e:
+        self._logger.warning(f"[ContinuationGenerator] L3冷记忆记录失败: {e}")
+
+def _check_l4_trigger_continuation(self) -> bool:
+    """
+    检查是否触发L4档案更新
+    
+    触发条件：连续5章评分≥0.85
+    
+    Returns:
+        是否触发L4更新
+    """
+    if len(self._continuation_scores) < self.L4_TRIGGER_COUNT:
+        return False
+    recent_scores = self._continuation_scores[-self.L4_TRIGGER_COUNT:]
+    return all(s >= self.HIGH_QUALITY_THRESHOLD for s in recent_scores)
+
+def _update_l4_continuation(self, content: str, request: ContinuationRequest):
+    """
+    更新L4档案（续写特定）
+    
+    Args:
+        content: 续写内容
+        request: 续写请求
+    """
+    try:
+        memory_path = Path(__file__).parent.parent.parent / "Memory-Novel Writing Assistant-Agent Pro" / "MEMORY.md"
+        
+        if not memory_path.exists():
+            return
+        
+        with open(memory_path, 'a', encoding='utf-8') as f:
+            f.write(f"\n## 续写连贯性模式发现\n")
+            f.write(f"- 时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+            f.write(f"- 连续{self.L4_TRIGGER_COUNT}章评分≥{self.HIGH_QUALITY_THRESHOLD}\n")
+            f.write(f"- 最佳续写方向: {request.direction}\n")
+        
+        self._logger.info("[ContinuationGenerator] L4档案更新完成")
+        
+    except Exception as e:
+        self._logger.warning(f"[ContinuationGenerator] L4档案更新失败: {e}")
+
+def _extract_characters(self, content: str) -> List[str]:
+    """
+    从续写内容中提取人物名称
+    
+    Args:
+        content: 续写内容
+        
+    Returns:
+        人物名称列表
+    """
+    # 简单实现：提取引号中的对话者名称
+    characters = []
+    import re
+    patterns = [
+        r'"([^"]+)"',  # 中文引号
+        r'"([^"]+)"',  # 英文引号
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, content[:1000])  # 只检查前1000字符
+        for match in matches:
+            if len(match) <= 10 and match not in characters:
+                characters.append(match)
+    
+    return characters[:5]  # 最多返回5个
+
+def _check_character_consistency(self, content: str, 
+                                  characters: List[Dict]) -> List[str]:
+    """
+    检查人物一致性
+    
+    Args:
+        content: 续写内容
+        characters: 人物设定列表
+        
+    Returns:
+        问题列表
+    """
+    issues = []
+    
+    for char in characters[:3]:  # 只检查前3个主要人物
+        name = char.get('name', '')
+        if not name:
+            continue
+        
+        # 检查人物是否出现在续写中
+        if name in content:
+            # 检查性格关键词
+            traits = char.get('traits', [])
+            if traits:
+                content_lower = content.lower()
+                trait_matches = sum(1 for t in traits if t in content_lower)
+                if trait_matches < len(traits) * 0.3:  # 匹配率低于30%
+                    issues.append(f"{name}性格特征不突出")
+    
+    return issues
+
+# 将方法绑定到类
+ContinuationGeneratorPlugin._get_validator_claw = _get_validator_claw
+ContinuationGeneratorPlugin._get_session_manager_claw = _get_session_manager_claw
+ContinuationGeneratorPlugin._get_git_notes_manager_claw = _get_git_notes_manager_claw
+ContinuationGeneratorPlugin._publish_event = _publish_event
+ContinuationGeneratorPlugin._evaluate_continuation = _evaluate_continuation
+ContinuationGeneratorPlugin._record_to_l1_continuation = _record_to_l1_continuation
+ContinuationGeneratorPlugin._record_to_l3_continuation = _record_to_l3_continuation
+ContinuationGeneratorPlugin._check_l4_trigger_continuation = _check_l4_trigger_continuation
+ContinuationGeneratorPlugin._update_l4_continuation = _update_l4_continuation
+ContinuationGeneratorPlugin._extract_characters = _extract_characters
+ContinuationGeneratorPlugin._check_character_consistency = _check_character_consistency

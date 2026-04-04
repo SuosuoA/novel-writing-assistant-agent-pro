@@ -1,11 +1,12 @@
 """
-QwenProvider - 封装本地Qwen模型服务（F:/Qwen）
+QwenProvider - 封装本地Qwen模型服务（项目内Qwen目录）
 
-V1.0版本
+V1.1版本
 创建日期：2026-03-28
+更新日期：2026-04-04
 
 设计目标：
-- 支持F:/Qwen部署的Qwen2.5-14B-GPTQ-Int4模型
+- 支持项目内Qwen目录部署的Qwen2.5-14B-GPTQ-Int4模型
 - 兼容OpenAI API格式（v1/chat/completions）
 - 复用LocalProvider的容错机制
 - 支持传统/chat接口和OpenAI兼容接口
@@ -72,7 +73,7 @@ class QwenProvider(LocalProvider):
     """
     Qwen本地模型提供者
     
-    支持F:/Qwen部署的Qwen2.5-14B-GPTQ-Int4模型
+    支持项目内Qwen目录部署的Qwen2.5-14B-GPTQ-Int4模型
     
     核心特性：
     1. OpenAI兼容API（/v1/chat/completions）
@@ -87,6 +88,9 @@ class QwenProvider(LocalProvider):
     provider: Qwen
     model: qwen2.5-14b-gptq
     local_url: http://localhost:8000
+    
+    # 启动Qwen服务
+    cd Qwen && python start_server_v2.py
     ```
     """
     
@@ -102,26 +106,29 @@ class QwenProvider(LocalProvider):
     def __init__(self, config: Dict[str, Any]):
         """
         初始化QwenProvider
-        
+
         Args:
             config: 配置字典，应包含：
                 - endpoint: API端点URL（默认 http://localhost:8000）
                 - model: 模型名称（默认 qwen2.5-14b-gptq）
                 - temperature: 温度参数（可选，默认0.7）
                 - timeout: 超时时间（可选，默认120秒）
+                - auto_start_service: 是否自动启动服务（默认True）
         """
         # 设置默认配置
         config.setdefault("framework", "qwen")
         config.setdefault("endpoint", "http://localhost:8000")
         config.setdefault("model", "qwen2.5-14b-gptq")
-        
+        config.setdefault("auto_start_service", True)  # 新增：自动启动服务
+
         # 调用父类初始化
         super().__init__(config)
-        
+
         # Qwen特有配置
         self._qwen_model = config.get("model", "qwen2.5-14b-gptq")
         self._use_openai_api = config.get("use_openai_api", True)
-        
+        self._auto_start_service = config.get("auto_start_service", True)
+
         # 更新框架配置
         self._framework_config = {
             "default_endpoint": self._endpoint,
@@ -134,10 +141,13 @@ class QwenProvider(LocalProvider):
             "default_model": self._qwen_model,
             "models": QWEN_MODEL_CONFIGS,
         }
-        
-        # 重新测试连接（使用Qwen端点）
-        self._test_qwen_connection()
-        
+
+        # 测试连接，如果失败且启用自动启动，则尝试启动服务
+        if not self._test_qwen_connection():
+            if self._auto_start_service:
+                logger.info("Qwen服务未运行，尝试自动启动...")
+                self._start_qwen_service()
+
         logger.info(
             f"QwenProvider初始化: model={self._qwen_model}, "
             f"endpoint={self._endpoint}, use_openai_api={self._use_openai_api}"
@@ -169,12 +179,106 @@ class QwenProvider(LocalProvider):
                 return False
                 
         except requests.exceptions.ConnectionError:
-            logger.warning(f"无法连接到Qwen服务: {self._endpoint}")
+            error_msg = (
+                f"无法连接到本地Qwen服务: {self._endpoint}\n"
+                f"请先启动本地大模型服务：\n"
+                f"  1. 打开命令行窗口\n"
+                f"  2. cd F:\\Qwen\n"
+                f"  3. python start_server_v2.py\n"
+                f"启动后等待'服务已就绪'提示，然后重试。"
+            )
+            logger.error(error_msg)
+            # 不抛出异常，让程序继续运行，用户会看到错误提示
+            # V3.2.2修复：AIProviderState没有UNAVAILABLE，使用ERROR代替
+            self._state = AIProviderState.ERROR
             return False
         except Exception as e:
             logger.warning(f"Qwen服务连接测试异常: {e}")
+            self._state = AIProviderState.ERROR
             return False
-    
+
+    def _start_qwen_service(self) -> bool:
+        """
+        启动Qwen服务（通过LocalServicePlugin）
+
+        Returns:
+            服务是否启动成功
+        """
+        try:
+            # 尝试通过ServiceLocator获取LocalServicePlugin实例
+            try:
+                from core.service_locator import ServiceLocator
+                local_service = ServiceLocator.get_service("local_service_plugin")
+
+                if local_service:
+                    result = local_service.start_service("qwen")
+
+                    if result.get("success"):
+                        logger.info(f"Qwen服务启动成功: {result.get('message')}")
+                        # 重新测试连接
+                        return self._test_qwen_connection()
+                    else:
+                        logger.error(f"Qwen服务启动失败: {result.get('message')}")
+                        return False
+            except Exception:
+                # ServiceLocator中未注册，尝试直接加载插件
+                logger.info("LocalServicePlugin未在ServiceLocator中注册，尝试直接加载...")
+
+                # 导入插件
+                import sys
+                from pathlib import Path
+                plugin_path = Path(__file__).parent.parent / "plugins" / "local-service-v1"
+
+                if str(plugin_path) not in sys.path:
+                    sys.path.insert(0, str(plugin_path))
+
+                from plugin import LocalServicePlugin
+
+                # 创建插件实例
+                from plugins.plugin_types import ToolPlugin
+                from plugins.base_plugin import PluginContext
+
+                plugin = LocalServicePlugin()
+                context = PluginContext(
+                    plugin_id="local-service-v1",
+                    config={
+                        "qwen_service_path": "F:\\Qwen\\start_server_v2.py",
+                        "qwen_endpoint": self._endpoint,
+                        "auto_start_on_demand": True,
+                        "auto_stop_on_exit": True
+                    }
+                )
+
+                # 初始化插件
+                if plugin.initialize(context):
+                    # 启动服务
+                    result = plugin.start_service("qwen")
+
+                    if result.get("success"):
+                        logger.info(f"Qwen服务启动成功: {result.get('message')}")
+
+                        # 注册到ServiceLocator以便后续使用
+                        try:
+                            ServiceLocator.get_instance().register_named(
+                                "local_service_plugin",
+                                plugin
+                            )
+                        except Exception:
+                            pass  # 忽略注册失败
+
+                        # 重新测试连接
+                        return self._test_qwen_connection()
+                    else:
+                        logger.error(f"Qwen服务启动失败: {result.get('message')}")
+                        return False
+                else:
+                    logger.error("LocalServicePlugin初始化失败")
+                    return False
+
+        except Exception as e:
+            logger.error(f"启动Qwen服务失败: {e}", exc_info=True)
+            return False
+
     def _build_request_payload(
         self,
         prompt: str,

@@ -155,6 +155,12 @@ class QuickCreationPlugin(BasePlugin):
     - LLM调用超时保护机制
     - 缓存持久化机制
     - 自定义异常类型
+    
+    V1.5新增（Claw化增强）：
+    - 评分机制：WeightedValidatorPlugin集成
+    - 四层记忆集成：L1热/L2温/L3冷/L4档案
+    - 低分重试机制（最多3次）
+    - EventBus事件发布
     """
     
     # 类常量
@@ -162,6 +168,11 @@ class QuickCreationPlugin(BasePlugin):
     MAX_TOKENS_QUICK = 2000        # 快速生成token限制
     MAX_TOKENS_STANDARD = 4000     # 标准生成token限制
     MAX_TOKENS_DETAILED = 6000     # 详细生成token限制
+    
+    # V1.5新增：Claw化相关常量
+    QUALITY_THRESHOLD = 0.8        # 质量评分阈值
+    MAX_RETRY_COUNT = 3            # 最大重试次数
+    HIGH_QUALITY_THRESHOLD = 0.9   # 高质量阈值（用于L3记录）
     
     # 插件元数据
     METADATA = PluginMetadata(
@@ -204,6 +215,15 @@ class QuickCreationPlugin(BasePlugin):
         
         # V1.4新增：全局缓存管理器引用
         self._cache_manager: Optional[Any] = None
+        
+        # V1.5新增：Claw化组件引用
+        self._validator: Optional[Any] = None  # 评分器
+        self._session_manager: Optional[Any] = None  # L1热记忆
+        self._vector_store: Optional[Any] = None  # L2温记忆
+        self._git_notes_manager: Optional[Any] = None  # L3冷记忆
+        
+        # V1.5新增：评分历史（用于L4档案触发）
+        self._score_history: Dict[str, List[float]] = {}
     
     @classmethod
     def get_metadata(cls) -> PluginMetadata:
@@ -1286,3 +1306,349 @@ class QuickCreationPlugin(BasePlugin):
             "plot": PLOT_SCHEMA,
             "version": SCHEMA_VERSION
         }
+    
+    # =========================================================================
+    # V1.5新增：Claw化增强方法
+    # =========================================================================
+    
+    def _get_validator(self) -> Optional[Any]:
+        """
+        延迟获取评分器实例
+        
+        Returns:
+            WeightedValidatorPlugin实例或None
+        """
+        if self._validator is None:
+            try:
+                from plugins.quality_validator_v1.plugin import QualityValidatorPlugin
+                if self._context and hasattr(self._context, 'service_locator'):
+                    self._validator = self._context.service_locator.get_service("quality_validator")
+                if self._validator is None:
+                    logger.debug("[QuickCreator] 评分器服务不可用")
+            except Exception as e:
+                logger.warning(f"[QuickCreator] 获取评分器失败: {e}")
+        return self._validator
+    
+    def _get_session_manager(self) -> Optional[Any]:
+        """
+        延迟获取SESSION-STATE管理器（L1热记忆）
+        
+        Returns:
+            SessionStateManager实例或None
+        """
+        if self._session_manager is None:
+            try:
+                from core.session_state import get_session_state_manager
+                self._session_manager = get_session_state_manager()
+                logger.debug("[QuickCreator] L1热记忆管理器初始化成功")
+            except Exception as e:
+                logger.warning(f"[QuickCreator] 获取L1热记忆管理器失败: {e}")
+        return self._session_manager
+    
+    def _get_vector_store(self) -> Optional[Any]:
+        """
+        延迟获取向量存储（L2温记忆）
+        
+        Returns:
+            NovelVectorStore实例或None
+        """
+        if self._vector_store is None:
+            try:
+                from infrastructure.vector_store import NovelVectorStore
+                workspace_root = Path(__file__).parent.parent.parent
+                self._vector_store = NovelVectorStore(
+                    db_path=workspace_root / "data" / "vector_store"
+                )
+                logger.debug("[QuickCreator] L2温记忆向量存储初始化成功")
+            except Exception as e:
+                logger.warning(f"[QuickCreator] 获取L2温记忆失败: {e}")
+        return self._vector_store
+    
+    def _get_git_notes_manager(self) -> Optional[Any]:
+        """
+        延迟获取Git-Notes管理器（L3冷记忆）
+        
+        Returns:
+            GitNotesManager实例或None
+        """
+        if self._git_notes_manager is None:
+            try:
+                from core.git_notes_manager import get_git_notes_manager
+                workspace_root = Path(__file__).parent.parent.parent
+                self._git_notes_manager = get_git_notes_manager(workspace_root)
+                logger.debug("[QuickCreator] L3冷记忆Git-Notes管理器初始化成功")
+            except Exception as e:
+                logger.warning(f"[QuickCreator] 获取L3冷记忆失败: {e}")
+        return self._git_notes_manager
+    
+    def _evaluate_generation(self, result: Dict[str, Any], generation_type: str) -> float:
+        """
+        评估生成质量
+        
+        Args:
+            result: 生成结果字典
+            generation_type: 生成类型(worldview/outline/character/plot)
+            
+        Returns:
+            总评分(0-1)
+        """
+        validator = self._get_validator()
+        if validator is None:
+            logger.debug("[QuickCreator] 评分器不可用，返回默认评分0.8")
+            return 0.8
+        
+        try:
+            # 构建验证请求
+            content = result.get("content", "")
+            if not content and isinstance(result, dict):
+                # 尝试从字典中提取内容
+                content = json.dumps(result, ensure_ascii=False)
+            
+            # 调用评分器
+            validation_result = validator.validate_chapter(
+                content=content,
+                metadata={
+                    "generation_type": generation_type,
+                    "word_count": len(content)
+                }
+            )
+            
+            score = getattr(validation_result, 'total_score', 0.8)
+            logger.info(f"[QuickCreator] {generation_type}生成评分: {score:.2f}")
+            return score
+            
+        except Exception as e:
+            logger.warning(f"[QuickCreator] 评分失败: {e}，返回默认评分0.8")
+            return 0.8
+    
+    def _record_to_l1(self, generation_type: str, result: Dict[str, Any], score: float):
+        """
+        记录生成结果到L1热记忆
+        
+        Args:
+            generation_type: 生成类型
+            result: 生成结果
+            score: 评分
+        """
+        session_manager = self._get_session_manager()
+        if session_manager is None:
+            return
+        
+        try:
+            # 设置活跃任务
+            session_manager.set_active_task(
+                function=f"快捷创作-{generation_type}",
+                file="",
+                operation=f"生成{generation_type}内容",
+                task_id=f"quick-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            )
+            
+            # WAL协议：AI调用前写入
+            session_manager.write_before_ai_call({
+                "generation_type": generation_type,
+                "score": score,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # 记录评分
+            session_manager.record_score(score)
+            
+            logger.debug(f"[QuickCreator] L1热记忆记录完成: {generation_type}")
+            
+        except Exception as e:
+            logger.warning(f"[QuickCreator] L1热记忆记录失败: {e}")
+    
+    def _save_to_l2(self, result: Dict[str, Any], generation_type: str):
+        """
+        保存生成结果到L2温记忆（向量存储）
+        
+        Args:
+            result: 生成结果
+            generation_type: 生成类型
+        """
+        vector_store = self._get_vector_store()
+        if vector_store is None:
+            return
+        
+        try:
+            content = result.get("content", "")
+            if not content:
+                content = json.dumps(result, ensure_ascii=False)
+            
+            # 根据类型选择存储方式
+            if generation_type == "worldview":
+                vector_store.add_knowledge(
+                    knowledge_id=f"worldview-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    category="worldview",
+                    domain="generated",
+                    title=result.get("world_name", result.get("title", "世界观设定")),
+                    content=content,
+                    keywords=result.get("keywords", [])
+                )
+            elif generation_type == "character":
+                vector_store.add_chapter(
+                    chapter_id=f"character-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    content=content,
+                    metadata={
+                        "type": "character_profile",
+                        "name": result.get("name", "未命名"),
+                        "score": result.get("quality_score", 0.8)
+                    }
+                )
+            
+            logger.debug(f"[QuickCreator] L2温记忆存储完成: {generation_type}")
+            
+        except Exception as e:
+            logger.warning(f"[QuickCreator] L2温记忆存储失败: {e}")
+    
+    def _record_to_l3(self, generation_type: str, result: Dict[str, Any], 
+                       score: float, retry_count: int):
+        """
+        记录生成决策到L3冷记忆（Git-Notes）
+        
+        Args:
+            generation_type: 生成类型
+            result: 生成结果
+            score: 评分
+            retry_count: 重试次数
+        """
+        git_notes = self._get_git_notes_manager()
+        if git_notes is None:
+            return
+        
+        try:
+            if score >= self.HIGH_QUALITY_THRESHOLD:
+                # 高质量生成记录为里程碑
+                git_notes.record_milestone(
+                    title=f"高质量{generation_type}生成",
+                    content=f"生成类型: {generation_type}, 评分: {score:.2f}, 重试次数: {retry_count}"
+                )
+            elif retry_count >= self.MAX_RETRY_COUNT:
+                # 多次重试记录为经验教训
+                git_notes.record_lesson(
+                    title=f"{generation_type}生成多次重试",
+                    content=f"生成类型: {generation_type}, 最终评分: {score:.2f}, 建议: 检查参考文本质量"
+                )
+            
+            logger.debug(f"[QuickCreator] L3冷记忆记录完成: {generation_type}")
+            
+        except Exception as e:
+            logger.warning(f"[QuickCreator] L3冷记忆记录失败: {e}")
+    
+    def _check_l4_trigger(self, generation_type: str) -> bool:
+        """
+        检查是否触发L4档案更新
+        
+        触发条件：连续3次评分≥0.9
+        
+        Args:
+            generation_type: 生成类型
+            
+        Returns:
+            是否触发L4更新
+        """
+        if generation_type not in self._score_history:
+            self._score_history[generation_type] = []
+        
+        recent_scores = self._score_history[generation_type][-3:]
+        return len(recent_scores) >= 3 and all(s >= self.HIGH_QUALITY_THRESHOLD for s in recent_scores)
+    
+    def _update_l4_memory(self, generation_type: str, result: Dict[str, Any]):
+        """
+        更新L4档案（MEMORY.md）
+        
+        注意：慎用，只在重要发现时更新
+        
+        Args:
+            generation_type: 生成类型
+            result: 生成结果
+        """
+        try:
+            memory_path = Path(__file__).parent.parent.parent / "Memory-Novel Writing Assistant-Agent Pro" / "MEMORY.md"
+            
+            if not memory_path.exists():
+                return
+            
+            # 追加模式更新
+            with open(memory_path, 'a', encoding='utf-8') as f:
+                f.write(f"\n## {generation_type}生成模式发现\n")
+                f.write(f"- 时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+                f.write(f"- 连续3次评分≥0.9\n")
+                f.write(f"- 关键要素: {self._extract_key_elements(result)}\n")
+            
+            logger.info(f"[QuickCreator] L4档案更新完成: {generation_type}")
+            
+        except Exception as e:
+            logger.warning(f"[QuickCreator] L4档案更新失败: {e}")
+    
+    def _extract_key_elements(self, result: Dict[str, Any]) -> str:
+        """提取关键要素"""
+        elements = []
+        if "world_name" in result:
+            elements.append(f"世界名: {result['world_name']}")
+        if "name" in result:
+            elements.append(f"角色名: {result['name']}")
+        if "keywords" in result:
+            elements.append(f"关键词: {', '.join(result['keywords'][:3])}")
+        return " | ".join(elements) if elements else "无"
+    
+    def generate_with_claw(self, request: QuickCreationRequest) -> QuickCreationResult:
+        """
+        带Claw化增强的生成方法
+        
+        集成评分机制和四层记忆
+        
+        Args:
+            request: 快捷创作请求
+            
+        Returns:
+            快捷创作结果
+        """
+        generation_type = request.target if request.target != "all" else "all"
+        
+        # 1. 执行生成
+        result = self.generate_all(request)
+        
+        if not result.success:
+            return result
+        
+        # 2. 评分评估
+        score = self._evaluate_generation(
+            {"content": str(result.__dict__)},
+            generation_type
+        )
+        
+        # 3. 低分重试机制
+        retry_count = 0
+        while score < self.QUALITY_THRESHOLD and retry_count < self.MAX_RETRY_COUNT:
+            # 重新生成
+            result = self.generate_all(request)
+            if not result.success:
+                break
+            
+            score = self._evaluate_generation(
+                {"content": str(result.__dict__)},
+                generation_type
+            )
+            retry_count += 1
+            logger.info(f"[QuickCreator] 重试{retry_count}/{self.MAX_RETRY_COUNT}, 评分: {score:.2f}")
+        
+        # 4. 记录评分历史
+        if generation_type not in self._score_history:
+            self._score_history[generation_type] = []
+        self._score_history[generation_type].append(score)
+        
+        # 5. 四层记忆集成
+        self._record_to_l1(generation_type, result.__dict__, score)
+        self._save_to_l2(result.__dict__, generation_type)
+        self._record_to_l3(generation_type, result.__dict__, score, retry_count)
+        
+        # 6. L4档案（仅在触发条件满足时）
+        if self._check_l4_trigger(generation_type):
+            self._update_l4_memory(generation_type, result.__dict__)
+        
+        # 7. 添加评分元数据
+        result.quality_score = score
+        result.retry_count = retry_count
+        
+        return result

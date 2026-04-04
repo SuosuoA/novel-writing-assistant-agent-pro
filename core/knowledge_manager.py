@@ -175,6 +175,8 @@ class KnowledgePoint(BaseModel):
             "xuanhuan", "xianxia", "urban", "romance", "history",
             "scifi", "suspense", "military", "wuxia", "game",
             "fantasy", "lingyi", "tongren", "general",
+            # V5.3新增：恐怖/推理/体育题材（修复题材映射不一致问题）
+            "horror", "mystery", "sports",
             # 特殊分类
             "writing_technique", "philosophy"
         ]
@@ -481,6 +483,8 @@ class KnowledgeManager:
                 "xuanhuan", "xianxia", "urban", "romance", "history",
                 "scifi", "suspense", "military", "wuxia", "game",
                 "fantasy", "lingyi", "tongren", "general",
+                # V5.3新增：恐怖/推理/体育题材（修复题材映射不一致问题）
+                "horror", "mystery", "sports",
                 # 特殊分类
                 "writing_technique", "philosophy"
             ]

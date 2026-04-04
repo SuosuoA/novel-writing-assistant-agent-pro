@@ -494,6 +494,11 @@ class CoreServiceManager:
         if not self._events:
             self._events = EventServiceProxy(self._root)
         return self._events
+    
+    @property
+    def event_bus(self) -> Optional[EventBus]:
+        """获取事件总线实例"""
+        return self._event_bus
 
     def initialize(
         self,

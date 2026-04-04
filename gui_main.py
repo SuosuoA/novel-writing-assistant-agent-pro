@@ -42,6 +42,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from ctypes import c_int, byref, sizeof, windll
+import networkx as nx
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # 尝试导入sv_ttk
 try:
@@ -1545,6 +1548,10 @@ class MainWindow:
         self._style_profile: Dict[str, Any] = {}
         self._characters: List[Dict[str, Any]] = []
         self._worldview: Dict[str, Any] = {}
+        # 【新增】世界观词条列表（结构化数据，用于Treeview显示）
+        self._worldview_entries: List[Dict[str, Any]] = []
+        # 【新增】人物词条列表（结构化数据，用于Treeview显示）
+        self._character_entries: List[Dict[str, Any]] = []
         self._reverse_feedback_data: Dict[str, Any] = {}  # 逆向反馈数据
         self._completed_chapters: List[Dict[str, Any]] = []  # 已完成章节
         self._generated_content: List[str] = []  # 生成内容
@@ -1552,9 +1559,24 @@ class MainWindow:
         
         # 知识库管理器（延迟初始化）
         self._knowledge_manager = None
-        
+
+        # 适配器实例（延迟初始化，按需创建）
+        self._worldview_adapter = None
+        self._character_adapter = None
+        self._outline_adapter = None
+
         # 工作区根目录
         self._workspace_root = os.path.dirname(os.path.abspath(__file__))
+        
+        # 进度统计变量（确保在页面创建前初始化）
+        self._progress_project_name: Optional[tk.StringVar] = None
+        self._progress_chapters: Optional[tk.StringVar] = None
+        self._progress_total_words: Optional[tk.StringVar] = None
+        self._progress_today_words: Optional[tk.StringVar] = None
+        self._progress_outline: Optional[tk.StringVar] = None
+        self._progress_characters: Optional[tk.StringVar] = None
+        self._progress_worldview: Optional[tk.StringVar] = None
+        self._progress_style: Optional[tk.StringVar] = None
         
         # 事件订阅ID
         self._subscription_ids: List[str] = []
@@ -1563,6 +1585,8 @@ class MainWindow:
         self._init_theme()
         self._init_async_handler()
         self._init_core_services()
+        self._init_project_manager()  # 新增：初始化项目管理器
+        self._setup_project_event_listeners()  # 新增：设置项目事件监听器
         self._init_ui()
         self._init_bindings()
         
@@ -1580,6 +1604,9 @@ class MainWindow:
         
         # V2.18: 后台预加载向量模型（5秒后开始，不阻塞UI）
         self.root.after(5000, self._preload_vector_store_async)
+        
+        # V3.2.1: 启动时同步项目名称显示
+        self.root.after(100, self._sync_project_name_on_startup)
         
         logger.info("MainWindow initialized")
     
@@ -1701,6 +1728,70 @@ class MainWindow:
         except Exception as e:
             logger.error(f"Failed to initialize core services: {e}")
     
+    def _init_project_manager(self) -> None:
+        """初始化项目管理器"""
+        try:
+            from core.service_locator import get_service_locator
+            from services.project_manager import ProjectManager
+            
+            locator = get_service_locator()
+            self._project_manager = locator.get(ProjectManager)
+            
+            if self._project_manager:
+                logger.info("[MainWindow] 项目管理器已初始化")
+            else:
+                logger.warning("[MainWindow] 项目管理器未注册")
+                self._project_manager = None
+        except Exception as e:
+            logger.warning(f"[MainWindow] 项目管理器初始化失败: {e}")
+            self._project_manager = None
+    
+    def _setup_project_event_listeners(self) -> None:
+        """设置项目事件监听器"""
+        if not self._services or not self._services.event_bus:
+            return
+        
+        try:
+            event_bus = self._services.event_bus
+            
+            # 订阅项目保存事件
+            event_bus.subscribe("project.saved", self._on_project_saved)
+            
+            # 订阅项目加载事件
+            event_bus.subscribe("project.loaded", self._on_project_loaded)
+            
+            logger.info("[MainWindow] 项目事件监听器已设置")
+        except Exception as e:
+            logger.warning(f"[MainWindow] 项目事件监听器设置失败: {e}")
+    
+    def _on_project_saved(self, event) -> None:
+        """项目保存事件回调"""
+        project_name = getattr(event, 'project_name', '未知项目')
+        
+        # V3.2.1修复：更新状态栏项目名称
+        self._update_status_bar(project_name=project_name)
+        
+        # 更新项目管理页面的项目名称
+        if hasattr(self, '_project_name_var'):
+            self._project_name_var.set(project_name)
+        
+        self._set_status(f"项目已保存: {project_name}")
+        logger.info(f"[MainWindow] 项目保存事件: {project_name}")
+    
+    def _on_project_loaded(self, event) -> None:
+        """项目加载事件回调"""
+        project_name = getattr(event, 'project_name', '未知项目')
+        
+        # V3.2.1修复：更新状态栏项目名称
+        self._update_status_bar(project_name=project_name)
+        
+        # 更新项目管理页面的项目名称
+        if hasattr(self, '_project_name_var'):
+            self._project_name_var.set(project_name)
+        
+        self._set_status(f"项目已加载: {project_name}")
+        logger.info(f"[MainWindow] 项目加载事件: {project_name}")
+    
     def _init_ui(self) -> None:
         """初始化UI"""
         # 自定义标题栏
@@ -1780,10 +1871,16 @@ class MainWindow:
         self._content_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     
     def _create_status_bar(self) -> None:
-        """创建状态栏（增强版：项目名称、AI连接、字数统计、后台任务进度）"""
+        """创建状态栏（增强版V3.2：项目名称、AI连接、字数统计、后台任务进度）
+
+        V3.2更新：
+        - AI状态实时同步（通过AIStatusManagerPlugin）
+        - 显示服务类型（本地/线上）、提供商、连接状态
+        - 支持点击查看详细信息
+        """
         status_frame = ttk.Frame(self.root, style="TFrame")
         status_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=8, pady=(0, 8))
-        
+
         # 分隔线
         ttk.Separator(status_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 4))
         
@@ -1836,15 +1933,164 @@ class MainWindow:
         ttk.Label(status_inner, text=" | ", font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_SMALL),
                  foreground=GlassTheme.TEXT_SECONDARY).pack(side=tk.RIGHT, padx=5)
         
-        # AI连接状态
+        # AI连接状态（V3.2增强：实时同步+点击详情）
         self._ai_status_var = tk.StringVar(value="AI: 未连接")
         self._ai_status_label = ttk.Label(
             status_inner,
             textvariable=self._ai_status_var,
-            font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_SMALL)
+            font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_SMALL),
+            cursor="hand2"  # 鼠标悬停显示手型
         )
         self._ai_status_label.pack(side=tk.RIGHT, padx=10)
-    
+
+        # 点击AI状态显示详细信息
+        self._ai_status_label.bind("<Button-1>", self._show_ai_status_details)
+
+        # 初始化AI状态管理插件（延迟初始化）
+        self._ai_status_manager = None
+        self._init_ai_status_manager()
+
+    def _init_ai_status_manager(self):
+        """初始化AI状态管理插件（按需初始化，不影响启动速度）"""
+        try:
+            import sys
+            from pathlib import Path
+            plugin_path = Path(__file__).parent / "plugins" / "ai-status-manager-v1"
+
+            if str(plugin_path) not in sys.path:
+                sys.path.insert(0, str(plugin_path))
+
+            # 导入插件类（插件内部已包含基础类定义）
+            from plugin import AIStatusManagerPlugin, PluginContext
+
+            plugin = AIStatusManagerPlugin()
+            context = PluginContext(
+                plugin_id="ai-status-manager-v1",
+                config={
+                    "auto_sync_interval": 30,
+                    "retry_on_failure": True,
+                    "max_retry_count": 3,
+                }
+            )
+
+            if plugin.initialize(context):
+                self._ai_status_manager = plugin
+                logger.info("[GUI] AI状态管理插件初始化成功")
+
+                # 订阅状态变更事件
+                try:
+                    from core.service_locator import get_service_locator
+                    locator = get_service_locator()
+                    from core.event_bus import EventBus
+                    event_bus = locator.get(EventBus)
+
+                    if event_bus:
+                        # V3.2修复：添加详细日志
+                        logger.info(f"[GUI] EventBus获取成功: {event_bus}")
+                        event_bus.subscribe("ai.status.changed", self._on_ai_status_changed)
+                        logger.info("[GUI] 已订阅AI状态变更事件")
+
+                        # 测试发布一个事件，验证订阅是否成功
+                        test_status = {
+                            "connection_state": "测试中",
+                            "service_type": "线上",
+                            "provider": "Test",
+                            "model": "test-model",
+                            "endpoint": "http://test",
+                            "error_message": ""
+                        }
+                        # V3.2修复：publish直接传递数据，不需要包装成Event对象
+                        event_bus.publish("ai.status.changed", test_status)
+                        logger.info("[GUI] 测试事件已发布")
+                    else:
+                        logger.error("[GUI] EventBus获取失败：返回None")
+
+                except Exception as e:
+                    logger.error(f"[GUI] 订阅AI状态事件失败: {e}", exc_info=True)
+
+        except Exception as e:
+            logger.error(f"[GUI] 初始化AI状态管理插件失败: {e}", exc_info=True)
+
+    def _on_ai_status_changed(self, event):
+        """处理AI状态变更事件
+        
+        Args:
+            event: EventBus的Event对象，包含event.data（状态字典）
+        """
+        try:
+            # V3.2修复：从Event对象中提取数据
+            from core.event_bus import Event as EventType
+            
+            if isinstance(event, EventType):
+                status = event.data if event.data else {}
+            elif isinstance(event, dict):
+                # 兼容性处理：如果直接传递字典
+                status = event
+            else:
+                logger.warning(f"[GUI] AI状态事件格式错误: {type(event)}")
+                return
+            
+            connection_state = status.get("connection_state", "未连接")
+            service_type = status.get("service_type", "线上")
+            provider = status.get("provider", "DeepSeek")
+
+            # 更新状态栏显示
+            if connection_state == "已连接":
+                status_text = f"AI: {provider} ({service_type}) ✓"
+                self._ai_status_label.configure(foreground=GlassTheme.SUCCESS)
+            elif connection_state == "连接中":
+                status_text = f"AI: {provider} 连接中..."
+                self._ai_status_label.configure(foreground=GlassTheme.WARNING)
+            elif connection_state == "服务启动中":
+                status_text = f"AI: {provider} 启动中..."
+                self._ai_status_label.configure(foreground=GlassTheme.WARNING)
+            elif connection_state == "连接错误":
+                status_text = f"AI: {provider} 连接失败 ✗"
+                self._ai_status_label.configure(foreground=GlassTheme.ERROR)
+            else:
+                status_text = "AI: 未连接"
+                self._ai_status_label.configure(foreground=GlassTheme.TEXT_SECONDARY)
+
+            self._ai_status_var.set(status_text)
+            logger.info(f"[GUI] AI状态已更新: {status_text}")
+
+        except Exception as e:
+            logger.error(f"[GUI] 处理AI状态变更失败: {e}")
+
+    def _show_ai_status_details(self, event):
+        """显示AI状态详细信息"""
+        try:
+            if not self._ai_status_manager:
+                messagebox.showinfo("AI状态", "AI状态管理插件未初始化")
+                return
+
+            status = self._ai_status_manager.get_status()
+
+            details = (
+                f"AI连接状态\n"
+                f"{'=' * 40}\n\n"
+                f"连接状态: {status['connection_state']}\n"
+                f"服务类型: {status['service_type']}\n"
+                f"提供商: {status['provider']}\n"
+                f"模型: {status['model']}\n"
+                f"端点: {status['endpoint']}\n"
+            )
+
+            if status['error_message']:
+                details += f"\n错误信息: {status['error_message']}\n"
+
+            details += (
+                f"\n{'=' * 40}\n"
+                f"点击状态栏可查看此信息\n"
+                f"状态每30秒自动更新一次"
+            )
+
+            messagebox.showinfo("AI连接状态", details)
+
+        except Exception as e:
+            logger.error(f"[GUI] 显示AI状态详情失败: {e}")
+            messagebox.showerror("错误", f"无法获取AI状态: {str(e)}")
+
     def _update_status_bar(self, project_name: str = None, word_count: int = None, 
                           ai_status: str = None, background_task: str = None) -> None:
         """更新状态栏信息"""
@@ -2427,6 +2673,9 @@ class MainWindow:
             self._worldview_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
         
         self._worldview_tree.bind("<MouseWheel>", _on_worldview_mousewheel)
+        
+        # 【新增】双击查看详情
+        self._worldview_tree.bind("<Double-Button-1>", lambda e: self._on_worldview_view())
 
         list_btn_frame = ttk.Frame(list_frame, style="TFrame")
         list_btn_frame.pack(fill=tk.X, pady=5)
@@ -2492,11 +2741,23 @@ class MainWindow:
         for i in range(3):
             btn_frame.grid_columnconfigure(i, weight=1)
 
+        # 【修复】项目打开后，恢复已加载的世界观数据
+        # 问题：标签页延迟创建，项目打开时_worldview_tree还未创建，导致数据无法恢复
+        # 解决：标签页创建后，检查是否有已加载的世界观数据，如果有则恢复显示
+        if hasattr(self, '_worldview_content') and self._worldview_content:
+            # 使用after确保UI完全创建后再更新
+            self.root.after(100, lambda: self._update_worldview_tree_from_content(self._worldview_content))
+
         return frame
     
     def _create_characters_content(self) -> tk.Frame:
         """创建人物设定内容页面"""
         frame = ttk.Frame(self._workbench_content_frame, style="TFrame")
+
+        # 【修复】检查是否有已加载的人物数据（类似世界观延迟创建机制）
+        if hasattr(self, '_character_data') and self._character_data:
+            # 使用after确保UI完全创建后再更新
+            self.root.after(100, lambda: self._update_character_tree())
         
         # 上部：人物导入区
         file_frame = ttk.LabelFrame(frame, text="人物档案导入", padding=10)
@@ -6073,8 +6334,10 @@ data/知识库验证器/backups/
         row1.pack(fill=tk.X, pady=5)
         ttk.Label(row1, text="题材：").pack(side=tk.LEFT)
         ai_category_var = tk.StringVar(value="科幻")
-        category_combo = ttk.Combobox(row1, textvariable=ai_category_var, 
-                     values=["玄幻", "仙侠", "都市", "言情", "历史", "科幻", "悬疑", "军事", "武侠", "游戏", "奇幻", "灵异", "同人", "通用", "写作技巧"],
+        # 【修复】使用_category_map中实际存在的题材选项（排除"全部"）
+        all_categories = [k for k in self._category_map.keys() if k != "全部"]
+        category_combo = ttk.Combobox(row1, textvariable=ai_category_var,
+                     values=all_categories,
                      width=15, state="readonly")
         category_combo.pack(side=tk.LEFT, padx=5)
         
@@ -6085,31 +6348,10 @@ data/知识库验证器/backups/
         ttk.Label(row2, text="领域：").pack(side=tk.LEFT)
         ai_domain_var = tk.StringVar(value="物理")
         
-        # 所有领域选项：基础学科 + 专业领域 + 写作技法
-        all_domains = [
-            # 基础学科（可用于任何题材）
-            "物理", "化学", "生物", "数学", "地理", "天文", "心理", "哲学", "经济", "历史", "文化", "技术",
-            # 玄幻/仙侠/奇幻领域
-            "魔法", "神话", "宗教", "玄学", "修炼体系", "灵学", "幻想生物", "世界观构建",
-            # 都市/言情领域
-            "社会", "法律", "教育", "职场", "情感", "家庭",
-            # 科幻领域
-            "航天", "AI", "未来学",
-            # 悬疑领域
-            "刑侦", "逻辑", "法医",
-            # 军事领域
-            "军事", "战略",
-            # 武侠领域
-            "武术", "中医", "江湖",
-            # 游戏领域
-            "游戏设计", "叙事",
-            # 灵异领域
-            "民俗", "传说", "神秘学",
-            # 同人领域
-            "原著分析", "人物", "剧情", "设定",
-            # 通用写作技法
-            "写作技法", "叙事结构", "修辞技巧", "人物塑造", "情节设计", "对话艺术"
-        ]
+        # 【BUG修复】使用_domain_map中实际存在的领域选项，确保映射正确
+        # 从_domain_map中排除"全部"选项，其他全部可用
+        all_domains = [k for k in self._domain_map.keys() if k != "全部"]
+        
         domain_combo = ttk.Combobox(row2, textvariable=ai_domain_var,
                      values=all_domains,
                      width=20, state="readonly")
@@ -6126,9 +6368,11 @@ data/知识库验证器/backups/
                 domain_combo['values'] = writing_technique_domains
                 ai_domain_var.set(writing_technique_domains[0])
             else:
-                # 恢复为通用领域
+                # 【BUG修复】恢复为通用领域时，保持用户之前选择的领域，不要强制重置为"物理"
+                # 只有当前选择的领域不在通用领域列表中时，才重置为第一个领域
                 domain_combo['values'] = all_domains
-                ai_domain_var.set("物理")
+                if ai_domain_var.get() not in all_domains:
+                    ai_domain_var.set(all_domains[0] if all_domains else "物理")
         
         category_combo.bind("<<ComboboxSelected>>", on_ai_category_changed)
         
@@ -6262,10 +6506,13 @@ data/知识库验证器/backups/
                     self.root.after(0, lambda: update_ui(result))
 
                 except ImportError as e:
-                    self.root.after(0, lambda: show_error(f"生成器模块加载失败: {e}"))
+                    error_msg = str(e)
+                    self.root.after(0, lambda msg=error_msg: show_error(f"生成器模块加载失败: {msg}"))
                 except Exception as e:
                     import traceback
-                    self.root.after(0, lambda: show_error(f"生成异常: {e}\n{traceback.format_exc()[:500]}"))
+                    error_msg = str(e)
+                    error_trace = traceback.format_exc()[:500]
+                    self.root.after(0, lambda msg=error_msg, trace=error_trace: show_error(f"生成异常: {msg}\n{trace}"))
             
             def update_ui(result):
                 """更新UI显示"""
@@ -6698,6 +6945,286 @@ data/知识库验证器/backups/
         """新建世界观（弹窗）"""
         dialog = tk.Toplevel(self.root)
         dialog.title("新建世界观")
+        dialog.geometry("500x450")
+        dialog.configure(bg=GlassTheme.GLASS_BG)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # 居中显示
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 500) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 450) // 2
+        dialog.geometry(f"+{x}+{y}")
+        
+        # 表单区域
+        form_frame = ttk.Frame(dialog, padding=20)
+        form_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 世界观名称
+        ttk.Label(form_frame, text="世界观名称：").grid(row=0, column=0, sticky=tk.W, pady=5)
+        name_var = tk.StringVar(value="新世界观")
+        ttk.Entry(form_frame, textvariable=name_var, width=40).grid(row=0, column=1, pady=5)
+        
+        # 世界观类别
+        ttk.Label(form_frame, text="世界观类别：").grid(row=1, column=0, sticky=tk.W, pady=5)
+        category_var = tk.StringVar(value="世界观设定")
+        category_combo = ttk.Combobox(form_frame, textvariable=category_var, width=37,
+                                      values=['世界观设定', '力量体系', '势力分布', '地理环境', '社会规则', '历史背景', '种族设定', '其他'])
+        category_combo.grid(row=1, column=1, pady=5)
+        
+        # 核心元素
+        ttk.Label(form_frame, text="核心元素：").grid(row=2, column=0, sticky=tk.W, pady=5)
+        elements_var = tk.StringVar(value="魔法体系、势力分布、历史背景")
+        ttk.Entry(form_frame, textvariable=elements_var, width=40).grid(row=2, column=1, pady=5)
+        
+        # 世界观描述
+        ttk.Label(form_frame, text="详细描述：").grid(row=3, column=0, sticky=tk.NW, pady=5)
+        desc_text = tk.Text(form_frame, wrap=tk.WORD, height=12, width=40,
+                           font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_NORMAL))
+        desc_text.grid(row=3, column=1, pady=5)
+        desc_text.insert("1.0", "请在此描述世界观的核心设定、规则、势力分布等内容...")
+        
+        # 按钮
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        def create_worldview():
+            name = name_var.get().strip()
+            category = category_var.get().strip()
+            elements = elements_var.get().strip()
+            desc = desc_text.get("1.0", tk.END).strip()
+            
+            if not name:
+                messagebox.showwarning("警告", "请输入世界观名称！")
+                return
+            
+            # 初始化词条列表（如果不存在）
+            if not hasattr(self, '_worldview_entries'):
+                self._worldview_entries = []
+            
+            # 创建词条数据
+            from datetime import datetime
+            entry_data = {
+                'name': name,
+                'category': category,
+                'elements': elements,
+                'description': desc,
+                'status': '新建',
+                'modified': datetime.now().strftime('%Y-%m-%d %H:%M')
+            }
+            
+            # 添加到词条列表
+            self._worldview_entries.append(entry_data)
+            
+            # 添加到树
+            display_elements = elements[:50] + "..." if len(elements) > 50 else elements
+            self._worldview_tree.insert("", tk.END, values=(
+                name,
+                category,
+                display_elements,
+                '新建',
+                entry_data['modified']
+            ))
+            
+            # 更新预览
+            self._worldview_preview.delete("1.0", tk.END)
+            self._worldview_preview.insert("1.0", f"【{name}】\n\n类别：{category}\n\n核心元素：{elements}\n\n{desc}")
+            
+            self._set_status(f"已创建世界观：{name}")
+            dialog.destroy()
+        
+        ttk.Button(btn_frame, text="创建", command=create_worldview).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+    
+    def _on_worldview_view(self):
+        """查看世界观详情 - 在预览区域显示选中词条的完整信息"""
+        if not hasattr(self, '_worldview_tree') or not hasattr(self, '_worldview_entries'):
+            return
+        
+        selection = self._worldview_tree.selection()
+        if not selection:
+            messagebox.showinfo("提示", "请先选择一个世界观词条")
+            return
+        
+        # 获取选中项的索引
+        item_id = selection[0]
+        children = self._worldview_tree.get_children()
+        if item_id not in children:
+            return
+        
+        idx = children.index(item_id)
+        if idx >= len(self._worldview_entries):
+            return
+        
+        # 获取词条数据
+        entry = self._worldview_entries[idx]
+        
+        # 更新预览区域
+        if hasattr(self, '_worldview_preview'):
+            self._worldview_preview.delete("1.0", tk.END)
+            
+            # 格式化显示
+            details = f"【{entry.get('name', '未命名')}】\n\n"
+            details += f"类别：{entry.get('category', '世界观设定')}\n"
+            details += f"状态：{entry.get('status', '已保存')}\n"
+            details += f"修改时间：{entry.get('modified', '-')}\n\n"
+            details += f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            details += f"【核心元素】\n{entry.get('elements', '暂无')}\n\n"
+            details += f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            details += f"【详细描述】\n{entry.get('description', entry.get('elements', '暂无详细描述'))}\n"
+            
+            self._worldview_preview.insert("1.0", details)
+            self._set_status(f"查看世界观详情：{entry.get('name', '未命名')}")
+    
+    def _on_worldview_edit(self):
+        """编辑世界观 - 弹出编辑对话框"""
+        if not hasattr(self, '_worldview_tree') or not hasattr(self, '_worldview_entries'):
+            return
+        
+        selection = self._worldview_tree.selection()
+        if not selection:
+            messagebox.showinfo("提示", "请先选择一个世界观词条")
+            return
+        
+        # 获取选中项的索引
+        item_id = selection[0]
+        children = self._worldview_tree.get_children()
+        if item_id not in children:
+            return
+        
+        idx = children.index(item_id)
+        if idx >= len(self._worldview_entries):
+            return
+        
+        # 获取词条数据
+        entry = self._worldview_entries[idx]
+        
+        # 创建编辑对话框
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"编辑世界观 - {entry.get('name', '未命名')}")
+        dialog.geometry("600x500")
+        dialog.configure(bg=GlassTheme.GLASS_BG)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # 居中显示
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 600) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 500) // 2
+        dialog.geometry(f"+{x}+{y}")
+        
+        # 表单区域
+        form_frame = ttk.Frame(dialog, padding=20)
+        form_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 名称
+        ttk.Label(form_frame, text="世界观名称：").grid(row=0, column=0, sticky=tk.W, pady=5)
+        name_var = tk.StringVar(value=entry.get('name', ''))
+        ttk.Entry(form_frame, textvariable=name_var, width=50).grid(row=0, column=1, pady=5)
+        
+        # 类别
+        ttk.Label(form_frame, text="世界观类别：").grid(row=1, column=0, sticky=tk.W, pady=5)
+        category_var = tk.StringVar(value=entry.get('category', '世界观设定'))
+        category_combo = ttk.Combobox(form_frame, textvariable=category_var, width=47,
+                                      values=['世界观设定', '力量体系', '势力分布', '地理环境', '社会规则', '历史背景', '种族设定', '其他'])
+        category_combo.grid(row=1, column=1, pady=5)
+        
+        # 核心元素
+        ttk.Label(form_frame, text="核心元素：").grid(row=2, column=0, sticky=tk.W, pady=5)
+        elements_var = tk.StringVar(value=entry.get('elements', ''))
+        ttk.Entry(form_frame, textvariable=elements_var, width=50).grid(row=2, column=1, pady=5)
+        
+        # 详细描述
+        ttk.Label(form_frame, text="详细描述：").grid(row=3, column=0, sticky=tk.NW, pady=5)
+        desc_text = tk.Text(form_frame, width=50, height=15, wrap=tk.WORD,
+                           font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_NORMAL))
+        desc_text.grid(row=3, column=1, pady=5)
+        desc_text.insert("1.0", entry.get('description', ''))
+        
+        # 按钮区域
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        def save_changes():
+            """保存编辑"""
+            # 更新词条数据
+            self._worldview_entries[idx]['name'] = name_var.get()
+            self._worldview_entries[idx]['category'] = category_var.get()
+            self._worldview_entries[idx]['elements'] = elements_var.get()
+            self._worldview_entries[idx]['description'] = desc_text.get("1.0", tk.END).strip()
+            self._worldview_entries[idx]['modified'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+            
+            # 更新树显示
+            self._worldview_tree.item(item_id, values=(
+                name_var.get(),
+                category_var.get(),
+                elements_var.get()[:50] + '...' if len(elements_var.get()) > 50 else elements_var.get(),
+                '已修改',
+                self._worldview_entries[idx]['modified']
+            ))
+            
+            # 更新预览
+            self._on_worldview_view()
+            
+            self._set_status(f"已更新世界观：{name_var.get()}")
+            dialog.destroy()
+        
+        ttk.Button(btn_frame, text="保存", command=save_changes).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+    
+    def _on_worldview_delete(self):
+        """批量删除世界观"""
+        if not hasattr(self, '_worldview_tree') or not hasattr(self, '_worldview_entries'):
+            return
+        
+        selection = self._worldview_tree.selection()
+        if not selection:
+            messagebox.showinfo("提示", "请先选择要删除的世界观词条")
+            return
+        
+        # 确认删除
+        if not messagebox.askyesno("确认删除", f"确定要删除选中的 {len(selection)} 个世界观词条吗？"):
+            return
+        
+        # 获取要删除的索引（从大到小排序，避免删除时索引变化）
+        children = list(self._worldview_tree.get_children())
+        indices_to_delete = sorted([children.index(item_id) for item_id in selection if item_id in children], reverse=True)
+        
+        # 从列表和树中删除
+        for idx in indices_to_delete:
+            if idx < len(self._worldview_entries):
+                # 从词条列表删除
+                del self._worldview_entries[idx]
+        
+        # 从树中删除选中项
+        for item_id in selection:
+            self._worldview_tree.delete(item_id)
+        
+        # 更新预览
+        if hasattr(self, '_worldview_preview'):
+            self._worldview_preview.delete("1.0", tk.END)
+            self._worldview_preview.insert("1.0", f"已删除 {len(selection)} 个世界观词条")
+        
+        self._set_status(f"已删除 {len(selection)} 个世界观词条")
+    
+    def _on_worldview_link(self):
+        """关联要素 - 显示关联对话框"""
+        if not hasattr(self, '_worldview_tree'):
+            return
+        
+        selection = self._worldview_tree.selection()
+        if not selection:
+            messagebox.showinfo("提示", "请先选择一个世界观词条")
+            return
+        
+        # 获取选中项名称
+        item_id = selection[0]
+        values = self._worldview_tree.item(item_id, 'values')
+        entry_name = values[0] if values else '未命名'
+        
+        # 显示关联信息对话框
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"关联要素 - {entry_name}")
         dialog.geometry("500x400")
         dialog.configure(bg=GlassTheme.GLASS_BG)
         dialog.transient(self.root)
@@ -6709,76 +7236,57 @@ data/知识库验证器/backups/
         y = self.root.winfo_y() + (self.root.winfo_height() - 400) // 2
         dialog.geometry(f"+{x}+{y}")
         
-        # 世界观名称
-        name_frame = ttk.Frame(dialog, style="TFrame")
-        name_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
-        ttk.Label(name_frame, text="世界观名称：").pack(side=tk.LEFT)
-        name_var = tk.StringVar(value="新世界观")
-        ttk.Entry(name_frame, textvariable=name_var, width=30).pack(side=tk.LEFT, padx=10)
+        # 关联信息
+        ttk.Label(dialog, text=f"世界观词条：{entry_name}", font=('Microsoft YaHei UI', 12, 'bold')).pack(pady=10)
         
-        # 核心元素
-        elements_frame = ttk.Frame(dialog, style="TFrame")
-        elements_frame.pack(fill=tk.X, padx=20, pady=10)
-        ttk.Label(elements_frame, text="核心元素：").pack(side=tk.LEFT)
-        elements_var = tk.StringVar(value="魔法体系、势力分布、历史背景")
-        ttk.Entry(elements_frame, textvariable=elements_var, width=30).pack(side=tk.LEFT, padx=10)
+        # 关联选项
+        options_frame = ttk.Frame(dialog, padding=20)
+        options_frame.pack(fill=tk.BOTH, expand=True)
         
-        # 世界观描述
-        desc_frame = ttk.LabelFrame(dialog, text="世界观详细描述", padding=10)
-        desc_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        # 关联大纲
+        ttk.Label(options_frame, text="关联大纲章节：").grid(row=0, column=0, sticky=tk.W, pady=5)
+        outline_var = tk.StringVar()
+        ttk.Entry(options_frame, textvariable=outline_var, width=30).grid(row=0, column=1, pady=5)
+        ttk.Label(options_frame, text="（输入章节号，如：第1-3章）", foreground='gray').grid(row=0, column=2, padx=5)
         
-        desc_text = tk.Text(desc_frame, wrap=tk.WORD, height=10,
-                           font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_NORMAL),
-                           bg=GlassTheme.GLASS_SURFACE, fg=GlassTheme.TEXT_PRIMARY)
-        desc_text.pack(fill=tk.BOTH, expand=True)
-        desc_text.insert("1.0", "请在此描述世界观的核心设定、规则、势力分布等内容...")
+        # 关联人物
+        ttk.Label(options_frame, text="关联人物：").grid(row=1, column=0, sticky=tk.W, pady=5)
+        character_var = tk.StringVar()
+        ttk.Entry(options_frame, textvariable=character_var, width=30).grid(row=1, column=1, pady=5)
+        ttk.Label(options_frame, text="（输入人物名称）", foreground='gray').grid(row=1, column=2, padx=5)
+        
+        # 关联风格
+        ttk.Label(options_frame, text="关联风格：").grid(row=2, column=0, sticky=tk.W, pady=5)
+        style_var = tk.StringVar()
+        ttk.Entry(options_frame, textvariable=style_var, width=30).grid(row=2, column=1, pady=5)
+        ttk.Label(options_frame, text="（输入风格特征）", foreground='gray').grid(row=2, column=2, padx=5)
+        
+        # 说明
+        ttk.Label(options_frame, text="💡 提示：关联信息将在生成时自动注入到上下文中", 
+                 foreground='blue').grid(row=3, column=0, columnspan=3, pady=20)
         
         # 按钮
-        btn_frame = ttk.Frame(dialog, style="TFrame")
-        btn_frame.pack(fill=tk.X, padx=20, pady=20)
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=20, pady=10)
         
-        def create_worldview():
-            name = name_var.get().strip()
-            elements = elements_var.get().strip()
-            desc = desc_text.get("1.0", tk.END).strip()
+        def apply_link():
+            """应用关联"""
+            links = []
+            if outline_var.get():
+                links.append(f"大纲章节：{outline_var.get()}")
+            if character_var.get():
+                links.append(f"关联人物：{character_var.get()}")
+            if style_var.get():
+                links.append(f"关联风格：{style_var.get()}")
             
-            if not name:
-                messagebox.showwarning("警告", "请输入世界观名称！")
-                return
-            
-            # 添加到列表
-            self._worldview_tree.insert("", tk.END, values=(
-                name,
-                elements[:50] + "..." if len(elements) > 50 else elements,
-                "新建",
-                datetime.now().strftime("%Y-%m-%d %H:%M")
-            ))
-            
-            # 更新预览
-            self._worldview_preview.delete("1.0", tk.END)
-            self._worldview_preview.insert("1.0", f"【{name}】\n\n核心元素：{elements}\n\n{desc}")
-            
-            self._set_status(f"已创建世界观：{name}")
+            if links:
+                self._set_status(f"已设置关联：{', '.join(links)}")
+            else:
+                self._set_status("未设置关联")
             dialog.destroy()
         
-        ttk.Button(btn_frame, text="创建", command=create_worldview).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="确定", command=apply_link).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
-    
-    def _on_worldview_view(self):
-        """查看世界观详情"""
-        self._set_status("查看世界观详情功能开发中...")
-    
-    def _on_worldview_edit(self):
-        """编辑世界观"""
-        self._set_status("编辑世界观功能开发中...")
-    
-    def _on_worldview_delete(self):
-        """批量删除世界观"""
-        self._set_status("批量删除世界观功能开发中...")
-    
-    def _on_worldview_link(self):
-        """关联要素"""
-        self._set_status("关联要素功能开发中...")
     
     def _on_worldview_import(self):
         """导入世界观 - 调用WorldviewParserAdapter"""
@@ -6806,9 +7314,11 @@ data/知识库验证器/backups/
                 raise RuntimeError("WorldviewParserAdapter初始化失败")
             
             # 创建任务
+            from agents.priority import TaskPriority
             task = AgentTask(
                 task_id=f"worldview_import_{int(time.time())}",
                 agent_type="worldview_parser",
+                priority=TaskPriority.NORMAL,
                 payload={
                     "worldview_content": content,
                     "options": {}
@@ -6838,21 +7348,25 @@ data/知识库验证器/backups/
         try:
             # 存储世界观数据
             self._worldview = result.get("result", {})
-            
-            # 更新UI预览
-            self._worldview_preview.delete("1.0", tk.END)
             elements = self._worldview.get("elements", [])
             rules = self._worldview.get("rules", [])
             
+            # 【关键修复】更新_worldview_content并同步到树形列表
+            # 将elements转换为项目文件期望的格式
+            if elements and isinstance(elements, list):
+                self._worldview_content = elements
+                # 同时更新树形列表
+                if hasattr(self, '_worldview_tree'):
+                    self._update_worldview_tree_from_content(elements)
+            
+            # 更新预览区域显示简洁摘要
+            self._worldview_preview.delete("1.0", tk.END)
             self._worldview_preview.insert(tk.END, f"世界观解析完成！\n\n")
             self._worldview_preview.insert(tk.END, f"要素数量: {len(elements)}\n")
             self._worldview_preview.insert(tk.END, f"规则数量: {len(rules)}\n\n")
+            self._worldview_preview.insert(tk.END, "已添加到左侧列表，双击查看详情\n")
             
-            # 显示要素列表
-            for elem in elements[:10]:  # 只显示前10个
-                self._worldview_preview.insert(tk.END, f"- {elem.get('name', '未命名')}: {elem.get('description', '')[:50]}...\n")
-            
-            self._set_status("世界观解析完成")
+            self._set_status(f"世界观解析完成，共{len(elements)}个要素")
         except Exception as e:
             self._set_status(f"处理解析结果失败: {str(e)}")
     
@@ -6902,9 +7416,11 @@ data/知识库验证器/backups/
                 raise RuntimeError("CharacterManagerAdapter初始化失败")
             
             # 创建任务
+            from agents.priority import TaskPriority
             task = AgentTask(
                 task_id=f"character_import_{int(time.time())}",
                 agent_type="character_manager",
+                priority=TaskPriority.NORMAL,
                 payload={
                     "operation": "batch_import",
                     "character_data": {
@@ -6933,19 +7449,50 @@ data/知识库验证器/backups/
             self._set_status(f"人物解析失败: {str(e)}")
     
     def _on_character_import_complete(self, result):
-        """人物解析完成回调"""
+        """人物解析完成回调
+
+        更新人物列表和结构化存储
+
+        数据格式（从CharacterManagerAdapter._parse_characters_text）：
+        {
+            "name": "张三",
+            "role": "主角",
+            "status": "新建",
+            "emotion": "平静",
+            "chapters": "第1章",
+            "appearance": "...",
+            "personality": "...",
+            "background": "...",
+            "goals": "...",
+            "fears": "...",
+            "mbti": "",
+            "description": "..."
+        }
+        """
         try:
             # 存储人物数据
             characters = result.get("result", {}).get("characters", [])
             self._characters = characters
-            
-            # 更新人物列表
-            self._character_list.delete(0, tk.END)
-            for char in characters:
-                name = char.get("name", "未命名")
-                role = char.get("role", "未知")
-                self._character_list.insert(tk.END, f"{name} ({role})")
-            
+
+            # 【新增】存储到结构化列表（与世界观模式一致）
+            if not hasattr(self, '_character_entries'):
+                self._character_entries = []
+            self._character_entries = characters
+
+            # 【修复】同步到_character_data，确保保存和加载一致
+            self._character_data = characters
+
+            # 更新人物树（5列数据）
+            if hasattr(self, '_character_tree'):
+                self._character_tree.delete(*self._character_tree.get_children())
+                for char in characters:
+                    name = char.get("name", "未命名")
+                    role = char.get("role", "未设置")
+                    status = char.get("status", "新建")
+                    emotion = char.get("emotion", "平静")
+                    chapters = char.get("chapters", "未设置")
+                    self._character_tree.insert("", tk.END, values=(name, role, status, emotion, chapters))
+
             # 更新状态
             self._set_status(f"成功导入 {len(characters)} 个人物")
         except Exception as e:
@@ -7044,27 +7591,50 @@ data/知识库验证器/backups/
         def create_character():
             name = name_var.get().strip()
             role = role_var.get()
-            
+
             if not name:
                 messagebox.showwarning("警告", "请输入人物姓名！")
                 return
-            
-            # 添加到列表
+
+            # 获取详细信息
+            appearance = appearance_text.get("1.0", tk.END).strip()
+            personality = personality_text.get("1.0", tk.END).strip()
+            background = background_text.get("1.0", tk.END).strip()
+            ability = ability_text.get("1.0", tk.END).strip()
+
+            # 【修复】添加到结构化存储（与世界观模式一致）
+            if not hasattr(self, '_character_entries'):
+                self._character_entries = []
+            if not hasattr(self, '_character_data'):
+                self._character_data = []
+
+            from datetime import datetime
+            entry_data = {
+                'id': f"char_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                'name': name,
+                'role': role,
+                'status': '新建',
+                'emotion': '平静',
+                'chapters': '第1章',
+                'appearance': appearance,
+                'personality': personality,
+                'background': background,
+                'ability': ability,
+                'created_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            self._character_entries.append(entry_data)
+            self._character_data.append(entry_data)
+
+            # 添加到列表（5列数据）
             self._character_tree.insert("", tk.END, values=(
-                "👤",  # 头像占位
                 name,
                 role,
                 "新建",
                 "平静",
                 "第1章"
             ))
-            
+
             # 更新详情
-            appearance = appearance_text.get("1.0", tk.END).strip()
-            personality = personality_text.get("1.0", tk.END).strip()
-            background = background_text.get("1.0", tk.END).strip()
-            ability = ability_text.get("1.0", tk.END).strip()
-            
             self._character_detail.delete("1.0", tk.END)
             self._character_detail.insert("1.0", f"""【{name}】- {role}
 
@@ -7076,7 +7646,7 @@ data/知识库验证器/backups/
 
 能力：{ability}
 """)
-            
+
             self._set_status(f"已创建人物：{name}")
             dialog.destroy()
         
@@ -7085,19 +7655,533 @@ data/知识库验证器/backups/
     
     def _on_character_edit(self):
         """编辑人物"""
-        self._set_status("编辑人物功能开发中...")
-    
+        if not hasattr(self, '_character_tree'):
+            return
+
+        selection = self._character_tree.selection()
+        if not selection or len(selection) != 1:
+            messagebox.showinfo("提示", "请选择一个要编辑的人物")
+            return
+
+        # 获取选中的人物名称
+        children = list(self._character_tree.get_children())
+        selected_index = children.index(selection[0])
+
+        if selected_index >= len(self._character_entries):
+            messagebox.showerror("错误", "人物数据索引错误")
+            return
+
+        character = self._character_entries[selected_index]
+        character_name = character.get('name', '未命名')
+
+        # 创建编辑对话框
+        edit_window = tk.Toplevel(self.root)
+        edit_window.title(f"编辑人物 - {character_name}")
+        edit_window.geometry("500x600")
+        edit_window.transient(self.root)
+        edit_window.grab_set()
+
+        # 表单字段
+        form_fields = [
+            ('姓名', 'name', character.get('name', '')),
+            ('角色', 'role', character.get('role', '未设置')),
+            ('性别', 'gender', character.get('gender', '')),
+            ('年龄', 'age', character.get('age', '')),
+            ('外貌', 'appearance', character.get('appearance', '')),
+            ('性格', 'personality', character.get('personality', '')),
+            ('背景', 'background', character.get('background', '')),
+            ('目标', 'goals', character.get('goals', '')),
+            ('恐惧', 'fears', character.get('fears', '')),
+            ('MBTI', 'mbti', character.get('mbti', '')),
+            ('情绪', 'emotion', character.get('emotion', '平静')),
+            ('状态', 'status', character.get('status', '新建')),
+            ('出场章节', 'chapters', character.get('chapters', '未设置'))
+        ]
+
+        entries = {}
+
+        for i, (label_text, field_name, default_value) in enumerate(form_fields):
+            tk.Label(edit_window, text=label_text).grid(row=i, column=0, padx=10, pady=5, sticky='e')
+            entry = tk.Entry(edit_window, width=40)
+            entry.insert(0, str(default_value))
+            entry.grid(row=i, column=1, padx=10, pady=5, sticky='w')
+            entries[field_name] = entry
+
+        # 描述字段（多行文本）
+        tk.Label(edit_window, text="描述").grid(row=len(form_fields), column=0, padx=10, pady=5, sticky='ne')
+        desc_text = tk.Text(edit_window, width=40, height=5)
+        desc_text.insert('1.0', character.get('description', ''))
+        desc_text.grid(row=len(form_fields), column=1, padx=10, pady=5, sticky='w')
+        entries['description'] = desc_text
+
+        def save_edit():
+            """保存编辑"""
+            new_data = {}
+            for field_name, entry in entries.items():
+                if field_name == 'description':
+                    new_data[field_name] = entry.get('1.0', tk.END).strip()
+                else:
+                    new_data[field_name] = entry.get().strip()
+
+            # 调用适配器编辑人物
+            try:
+                from agents.priority import TaskPriority
+                result = self._get_character_manager().execute(
+                    AgentTask(
+                        task_id=f"edit_character_{character_name}",
+                        agent_type="character_manager",
+                        priority=TaskPriority.NORMAL,
+                        payload={
+                            "operation": "edit_character",
+                            "character_name": character_name,
+                            "character_data": new_data,
+                            "all_characters": self._character_entries
+                        }
+                    )
+                )
+
+                if result.get("result", {}).get("success"):
+                    self._character_entries = result["result"]["characters"]
+                    self._character_data = self._character_entries
+                    self._update_character_tree()
+                    self._set_status(result["result"]["message"])
+                    edit_window.destroy()
+                else:
+                    messagebox.showerror("错误", result["result"]["message"])
+
+            except Exception as e:
+                messagebox.showerror("错误", f"编辑失败: {str(e)}")
+
+        # 按钮框架
+        btn_frame = tk.Frame(edit_window)
+        btn_frame.grid(row=len(form_fields)+1, column=0, columnspan=2, pady=20)
+
+        tk.Button(btn_frame, text="保存", command=save_edit, width=10).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="取消", command=edit_window.destroy, width=10).pack(side=tk.LEFT, padx=5)
+
     def _on_character_detail(self):
-        """人物详情页"""
-        self._set_status("人物详情页功能开发中...")
-    
+        """人物详情 - 在主界面详情框中显示"""
+        if not hasattr(self, '_character_tree'):
+            return
+
+        selection = self._character_tree.selection()
+        if not selection or len(selection) != 1:
+            messagebox.showinfo("提示", "请选择一个要查看详情的人物")
+            return
+
+        # 获取选中的人物
+        children = list(self._character_tree.get_children())
+        selected_index = children.index(selection[0])
+
+        if selected_index >= len(self._character_entries):
+            messagebox.showerror("错误", "人物数据索引错误")
+            return
+
+        character = self._character_entries[selected_index]
+        character_name = character.get('name', '未命名')
+
+        # 构建详情内容
+        detail_content = f"# 【{character_name}】\n\n"
+        detail_content += f"【角色】{character.get('role', '未设置')}\n"
+        detail_content += f"【性别】{character.get('gender', '')}\n"
+        detail_content += f"【年龄】{character.get('age', '')}\n"
+        detail_content += f"【MBTI】{character.get('mbti', '')}\n"
+        detail_content += f"【情绪】{character.get('emotion', '平静')}\n"
+        detail_content += f"【状态】{character.get('status', '新建')}\n"
+        detail_content += f"【出场章节】{character.get('chapters', '未设置')}\n\n"
+
+        # 基本信息
+        detail_content += "▌基本信息\n\n"
+        if character.get('appearance'):
+            detail_content += f"外貌：{character.get('appearance')}\n"
+        if character.get('personality'):
+            detail_content += f"性格：{character.get('personality')}\n"
+        if character.get('background'):
+            detail_content += f"背景：{character.get('background')}\n"
+
+        detail_content += "\n▌动机与目标\n\n"
+        if character.get('goals'):
+            detail_content += f"目标：{character.get('goals')}\n"
+        if character.get('fears'):
+            detail_content += f"恐惧：{character.get('fears')}\n"
+
+        # 描述
+        if character.get('description'):
+            detail_content += "\n▌详细描述\n\n"
+            detail_content += character.get('description') + "\n"
+
+        # 清空并显示详情
+        self._character_detail.config(state='normal')
+        self._character_detail.delete('1.0', tk.END)
+        self._character_detail.insert('1.0', detail_content)
+        self._character_detail.config(state='disabled')
+
+        self._set_status(f"已加载人物详情: {character_name}")
+
     def _on_character_relation(self):
-        """关系网络图"""
-        self._set_status("关系网络图功能开发中...")
+        """人物关系图谱"""
+        from agents.priority import AgentTask, TaskPriority
+
+        if not hasattr(self, '_character_entries') or not self._character_entries:
+            messagebox.showinfo("提示", "请先导入人物数据")
+            return
+
+        # 调用适配器构建关系图谱（适配器自动从人物数据提取描述）
+        try:
+            result = self._get_character_manager().execute(
+                AgentTask(
+                    task_id="build_relation_graph",
+                    agent_type="character_manager",
+                    priority=TaskPriority.NORMAL,
+                    payload={
+                        "operation": "build_relation_graph",
+                        "all_characters": self._character_entries
+                    }
+                )
+            )
+
+            graph_data = result.get("result", {})
+
+            if graph_data.get("error"):
+                messagebox.showerror("错误", f"构建关系图谱失败: {graph_data['error']}")
+                return
+
+            # 创建关系图谱窗口
+            self._show_relation_graph(graph_data)
+
+        except Exception as e:
+            messagebox.showerror("错误", f"构建关系图谱失败: {str(e)}")
+
+    def _show_relation_graph(self, graph_data: Dict[str, Any]):
+        """显示人物关系图谱（带交互功能）"""
+        import networkx as nx
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+        from matplotlib.figure import Figure
+
+        # 配置中文字体
+        plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+        plt.rcParams['axes.unicode_minus'] = False
+
+        # 创建更大的窗口
+        relation_window = tk.Toplevel(self.root)
+        relation_window.title("人物关系图谱")
+        relation_window.geometry("1400x900")
+        relation_window.transient(self.root)
+        
+        # 全屏模式
+        relation_window.state('zoomed')
+
+        # 主容器
+        main_container = tk.Frame(relation_window)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # 左侧：图谱画布
+        left_frame = tk.Frame(main_container)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left_frame, text="人物关系图谱", 
+                font=('SimHei', 14, 'bold')).pack(pady=5)
+
+        # 创建Matplotlib图形
+        fig = Figure(figsize=(12, 10), dpi=100)
+        ax = fig.add_subplot(111)
+
+        # 创建NetworkX图
+        nodes = graph_data.get("nodes", [])
+        relations = graph_data.get("relations", [])
+
+        G = nx.DiGraph() if any(r.get('source') != r.get('target') for r in relations) else nx.Graph()
+
+        # 添加节点
+        for node in nodes:
+            node_name = node.get('id', '')
+            role = node.get('role', '未设置')
+            G.add_node(node_name, role=role, label=node_name)
+
+        # 添加边
+        edge_labels = {}
+        for relation in relations:
+            source = relation.get('source', '')
+            target = relation.get('target', '')
+            label = relation.get('label', '')
+            
+            if source and target:
+                G.add_edge(source, target, relation_type=label)
+                edge_labels[(source, target)] = label
+
+        # 存储节点位置和颜色，用于交互
+        node_positions = {}
+        node_colors_map = {}
+
+        # 绘制图谱
+        if nodes:
+            try:
+                # 使用spring布局（力导向布局）
+                pos = nx.spring_layout(G, k=1.5, iterations=50, seed=42)
+                node_positions = pos
+
+                # 绘制边
+                nx.draw_networkx_edges(
+                    G, pos, ax=ax,
+                    edge_color='#999999',
+                    width=1.5,
+                    alpha=0.6,
+                    arrows=G.is_directed()
+                )
+
+                # 绘制边标签
+                nx.draw_networkx_edge_labels(
+                    G, pos, edge_labels=edge_labels, ax=ax,
+                    font_size=9,
+                    font_color='#333333',
+                    font_family='SimHei',
+                    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none')
+                )
+
+                # 绘制节点
+                node_colors = [self._get_role_color(node.get('role', '未设置')) for node in nodes]
+                node_names = [node.get('id', '') for node in nodes]
+                
+                for i, node in enumerate(nodes):
+                    node_colors_map[node.get('id', '')] = node_colors[i]
+
+                nx.draw_networkx_nodes(
+                    G, pos, ax=ax,
+                    node_color=node_colors,
+                    node_size=2000,
+                    alpha=0.9,
+                    edgecolors='black',
+                    linewidths=1.5
+                )
+
+                nx.draw_networkx_labels(
+                    G, pos, ax=ax,
+                    labels={node: node for node in node_names},
+                    font_size=10,
+                    font_weight='bold',
+                    font_family='SimHei'
+                )
+
+                ax.set_title("人物关系网络图", fontsize=14, fontweight='bold', pad=20, fontfamily='SimHei')
+                ax.axis('off')
+                fig.tight_layout()
+
+                # 嵌入Tkinter
+                canvas = FigureCanvasTkAgg(fig, master=left_frame)
+                canvas.draw()
+                canvas_widget = canvas.get_tk_widget()
+                canvas_widget.pack(fill=tk.BOTH, expand=True)
+
+                # 添加导航工具栏
+                toolbar = NavigationToolbar2Tk(canvas, left_frame)
+                toolbar.update()
+                toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+
+                # 实现节点点击交互
+                def on_click(event):
+                    if event.inaxes != ax:
+                        return
+                    
+                    click_x, click_y = event.xdata, event.ydata
+                    closest_node = None
+                    min_distance = float('inf')
+                    
+                    for node_name, (nx_pos, ny_pos) in node_positions.items():
+                        distance = ((click_x - nx_pos)**2 + (click_y - ny_pos)**2)**0.5
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_node = node_name
+                    
+                    if closest_node and min_distance < 0.15:
+                        self._highlight_node(ax, fig, canvas, G, pos, node_colors_map, closest_node)
+                        self._highlight_tree_item(tree, closest_node)
+
+                canvas.mpl_connect('button_press_event', on_click)
+
+            except Exception as e:
+                tk.Label(left_frame, text=f"图谱生成失败: {str(e)}", fg='red', font=('SimHei', 12)).pack(pady=20)
+
+        # 右侧：关系列表
+        right_frame = tk.Frame(main_container, width=400)
+        right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
+
+        tk.Label(right_frame, text="人物关系列表（点击列表项可高亮图谱节点）", font=('SimHei', 12, 'bold')).pack(pady=5)
+
+        list_frame_container = tk.Frame(right_frame)
+        list_frame_container.pack(fill=tk.BOTH, expand=True)
+
+        # 创建Treeview
+        columns = ('source', 'relation', 'target')
+        tree = ttk.Treeview(list_frame_container, columns=columns, show='headings', height=35)
+        
+        tree.heading('source', text='人物A')
+        tree.heading('relation', text='关系')
+        tree.heading('target', text='人物B')
+        
+        tree.column('source', width=120, anchor='w')
+        tree.column('relation', width=100, anchor='center')
+        tree.column('target', width=120, anchor='w')
+
+        scrollbar = ttk.Scrollbar(list_frame_container, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # 填充数据并绑定事件
+        for relation in relations:
+            item_id = tree.insert('', tk.END, values=(
+                relation.get('source', ''),
+                relation.get('label', ''),
+                relation.get('target', '')
+            ))
+            tree.item(item_id, tags=(relation.get('source', ''), relation.get('target', '')))
+
+        def on_tree_select(event):
+            selection = tree.selection()
+            if not selection:
+                return
+            
+            item = tree.item(selection[0])
+            tags = item.get('tags', ())
+            
+            if tags:
+                node_name = tags[0]
+                if node_name in node_positions:
+                    self._highlight_node(ax, fig, canvas, G, pos, node_colors_map, node_name)
+
+        tree.bind('<<TreeviewSelect>>', on_tree_select)
+
+        # 底部按钮
+        button_frame = tk.Frame(relation_window)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+
+        tk.Button(button_frame, text="关闭", command=relation_window.destroy, 
+                 font=('SimHei', 11), padx=20).pack(side=tk.RIGHT, padx=10)
+        
+        tk.Label(button_frame, text="提示：点击图谱节点或列表项可高亮显示；使用底部工具栏可缩放、平移图谱", 
+                fg='#666666', font=('SimHei', 10)).pack(side=tk.LEFT)
+
+    def _get_role_color(self, role: str) -> str:
+        """根据角色获取颜色"""
+        role_colors = {
+            '主角': '#FF6B6B',
+            '配角': '#4ECDC4',
+            '反派': '#FFD93D',
+            '未设置': '#95E1D3'
+        }
+        return role_colors.get(role, '#C7CEEA')
+    
+    def _highlight_node(self, ax, fig, canvas, G, pos, node_colors_map, node_name):
+        """高亮选中的节点"""
+        ax.clear()
+        
+        # 重新绘制边（全部变淡）
+        nx.draw_networkx_edges(
+            G, pos, ax=ax,
+            edge_color='#999999',
+            width=1.5,
+            alpha=0.2,
+            arrows=G.is_directed()
+        )
+        
+        # 高亮选中节点的边
+        neighbors = list(G.neighbors(node_name))
+        for neighbor in neighbors:
+            nx.draw_networkx_edges(
+                G, pos, ax=ax,
+                edgelist=[(node_name, neighbor)],
+                edge_color='#FF6B6B',
+                width=3.0,
+                alpha=0.8,
+                arrows=G.is_directed()
+            )
+        
+        # 重新绘制节点（非选中节点变淡）
+        non_highlight_nodes = [n for n in G.nodes() if n != node_name and n not in neighbors]
+        highlight_nodes = [node_name] + neighbors
+        
+        if non_highlight_nodes:
+            nx.draw_networkx_nodes(
+                G, pos, ax=ax,
+                nodelist=non_highlight_nodes,
+                node_color=[node_colors_map.get(n, '#C7CEEA') for n in non_highlight_nodes],
+                node_size=2000,
+                alpha=0.3,
+                edgecolors='black',
+                linewidths=1.0
+            )
+        
+        if highlight_nodes:
+            nx.draw_networkx_nodes(
+                G, pos, ax=ax,
+                nodelist=highlight_nodes,
+                node_color=[node_colors_map.get(n, '#C7CEEA') for n in highlight_nodes],
+                node_size=2000,
+                alpha=1.0,
+                edgecolors='black',
+                linewidths=2.0
+            )
+        
+        # 重新绘制节点标签
+        nx.draw_networkx_labels(
+            G, pos, ax=ax,
+            labels={n: n for n in G.nodes()},
+            font_size=10,
+            font_weight='bold',
+            font_family='SimHei'
+        )
+        
+        ax.set_title(f"人物关系网络图 - 选中: {node_name}", fontsize=14, fontweight='bold', pad=20, fontfamily='SimHei')
+        ax.axis('off')
+        fig.tight_layout()
+        canvas.draw()
+    
+    def _highlight_tree_item(self, tree, node_name):
+        """在Treeview中高亮包含指定人物的关系项"""
+        # 清除当前选择
+        tree.selection_remove(tree.get_children())
+        
+        # 查找并选中所有包含该人物的关系
+        for item in tree.get_children():
+            tags = tree.item(item, 'tags')
+            if tags and node_name in tags:
+                tree.selection_add(item)
+                tree.see(item)  # 确保可见
     
     def _on_character_delete(self):
-        """删除人物"""
-        self._set_status("删除人物功能开发中...")
+        """批量删除人物"""
+        if not hasattr(self, '_character_tree') or not hasattr(self, '_character_entries'):
+            return
+
+        selection = self._character_tree.selection()
+        if not selection:
+            messagebox.showinfo("提示", "请先选择要删除的人物")
+            return
+
+        # 确认删除
+        if not messagebox.askyesno("确认删除", f"确定要删除选中的 {len(selection)} 个人物吗？"):
+            return
+
+        # 获取要删除的索引（从大到小排序，避免删除时索引变化）
+        children = list(self._character_tree.get_children())
+        indices_to_delete = sorted([children.index(item_id) for item_id in selection if item_id in children], reverse=True)
+
+        # 从列表和树中删除
+        for idx in indices_to_delete:
+            if idx < len(self._character_entries):
+                # 从人物列表删除
+                del self._character_entries[idx]
+
+        # 从树中删除选中项
+        for item_id in selection:
+            self._character_tree.delete(item_id)
+
+        # 【修复】同步更新_character_data，确保保存和加载一致
+        self._character_data = self._character_entries
+
+        self._set_status(f"已删除 {len(selection)} 个人物")
     
     def _on_outline_browse(self):
         """浏览大纲文件"""
@@ -7758,26 +8842,28 @@ data/知识库验证器/backups/
         self._set_status("分章浏览功能开发中...")
     
     def _on_gen_save(self):
-        """保存项目 - 完整实现"""
-        if not self.current_project or not self.project_file:
+        """保存项目 - 使用项目管理器"""
+        # 检查项目管理器是否可用
+        if not self._project_manager or not self._project_manager.is_project_open():
             messagebox.showwarning("保存项目", "当前没有打开的项目")
             return
         
         try:
             self._set_status("正在保存项目...")
             
-            # 同步所有模块数据到项目
-            self._sync_all_data_to_project()
+            # 同步所有模块数据到项目管理器
+            self._sync_all_data_to_manager()
             
-            # 更新修改时间
-            self.current_project['modified_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # 调用项目管理器保存
+            success = self._project_manager.save_project()
             
-            # 保存项目文件
-            with open(self.project_file, 'w', encoding='utf-8') as f:
-                json.dump(self.current_project, f, ensure_ascii=False, indent=2)
-            
-            self._set_status("项目保存完成")
-            messagebox.showinfo("成功", "项目已保存！")
+            if success:
+                project_name = self._project_manager.get_project_name()
+                self._set_status("项目保存完成")
+                messagebox.showinfo("成功", f"项目「{project_name}」已保存！")
+            else:
+                self._set_status("保存项目失败")
+                messagebox.showwarning("保存失败", "项目保存失败，请查看日志获取详情")
             
         except Exception as e:
             # P2-003修复：用户友好错误提示
@@ -7786,8 +8872,41 @@ data/知识库验证器/backups/
             messagebox.showerror(title, full_message)
             self._set_status("保存项目失败")
     
+    def _sync_all_data_to_manager(self):
+        """同步所有模块数据到项目管理器"""
+        if not self._project_manager:
+            return
+
+        # 同步各模块数据到项目管理器
+        if hasattr(self, '_outline_content') and self._outline_content:
+            self._project_manager.sync_module_data('outline', self._outline_content)
+
+        # 人物数据：优先使用_character_entries（批量解析后的结构化列表），降级到_character_data
+        if hasattr(self, '_character_entries') and self._character_entries:
+            self._project_manager.sync_module_data('characters', self._character_entries)
+        elif hasattr(self, '_character_data') and self._character_data:
+            self._project_manager.sync_module_data('characters', self._character_data)
+
+        if hasattr(self, '_worldview_content') and self._worldview_content:
+            self._project_manager.sync_module_data('worldview', self._worldview_content)
+        
+        if hasattr(self, '_style_profile') and self._style_profile:
+            self._project_manager.sync_module_data('style', self._style_profile)
+        
+        if hasattr(self, '_reverse_chapters') and self._reverse_chapters:
+            self._project_manager.sync_module_data('reverse_chapters', self._reverse_chapters)
+        
+        if hasattr(self, '_reverse_feedback_data') and self._reverse_feedback_data:
+            self._project_manager.sync_module_data('reverse_feedback', self._reverse_feedback_data)
+        
+        if hasattr(self, '_completed_chapters') and self._completed_chapters:
+            self._project_manager.sync_module_data('completed_chapters', self._completed_chapters)
+        
+        if hasattr(self, '_generated_content') and self._generated_content:
+            self._project_manager.sync_module_data('generated_content', self._generated_content)
+    
     def _sync_all_data_to_project(self):
-        """同步所有模块数据到项目"""
+        """同步所有模块数据到项目（兼容旧代码，内部使用）"""
         if not self.current_project:
             return
         
@@ -7795,8 +8914,10 @@ data/知识库验证器/backups/
         if hasattr(self, '_outline_content') and self._outline_content:
             self.current_project['outline'] = self._outline_content
         
-        # 人物
-        if hasattr(self, '_character_data') and self._character_data:
+        # 人物：优先使用_character_entries（批量解析后的数据），降级到_character_data
+        if hasattr(self, '_character_entries') and self._character_entries:
+            self.current_project['characters'] = self._character_entries
+        elif hasattr(self, '_character_data') and self._character_data:
             self.current_project['characters'] = self._character_data
         
         # 世界观
@@ -9572,23 +10693,33 @@ data/知识库验证器/backups/
         progress_frame = ttk.LabelFrame(scrollable_frame, text="当前项目状态", padding=20)
         progress_frame.pack(fill=tk.X, padx=20, pady=10)
         
+        # 使用变量存储统计信息
+        self._progress_project_name = tk.StringVar(value="未打开项目")
+        self._progress_chapters = tk.StringVar(value="0 / 0")
+        self._progress_total_words = tk.StringVar(value="0 字")
+        self._progress_today_words = tk.StringVar(value="0 / 3000 字")
+        self._progress_outline = tk.StringVar(value="未完成")
+        self._progress_characters = tk.StringVar(value="0 人")
+        self._progress_worldview = tk.StringVar(value="0 个")
+        self._progress_style = tk.StringVar(value="未设置")
+        
         stats = [
-            ("当前项目", "未打开项目"),
-            ("已完成章节", "0 / 0"),
-            ("总字数", "0 字"),
-            ("今日目标", "0 / 3000 字"),
-            ("大纲解析", "未完成"),
-            ("人物录入", "0 人"),
-            ("世界观条目", "0 个"),
-            ("当前风格", "未设置"),
+            ("当前项目", self._progress_project_name),
+            ("已完成章节", self._progress_chapters),
+            ("总字数", self._progress_total_words),
+            ("今日目标", self._progress_today_words),
+            ("大纲解析", self._progress_outline),
+            ("人物录入", self._progress_characters),
+            ("世界观条目", self._progress_worldview),
+            ("当前风格", self._progress_style),
         ]
         
-        for i, (label, value) in enumerate(stats):
+        for i, (label, var) in enumerate(stats):
             row_frame = ttk.Frame(progress_frame, style="TFrame")
             row_frame.pack(fill=tk.X, pady=3)
             
             ttk.Label(row_frame, text=f"{label}：", width=15, anchor='e').pack(side=tk.LEFT)
-            ttk.Label(row_frame, text=value, foreground=GlassTheme.TEXT_SECONDARY).pack(side=tk.LEFT, padx=10)
+            ttk.Label(row_frame, textvariable=var, foreground=GlassTheme.TEXT_SECONDARY).pack(side=tk.LEFT, padx=10)
         
         # 操作按钮
         btn_frame = ttk.Frame(scrollable_frame, style="TFrame")
@@ -10354,7 +11485,7 @@ data/知识库验证器/backups/
         self._key_label = ttk.Label(key_frame, text="API Key：")
         self._key_label.pack(side=tk.LEFT)
         self._api_key_var = tk.StringVar()
-        self._local_url_var = tk.StringVar(value="http://localhost:11434/v1")
+        self._local_url_var = tk.StringVar(value="http://localhost:8000/v1")
         self._key_entry = ttk.Entry(key_frame, textvariable=self._api_key_var, width=35, show="*")
         self._key_entry.pack(side=tk.LEFT, padx=10)
         
@@ -10650,6 +11781,16 @@ data/知识库验证器/backups/
         """设置状态栏消息"""
         if self._status_var:
             self._status_var.set(message)
+    
+    def _get_character_manager(self) -> Any:
+        """获取或创建人物管理器适配器（延迟初始化）"""
+        if not hasattr(self, 'character_manager') or self.character_manager is None:
+            from agents.adapters.character_adapter import CharacterManagerAdapter
+            self.character_manager = CharacterManagerAdapter()
+            # 必须调用initialize方法
+            if not self.character_manager.initialize():
+                raise RuntimeError("人物管理器适配器初始化失败")
+        return self.character_manager
     
     def _process_result_queue(self) -> None:
         """处理结果队列"""
@@ -11247,6 +12388,11 @@ data/知识库验证器/backups/
                     else:
                         self._api_key_var.set(api_key_value)
                     
+                    # V3.2.1修复：加载local_url配置
+                    local_url = config_data.get("local_url", "http://localhost:8000/v1")
+                    self._local_url_var.set(local_url)
+                    logger.info(f"[设置加载] local_url: {local_url}")
+                    
                     self._temp_var.set(float(config_data.get("temperature", 0.7)))
                     if hasattr(self, '_theme_var'):
                         self._theme_var.set(config_data.get("theme", "dark"))
@@ -11266,8 +12412,49 @@ data/知识库验证器/backups/
                         self._embedding_model_var.set(memory_config.get("embedding_model", "local"))
                     
                     logger.info("Settings loaded from config.yaml")
+                    
+                    # V3.2.1修复：启动时发布配置加载事件，通知AI状态管理插件
+                    self._publish_ai_config_loaded()
         except Exception as e:
             logger.warning(f"Failed to load settings from config.yaml: {e}")
+    
+    def _publish_ai_config_loaded(self) -> None:
+        """启动时发布AI配置加载事件（V3.2.1新增）
+        
+        目的：通知AI状态管理插件配置已加载，避免插件使用默认值
+        """
+        try:
+            # 直接获取EventBus（避免依赖ConfigService的内部状态）
+            from core.event_bus import get_event_bus, Event
+            
+            event_bus = get_event_bus()
+            if not event_bus:
+                logger.warning("[配置加载] EventBus不可用，跳过事件发布")
+                return
+            
+            # 构建AI配置字典（从UI变量获取）
+            ai_config = {
+                "service_mode": self._service_mode_var.get(),
+                "provider": self._provider_var.get(),
+                "model": self._model_var.get(),
+                "api_key": self._api_key_var.get(),
+                "local_url": self._local_url_var.get(),
+                "temperature": self._temp_var.get(),
+            }
+            
+            # 发布config.changed事件（V3.2.2修复：publish方法签名是publish(event_type, data, source)）
+            event_bus.publish(
+                event_type='config.changed',
+                data={
+                    'type': 'ai_config',
+                    'data': ai_config
+                },
+                source='MainWindow._load_settings_from_config'
+            )
+            logger.info(f"[配置加载] 已发布AI配置事件: provider={ai_config['provider']}, mode={ai_config['service_mode']}")
+            
+        except Exception as e:
+            logger.warning(f"[配置加载] 发布AI配置事件失败: {e}")
     
     # ============== 事件处理器 ==============
     
@@ -11536,6 +12723,32 @@ data/知识库验证器/backups/
                 
         except Exception as e:
             logger.warning(f"[会话恢复] 检查失败（不影响正常使用）: {e}")
+    
+    def _sync_project_name_on_startup(self):
+        """V3.2.1: 启动时同步项目名称显示
+        
+        检查项目管理器是否已有项目打开，如果有则更新状态栏和项目管理页面
+        """
+        try:
+            if not self._project_manager:
+                return
+            
+            # 检查是否有项目打开
+            if self._project_manager.is_project_open():
+                project_name = self._project_manager.get_project_name()
+                project_data = self._project_manager.get_project_data()
+                
+                if project_name:
+                    # 更新项目管理页面的项目名称
+                    self._project_name_var.set(project_name)
+                    
+                    # 更新状态栏的项目名称
+                    self._update_status_bar(project_name=project_name)
+                    
+                    logger.info(f"[启动同步] 项目名称已更新: {project_name}")
+            
+        except Exception as e:
+            logger.warning(f"[启动同步] 同步项目名称失败: {e}")
     
     def _preload_vector_store_async(self):
         """V2.18: 后台预加载向量模型（不阻塞UI）"""
@@ -11899,6 +13112,10 @@ data/知识库验证器/backups/
     def _on_refresh_progress(self) -> None:
         """刷新进度"""
         self._set_status("刷新进度...")
+        # 【修复】实际调用更新方法
+        if hasattr(self, '_update_progress_display'):
+            self._update_progress_display()
+            self._set_status("进度已刷新")
     
     def _on_export_progress(self) -> None:
         """导出报告"""
@@ -12193,7 +13410,7 @@ data/知识库验证器/backups/
         name_entry.focus()
     
     def _on_open_project(self) -> None:
-        """打开项目 - 完整实现（参考V5版本）"""
+        """打开项目 - 使用项目管理器"""
         # 首先尝试打开项目JSON文件
         project_file = filedialog.askopenfilename(
             title="打开项目",
@@ -12208,6 +13425,65 @@ data/知识库验证器/backups/
         def load_project_thread():
             """后台线程加载项目"""
             try:
+                # 优先使用项目管理器
+                if self._project_manager:
+                    # 调用项目管理器加载项目
+                    success = self._project_manager.load_project(project_file)
+                    
+                    if success:
+                        project_name = self._project_manager.get_project_name()
+                        project_data = self._project_manager.get_project_data()
+                        
+                        # 更新主线程UI
+                        def update_ui():
+                            self.current_project = project_data
+                            self.project_file = project_file
+
+                            # 更新显示
+                            self._project_name_var.set(project_name)
+                            project_dir = os.path.dirname(project_file)
+                            self._project_path_var.set(project_dir)
+
+                            # V3.2修复：更新状态栏项目名称
+                            self._update_status_bar(project_name=project_name)
+
+                            # 恢复所有模块数据到UI
+                            self._restore_project_data_to_ui(project_data)
+
+                            self._set_status(f"项目 '{project_name}' 已打开")
+                            
+                            # 显示成功信息
+                            info_msg = f"项目加载成功！\n\n"
+                            info_msg += f"项目名称: {project_name}\n"
+                            info_msg += f"作者: {project_data.get('author', '未设置')}\n"
+                            info_msg += f"类型: {project_data.get('genre', '未设置')}\n"
+                            info_msg += f"目标字数: {project_data.get('target_words', 0):,}字\n"
+                            
+                            # 检查项目完整性
+                            missing = []
+                            if not project_data.get('outline'):
+                                missing.append("大纲")
+                            if not project_data.get('characters'):
+                                missing.append("人物设定")
+                            if not project_data.get('worldview'):
+                                missing.append("世界观设定")
+                            if not project_data.get('style'):
+                                missing.append("风格设定")
+                            if not project_data.get('reverse_feedback'):
+                                missing.append("逆向反馈")
+                            
+                            if missing:
+                                info_msg += f"\n\n提示：以下内容尚未设置：{', '.join(missing)}"
+                            
+                            messagebox.showinfo("项目已打开", info_msg)
+                        
+                        self.root.after(0, update_ui)
+                        return
+                    else:
+                        # 项目管理器加载失败，继续使用降级方案
+                        pass
+                
+                # 降级方案：直接读取项目文件
                 # 检查文件是否存在
                 if not os.path.exists(project_file):
                     self.root.after(0, lambda: [
@@ -12235,6 +13511,9 @@ data/知识库验证器/backups/
                     self._project_name_var.set(project_name)
                     project_dir = os.path.dirname(project_file)
                     self._project_path_var.set(project_dir)
+                    
+                    # V3.2.1修复：更新状态栏项目名称
+                    self._update_status_bar(project_name=project_name)
                     
                     # 恢复所有模块数据到UI
                     self._restore_project_data_to_ui(project_data)
@@ -12286,9 +13565,13 @@ data/知识库验证器/backups/
     def _restore_project_data_to_ui(self, project_data: Dict):
         """从项目数据恢复到UI显示"""
         try:
-            # 恢复大纲
+            # 恢复大纲（大纲管理页面使用_tree，其他地方可能使用_text）
             if project_data.get('outline'):
                 self._outline_content = project_data['outline']
+                # 更新大纲树（如果存在）
+                if hasattr(self, '_outline_tree'):
+                    self._update_outline_tree_from_content(self._outline_content)
+                # 更新大纲文本框（如果存在，如快捷创作页面）
                 if hasattr(self, '_outline_text'):
                     self._outline_text.delete(1.0, tk.END)
                     self._outline_text.insert(1.0, self._outline_content)
@@ -12296,15 +13579,27 @@ data/知识库验证器/backups/
             # 恢复人物设定
             if project_data.get('characters'):
                 self._character_data = project_data['characters']
+                # 【修复】同步到_character_entries，确保批量解析后的数据能正确恢复
+                self._character_entries = project_data['characters']
+                # 【修复】与世界观一致，检查_tree是否存在再更新
                 if hasattr(self, '_character_tree'):
                     self._update_character_tree()
             
-            # 恢复世界观
+            # 恢复世界观（解析为列表并显示在树中）
             if project_data.get('worldview'):
                 self._worldview_content = project_data['worldview']
-                if hasattr(self, '_worldview_text'):
-                    self._worldview_text.delete(1.0, tk.END)
-                    self._worldview_text.insert(1.0, self._worldview_content)
+                # 【修复】不再强制转换为字符串，直接传递原始数据给更新方法
+                # _update_worldview_tree_from_content支持列表和字符串两种格式
+                
+                # 解析世界观内容并更新树
+                if hasattr(self, '_worldview_tree'):
+                    self._update_worldview_tree_from_content(self._worldview_content)
+                    
+                # 【修复】项目打开时不自动填充预览区域，只在双击或查看详情时显示
+                # 保持预览区域为空，提示用户操作
+                if hasattr(self, '_worldview_preview'):
+                    self._worldview_preview.delete("1.0", tk.END)
+                    self._worldview_preview.insert("1.0", "双击左侧列表查看详情，或点击【查看详情】按钮")
             
             # 恢复风格设定
             if project_data.get('style'):
@@ -12333,11 +13628,17 @@ data/知识库验证器/backups/
             # 恢复生成内容
             if project_data.get('generated_content'):
                 self._generated_content = project_data['generated_content']
-                # 更新创作进度页面
-                if hasattr(self, '_update_progress_display'):
-                    self._update_progress_display()
             
             self._current_project_name = project_data.get('name', '未命名项目')
+            
+            # V3.2.1修复：同步更新状态栏项目名称
+            if project_data.get('name'):
+                self._update_status_bar(project_name=project_data['name'])
+            
+            # 【修复】无论是否有generated_content，都更新创作进度页面
+            # 因为即使没有生成内容，也需要显示大纲、人物、世界观等状态
+            if hasattr(self, '_update_progress_display'):
+                self._update_progress_display()
             
         except Exception as e:
             logger.error(f"恢复项目数据到UI失败: {e}")
@@ -12364,21 +13665,133 @@ data/知识库验证器/backups/
             logger.error(f"更新逆向反馈章节树失败: {e}")
     
     def _update_character_tree(self):
-        """更新人物树显示"""
-        if not hasattr(self, '_character_tree') or not self._character_data:
+        """更新人物树显示
+
+        支持两种格式：
+        1. 字典列表格式（结构化人物档案）：
+           [{'id': 'xxx', 'name': '张三', 'role': '主角', 'status': '活跃',
+             'emotion': '平静', 'chapters': '第1-5章', ...}]
+        2. 简单格式（兼容旧数据）：
+           [{'name': '张三', 'role': '主角'}, ...]
+        """
+        if not hasattr(self, '_character_tree'):
+            return
+
+        # 优先使用_character_entries（批量解析后的数据），降级到_character_data
+        char_data = getattr(self, '_character_entries', None) or getattr(self, '_character_data', None)
+
+        if not char_data:
+            return
+
+        try:
+            # 清空现有数据
+            self._character_tree.delete(*self._character_tree.get_children())
+
+            # 添加人物数据
+            for char in char_data:
+                char_name = char.get('name', '未命名')
+                char_role = char.get('role', '未设置')
+                char_status = char.get('status', '新建')
+                char_emotion = char.get('emotion', '平静')
+                char_chapters = char.get('chapters', '未设置')
+
+                # 插入完整5列数据
+                self._character_tree.insert('', tk.END, values=(
+                    char_name,
+                    char_role,
+                    char_status,
+                    char_emotion,
+                    char_chapters
+                ))
+        except Exception as e:
+            logger.error(f"更新人物树失败: {e}")
+    
+    def _update_outline_tree_from_content(self, outline_content: str):
+        """从大纲内容更新大纲树显示"""
+        if not hasattr(self, '_outline_tree') or not outline_content:
             return
         
         try:
             # 清空现有数据
-            self._character_tree.delete(*self._character_tree.get_children())
+            self._outline_tree.delete(*self._outline_tree.get_children())
             
-            # 添加人物数据
-            for char in self._character_data:
-                char_name = char.get('name', '未命名')
-                char_role = char.get('role', '未设置')
-                self._character_tree.insert('', tk.END, values=(char_name, char_role))
+            # 简单解析：按行分割，根据缩进判断层级
+            lines = outline_content.split('\n')
+            parent_ids = {}
+            
+            for line in lines:
+                if not line.strip():
+                    continue
+                
+                # 计算缩进级别（每两个空格为一级）
+                indent_level = 0
+                while line.startswith('  '):
+                    indent_level += 1
+                    line = line[2:]
+                
+                # 提取章节标题（去除序号和符号）
+                title = line.strip()
+                # 去除序号（如"第一章"、"1.1"等）
+                import re
+                title = re.sub(r'^第[一二三四五六七八九十百千万]+[卷章节]|^\d+\.?\d*', '', title).strip()
+                
+                if not title:
+                    continue
+                
+                # 插入树节点
+                parent_id = parent_ids.get(indent_level - 1, '')
+                item_id = self._outline_tree.insert(parent_id, tk.END, text=title)
+                parent_ids[indent_level] = item_id
+                
         except Exception as e:
-            logger.error(f"更新人物树失败: {e}")
+            logger.error(f"更新大纲树失败: {e}")
+    
+    def _update_worldview_tree_from_content(self, worldview_content):
+        """从世界观内容更新世界观树显示
+
+        【架构修复V3.1】解析逻辑已迁移到WorldviewParserAdapter.parse_for_display()
+        GUI只负责：1. 调用适配器解析 2. 显示结果
+        """
+        if not hasattr(self, '_worldview_tree') or not worldview_content:
+            return
+
+        try:
+            # 清空现有数据
+            self._worldview_tree.delete(*self._worldview_tree.get_children())
+
+            # 初始化词条列表
+            if not hasattr(self, '_worldview_entries'):
+                self._worldview_entries = []
+            self._worldview_entries = []
+
+            # 延迟初始化适配器（架构修复：业务逻辑在插件层）
+            if self._worldview_adapter is None:
+                from agents.adapters.worldview_adapter import WorldviewParserAdapter
+                self._worldview_adapter = WorldviewParserAdapter()
+                if not self._worldview_adapter.initialize():
+                    logger.error("WorldviewParserAdapter初始化失败")
+                    return
+
+            # 调用适配器解析内容（业务逻辑在插件层）
+            entries = self._worldview_adapter.parse_for_display(worldview_content)
+
+            # 存储并显示解析结果
+            for entry in entries:
+                self._worldview_entries.append(entry)
+
+                # 截断显示（UI显示逻辑）
+                display_elements = entry['elements'][:50] + '...' if len(entry['elements']) > 50 else entry['elements']
+
+                self._worldview_tree.insert('', tk.END, values=(
+                    entry['name'],
+                    entry['category'],
+                    display_elements,
+                    entry['status'],
+                    entry['modified']
+                ))
+
+        except Exception as e:
+            logger.error(f"更新世界观树失败: {e}")
     
     def _update_style_display(self, style_profile):
         """更新风格显示"""
@@ -12473,14 +13886,73 @@ data/知识库验证器/backups/
     
     def _update_progress_display(self):
         """更新创作进度显示"""
-        if not hasattr(self, '_generated_content') or not self._generated_content:
-            return
-        
         try:
-            # 更新进度条和统计
-            if hasattr(self, '_progress_var'):
-                total_chapters = len(self._generated_content)
-                self._progress_var.set(total_chapters)
+            # 更新项目名称（从_current_project_name获取）
+            if hasattr(self, '_current_project_name') and self._progress_project_name is not None:
+                self._progress_project_name.set(self._current_project_name)
+            
+            # 更新章节统计
+            if self._progress_chapters is not None and self._progress_total_words is not None:
+                if hasattr(self, '_generated_content') and self._generated_content:
+                    total_chapters = len(self._generated_content)
+                    completed_chapters = sum(1 for content in self._generated_content if content)
+                    self._progress_chapters.set(f"{completed_chapters} / {total_chapters}")
+
+                    # 计算总字数
+                    total_words = 0
+                    for content in self._generated_content:
+                        if content and isinstance(content, str):
+                            total_words += len(content)
+                    self._progress_total_words.set(f"{total_words:,} 字")
+                else:
+                    self._progress_chapters.set("0 / 0")
+                    self._progress_total_words.set("0 字")
+            
+            # 更新大纲解析状态
+            if self._progress_outline is not None:
+                if hasattr(self, '_outline_content') and self._outline_content:
+                    self._progress_outline.set("已完成")
+                else:
+                    self._progress_outline.set("未完成")
+            
+            # 更新人物录入（支持字典和列表两种格式）
+            if self._progress_characters is not None:
+                if hasattr(self, '_character_data') and self._character_data:
+                    if isinstance(self._character_data, dict):
+                        char_count = len(self._character_data.get('characters', []))
+                    elif isinstance(self._character_data, list):
+                        char_count = len(self._character_data)
+                    else:
+                        char_count = 0
+                    self._progress_characters.set(f"{char_count} 人")
+                else:
+                    self._progress_characters.set("0 人")
+            
+            # 更新世界观条目（支持字典列表和字符串两种格式）
+            if self._progress_worldview is not None:
+                if hasattr(self, '_worldview_content') and self._worldview_content:
+                    if isinstance(self._worldview_content, list):
+                        # 字典列表格式
+                        worldview_count = len(self._worldview_content)
+                    elif isinstance(self._worldview_content, str):
+                        # 字符串格式（Markdown）
+                        worldview_count = self._worldview_content.count('\n##') + self._worldview_content.count('\n###')
+                        if worldview_count == 0 and self._worldview_content.strip():
+                            worldview_count = 1  # 至少有一个条目
+                    else:
+                        worldview_count = 0
+                    self._progress_worldview.set(f"{worldview_count} 个")
+                else:
+                    self._progress_worldview.set("0 个")
+            
+            # 更新风格设定
+            if self._progress_style is not None:
+                if hasattr(self, '_style_profile') and self._style_profile:
+                    style_name = self._style_profile.get('name', '未命名风格')
+                    self._progress_style.set(style_name)
+                else:
+                    self._progress_style.set("未设置")
+            
         except Exception as e:
             logger.error(f"更新进度显示失败: {e}")
     
@@ -13058,38 +14530,39 @@ ID: {plugin_id}
             with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(config_data, f, allow_unicode=True, default_flow_style=False)
 
-            # 3. 调用ConfigService更新AI配置（触发EventBus事件）
+            # 3. 调用ConfigService更新AI配置（V3.2重构：业务逻辑在插件层）
             try:
                 from core import get_config_service
                 config_service = get_config_service()
+
+                # 从Entry组件获取最新的本地URL
+                local_url = self._url_entry.get().strip() if hasattr(self, "_url_entry") else self._local_url_var.get()
 
                 # 构建AI配置字典
                 ai_config = {
                     "service_mode": self._service_mode_var.get(),
                     "provider": provider,
                     "model": self._model_var.get(),
-                    "api_key": api_key,  # 传递真实Key用于内存中的客户端初始化
-                    "local_url": self._local_url_var.get(),
+                    "api_key": api_key,
+                    "local_url": local_url,
                     "temperature": self._temp_var.get(),
                 }
 
                 # 更新AI配置（会发布config.changed事件）
+                # 插件订阅该事件后自动测试连接并更新状态
                 config_service.update_ai_config(ai_config)
-                logger.info("AI配置已更新，EventBus事件已发布")
+                logger.info(f"[设置保存] AI配置已更新: provider={provider}, endpoint={local_url}")
 
             except Exception as e:
-                logger.warning(f"ConfigService更新失败，使用旧方式：{e}")
-                # 降级：使用旧方式更新配置
-                if self._services and self._services.config:
-                    self._services.config.set("provider", provider)
-                    self._services.config.set("model", self._model_var.get())
-                    self._services.config.set("temperature", self._temp_var.get())
+                logger.error(f"[设置保存] ConfigService更新失败: {e}", exc_info=True)
+                messagebox.showerror("错误", f"保存设置失败：{e}")
+                return
 
             # 4. 应用设置
             self._apply_settings(config_data)
 
-            self._set_status("设置已保存并应用")
-            messagebox.showinfo("成功", "设置已保存并应用！\n\nAPI Key已加密存储。\nAI服务配置已实时生效。")
+            self._set_status("设置已保存")
+            messagebox.showinfo("成功", "设置已保存！\n\n配置已生效，AI状态将在连接成功后更新。")
 
         except Exception as e:
             self._set_status(f"保存设置失败：{e}")
@@ -13175,72 +14648,74 @@ ID: {plugin_id}
         self._show_key_var.set(not self._show_key_var.get())
     
     def _on_test_api_connection(self):
-        """测试API连接（V2.23增强：支持本地模型测试）"""
+        """测试API连接（V3.2重构：使用AIStatusManagerPlugin）
+
+        【架构设计】
+        - 业务逻辑在AIStatusManagerPlugin插件中实现
+        - GUI只负责调用和显示结果
+        - 状态变更通过EventBus实时同步到状态栏
+        """
         provider = self._provider_var.get()
         api_key = self._api_key_var.get()
         model = self._model_var.get()
         service_mode = self._service_mode_var.get()
-        
-        # 本地模式：测试本地服务连接
+        local_url = self._local_url_var.get()
+
+        # 确保AI状态管理插件已初始化
+        if not self._ai_status_manager:
+            self._init_ai_status_manager()
+
+        # 更新状态为"连接中"
+        self._set_status(f"正在测试{provider}连接...")
+
+        # 本地模式：使用AIStatusManagerPlugin测试和启动服务
         if service_mode == "local":
-            local_url = self._local_url_var.get()
-            self._set_status(f"正在测试本地{provider}服务连接...")
-            
-            try:
-                import requests
-                
-                if provider == "Qwen":
-                    # Qwen使用/health端点测试
-                    response = requests.get(f"{local_url}/health", timeout=5)
-                    if response.status_code == 200:
-                        data = response.json()
-                        self._set_status(f"✓ Qwen服务连接成功")
-                        messagebox.showinfo("连接成功", 
-                            f"已成功连接到Qwen本地服务！\n"
-                            f"端点：{local_url}\n"
-                            f"模型状态：{'已加载' if data.get('model_loaded', False) else '加载中'}\n"
-                            f"模型：{data.get('model', 'Qwen2.5-14B-GPTQ-Int4')}")
-                    else:
-                        raise Exception(f"服务返回状态码：{response.status_code}")
-                        
-                elif provider == "Ollama":
-                    # Ollama测试
-                    response = requests.get(f"{local_url}/api/tags", timeout=5)
-                    if response.status_code == 200:
-                        self._set_status(f"✓ Ollama服务连接成功")
-                        models = response.json().get('models', [])
-                        model_names = [m.get('name', '') for m in models]
-                        messagebox.showinfo("连接成功", 
-                            f"已成功连接到Ollama服务！\n"
-                            f"端点：{local_url}\n"
-                            f"可用模型：{', '.join(model_names) if model_names else '无'}")
-                    else:
-                        raise Exception(f"服务返回状态码：{response.status_code}")
+            # 先测试连接
+            result = self._ai_status_manager.test_connection(local_url, provider)
+
+            if result["success"]:
+                # 连接成功
+                self._set_status(f"✓ {provider}服务连接成功")
+                messagebox.showinfo("连接成功", result["message"])
+                return
+
+            # 连接失败，尝试启动服务（仅Qwen）
+            if provider.lower() == "qwen":
+                self._set_status(f"服务未运行，正在启动...")
+                logger.info("[测试连接] 检测到Qwen未运行，尝试自动启动...")
+
+                # 启动服务
+                start_result = self._ai_status_manager.start_local_service("qwen")
+
+                if start_result["success"]:
+                    # 服务启动中，等待就绪
+                    self._set_status(f"服务启动中，请稍候...")
+                    messagebox.showinfo(
+                        "服务启动中",
+                        f"Qwen服务正在启动...\n\n"
+                        f"进程ID: {start_result.get('pid')}\n"
+                        f"端点: {start_result.get('endpoint')}\n\n"
+                        f"服务启动需要约30-60秒，请稍后再测试连接。"
+                    )
                 else:
-                    # 通用本地服务测试（使用OpenAI兼容API）
-                    from openai import OpenAI
-                    client = OpenAI(
-                        api_key="local",
-                        base_url=local_url
+                    # 启动失败
+                    self._set_status(f"✗ 服务启动失败")
+                    messagebox.showerror(
+                        "启动失败",
+                        f"无法启动Qwen服务：\n{start_result.get('message')}\n\n"
+                        f"请检查：\n"
+                        f"1. Qwen已正确部署到 F:\\Qwen\n"
+                        f"2. start_server_v2.py 脚本存在\n"
+                        f"3. 显卡驱动和CUDA已安装"
                     )
-                    response = client.chat.completions.create(
-                        model=model,
-                        messages=[{"role": "user", "content": "Hello"}],
-                        max_tokens=5
-                    )
-                    self._set_status(f"✓ 本地服务连接成功")
-                    messagebox.showinfo("连接成功", f"已成功连接到本地服务！\n端点：{local_url}\n模型：{model}")
-                    
-            except Exception as e:
-                self._set_status(f"✗ 本地服务连接失败")
-                messagebox.showerror("连接失败", 
-                    f"无法连接到本地服务\n"
-                    f"端点：{local_url}\n"
-                    f"错误：{str(e)}\n\n"
-                    f"请检查：\n"
-                    f"1. 服务是否已启动（如：python start_server_v2.py）\n"
-                    f"2. 端点地址是否正确\n"
-                    f"3. 模型是否已加载")
+            else:
+                # 其他本地服务
+                self._set_status(f"✗ 连接失败")
+                messagebox.showerror(
+                    "连接失败",
+                    f"无法连接到{provider}服务\n\n"
+                    f"请确保服务已启动后再测试。"
+                )
             return
         
         # 线上模式：测试API连接
@@ -13976,9 +15451,9 @@ ID: {plugin_id}
                 self._model_combo['values'] = ["qwen2.5-14b-gptq", "llama3.1", "mistral", "deepseek-coder-v2"]
                 self._model_var.set("qwen2.5-14b-gptq")  # 默认选择Qwen模型
             
-            # 更新本地URL为Qwen默认地址
+            # 更新本地URL为Qwen默认地址（V3.2.1修复：添加/v1路径）
             if hasattr(self, '_local_url_var'):
-                self._local_url_var.set("http://localhost:8000")
+                self._local_url_var.set("http://localhost:8000/v1")
         else:
             # 线上模式：显示API Key，隐藏本地地址
             self._key_label.config(text="API Key：")
@@ -14597,49 +16072,62 @@ ID: {plugin_id}
             self.root.destroy()
     
     def _on_save_project(self):
-        """保存当前项目（通用保存功能）
-        
+        """保存当前项目（通用保存功能 - 使用项目管理器）
+
         功能：
-        - 调用项目管理器保存当前项目的所有设定
+        - 使用项目管理器保存当前项目数据
         - 显示保存成功/失败提示
         - 更新状态栏
         """
         try:
-            # 检查项目管理器是否可用
-            if not hasattr(self, '_project_manager') or self._project_manager is None:
-                # 尝试从服务定位器获取
-                try:
-                    from core import ServiceLocator
-                    self._project_manager = ServiceLocator.get("project_manager")
-                except Exception:
-                    messagebox.showwarning("提示", "项目管理器未初始化，无法保存项目")
-                    return
-            
-            # 调用项目管理器保存
-            if self._project_manager:
-                # 获取当前项目名称
-                project_name = "未命名项目"
-                if hasattr(self, '_project_name_var') and self._project_name_var:
-                    project_name = self._project_name_var.get()
-                
-                # 执行保存
+            # 优先使用项目管理器
+            if self._project_manager and self._project_manager.is_project_open():
+                # 同步所有模块数据到项目管理器
+                self._sync_all_data_to_manager()
+
+                # 调用项目管理器保存
                 success = self._project_manager.save_project()
-                
+
                 if success:
+                    project_name = self._project_manager.get_project_name()
+                    self._set_status("项目保存完成")
                     messagebox.showinfo("保存成功", f"项目「{project_name}」已保存成功")
-                    logger.info(f"Project saved: {project_name}")
-                    # 更新状态栏
-                    if hasattr(self, '_status_label') and self._status_label:
-                        self._status_label.config(text="项目已保存")
                 else:
+                    self._set_status("保存项目失败")
                     messagebox.showwarning("保存失败", "项目保存失败，请查看日志获取详情")
-                    logger.warning("Project save failed")
-            else:
-                messagebox.showwarning("提示", "未打开项目，无法保存")
-                
+                return
+
+            # 降级方案：如果项目管理器不可用，使用旧的直接保存方式
+            if not self.current_project or not self.project_file:
+                messagebox.showwarning("保存项目", "当前没有打开的项目")
+                return
+
+            # 获取当前项目名称
+            project_name = self.current_project.get('name', '未命名项目')
+
+            # 同步所有模块数据到项目
+            self._sync_all_data_to_project()
+
+            # 更新修改时间
+            from datetime import datetime
+            self.current_project['modified_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # 保存项目文件
+            self._set_status("正在保存项目...")
+            with open(self.project_file, 'w', encoding='utf-8') as f:
+                json.dump(self.current_project, f, ensure_ascii=False, indent=2)
+
+            self._set_status("项目保存完成")
+            messagebox.showinfo("保存成功", f"项目「{project_name}」已保存成功")
+            logger.info(f"Project saved: {project_name}")
+
         except Exception as e:
+            # P2-003修复：用户友好错误提示
+            from core.user_friendly_errors import convert_file_error
+            title, full_message = convert_file_error(e, "保存项目")
+            messagebox.showerror(title, full_message)
+            self._set_status("保存项目失败")
             logger.error(f"Error saving project: {e}")
-            messagebox.showerror("错误", f"保存项目时发生错误：{str(e)}")
     
     def _setup_system_tray(self) -> None:
         """

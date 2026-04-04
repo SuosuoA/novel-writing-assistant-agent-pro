@@ -45,10 +45,11 @@ class LocalModelAssistant:
         Args:
             model_cache_path: 模型缓存路径
         """
-        # 模型缓存路径
+        # 模型缓存路径（默认使用项目内部的sentence_transformers_cache）
         if model_cache_path:
             self.model_cache_path = Path(model_cache_path)
         else:
+            # 项目根目录下的sentence_transformers_cache
             self.model_cache_path = Path(__file__).parent.parent.parent / "sentence_transformers_cache"
         
         # 模型实例（延迟加载）

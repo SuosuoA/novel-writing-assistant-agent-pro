@@ -200,8 +200,8 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             # 从服务定位器获取API客户端
             if hasattr(context, 'service_locator') and context.service_locator:
                 try:
-                    # 尝试获取AI服务
-                    ai_service = context.service_locator.get("ai_service")
+                    # 使用get_service()按名称获取（不是get()按类型获取）
+                    ai_service = context.service_locator.get_service("ai_service")
                     if ai_service:
                         self._api_client = ai_service
                         logger.info("[IterativeGenerator] 从服务定位器获取AI服务成功")

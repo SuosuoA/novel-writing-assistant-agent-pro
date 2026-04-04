@@ -1,0 +1,38 @@
+{
+  "id": "ai-status-manager-v1",
+  "name": "AI状态管理插件",
+  "version": "1.0.0",
+  "description": "管理AI连接状态，提供状态查询和事件发布",
+  "author": "Novel Writing Assistant Team",
+  "type": "ToolPlugin",
+  "priority": 100,
+  "dependencies": [],
+  "hooks": [
+    "config.changed",
+    "ai.provider.changed",
+    "ai.connection.test"
+  ],
+  "provides": [
+    "ai.status.query",
+    "ai.status.update",
+    "ai.service.start",
+    "ai.service.stop"
+  ],
+  "config_schema": {
+    "auto_sync_interval": {
+      "type": "integer",
+      "default": 30,
+      "description": "状态同步间隔（秒）"
+    },
+    "retry_on_failure": {
+      "type": "boolean",
+      "default": true,
+      "description": "连接失败时是否自动重试"
+    },
+    "max_retry_count": {
+      "type": "integer",
+      "default": 3,
+      "description": "最大重试次数"
+    }
+  }
+}

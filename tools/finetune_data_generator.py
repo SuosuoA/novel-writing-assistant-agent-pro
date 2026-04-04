@@ -14,7 +14,7 @@ V1.0版本
 设计参考：
 - OpenClaw Claw化系统
 - 12.9claw化全面说明.md
-- F:/Qwen 本地模型
+- 项目内Qwen目录本地模型
 
 使用示例：
     from tools.finetune_data_generator import get_finetune_data_generator
@@ -61,15 +61,18 @@ class FinetuneDataGenerator:
     - 自动标注质量评分
     """
     
-    def __init__(self, workspace: Optional[Path] = None, qwen_path: str = "F:/Qwen"):
+    def __init__(self, workspace: Optional[Path] = None, qwen_path: Optional[str] = None):
         """
         初始化微调数据生成器
         
         Args:
             workspace: 工作区路径
-            qwen_path: Qwen本地模型路径
+            qwen_path: Qwen本地模型路径（默认为项目内的Qwen目录）
         """
         self.workspace = workspace or Path.cwd()
+        if qwen_path is None:
+            # 默认使用项目内的Qwen目录
+            qwen_path = str(Path(__file__).parent.parent / "Qwen")
         self.qwen_path = Path(qwen_path)
         
         # 初始化核心组件
@@ -620,7 +623,7 @@ _generator_lock = threading.Lock()
 
 def get_finetune_data_generator(
     workspace: Optional[Path] = None,
-    qwen_path: str = "F:/Qwen"
+    qwen_path: str = str(Path(__file__).parent.parent / "Qwen")
 ) -> FinetuneDataGenerator:
     """
     获取微调数据生成器单例

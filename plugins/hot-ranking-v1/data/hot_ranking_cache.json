@@ -1,450 +1,6 @@
 {
-  "timestamp": "2026-03-29 21:10:20",
+  "timestamp": "2026-04-04 21:11:23",
   "data": {
-    "起点中文网": [
-      {
-        "rank": 1,
-        "title": "捞尸人",
-        "author": "纯洁滴小龙",
-        "category": "都市",
-        "heat": 210000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1041637443/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 2,
-        "title": "夜无疆",
-        "author": "辰东",
-        "category": "玄幻",
-        "heat": 200000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1040765595/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 3,
-        "title": "玄鉴仙族",
-        "author": "季越人",
-        "category": "仙侠",
-        "heat": 190000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1035420986/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 4,
-        "title": "苟在武道世界成圣",
-        "author": "在水中的纸老虎",
-        "category": "玄幻",
-        "heat": 180000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1045003390/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 5,
-        "title": "没钱修什么仙？",
-        "author": "熊狼狗",
-        "category": "仙侠",
-        "heat": 170000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1042256511/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 6,
-        "title": "苟在两界修仙",
-        "author": "文抄公",
-        "category": "仙侠",
-        "heat": 160000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1047213880/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 7,
-        "title": "以神通之名",
-        "author": "猪心虾仁",
-        "category": "都市",
-        "heat": 150000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1044896207/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 8,
-        "title": "诡秘之主",
-        "author": "爱潜水的乌贼",
-        "category": "玄幻",
-        "heat": 140000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1010868264/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 9,
-        "title": "我在永夜打造庇护所",
-        "author": "中世纪的兔子",
-        "category": "玄幻",
-        "heat": 130000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1046692521/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 10,
-        "title": "青山",
-        "author": "会说话的肘子",
-        "category": "玄幻",
-        "heat": 120000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1033014772/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 11,
-        "title": "山河稷",
-        "author": "姬叉",
-        "category": "仙侠",
-        "heat": 110000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1043748975/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 12,
-        "title": "1984：从破产川菜馆开始",
-        "author": "轻语江湖",
-        "category": "都市",
-        "heat": 100000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1044818845/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 13,
-        "title": "元始法则",
-        "author": "飞天鱼",
-        "category": "玄幻",
-        "heat": 90000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1042108416/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 14,
-        "title": "我，枪神！",
-        "author": "如水意",
-        "category": "都市",
-        "heat": 80000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1047166699/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 15,
-        "title": "以一龙之力打倒整个世界！",
-        "author": "唐宋元明氢",
-        "category": "轻小说",
-        "heat": 70000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1043128588/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 16,
-        "title": "异度旅社",
-        "author": "远瞳",
-        "category": "科幻",
-        "heat": 60000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1041604040/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 17,
-        "title": "腐朽世界",
-        "author": "滚开",
-        "category": "玄幻",
-        "heat": 50000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1046465651/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 18,
-        "title": "人在美利坚：我的叔叔堂吉诃德",
-        "author": "喜欢吃圣代",
-        "category": "都市",
-        "heat": 40000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1047259146/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 19,
-        "title": "同时穿越：继承万界遗产",
-        "author": "透明鸽子",
-        "category": "轻小说",
-        "heat": 30000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1046194994/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      },
-      {
-        "rank": 20,
-        "title": "东京医途",
-        "author": "睡醒了会饿",
-        "category": "都市",
-        "heat": 20000,
-        "source": "起点中文网",
-        "url": "https://m.qidian.com/book/1046431588/",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05"
-      }
-    ],
-    "番茄小说": [
-      {
-        "title": "心肝宠",
-        "author": "九棂",
-        "category": "古代言情",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 1
-      },
-      {
-        "title": "反派：我的弟弟是天选之子",
-        "author": "家养了只肥兔",
-        "category": "综合",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 2
-      },
-      {
-        "title": "重生医妃一睁眼，全京城排队抢亲",
-        "author": "忍冬藤",
-        "category": "古代言情",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 3
-      },
-      {
-        "title": "末世：开局先囤十亿物资",
-        "author": "恨年少无知",
-        "category": "科幻",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 4
-      },
-      {
-        "title": "我在修仙界搞内卷",
-        "author": "丛月",
-        "category": "玄幻仙侠",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 5
-      },
-      {
-        "title": "我以狐仙镇百鬼",
-        "author": "紫梦游龙",
-        "category": "玄幻仙侠",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 6
-      },
-      {
-        "title": "穿到荒年后，我成了极品恶婆婆",
-        "author": "朝云紫",
-        "category": "综合",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 7
-      },
-      {
-        "title": "皇家金牌县令",
-        "author": "板面王仔",
-        "category": "玄幻仙侠",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 8
-      },
-      {
-        "title": "部族荣光",
-        "author": "丧狐",
-        "category": "综合",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 9
-      },
-      {
-        "title": "莫若凌霄",
-        "author": "月关",
-        "category": "综合",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 10
-      },
-      {
-        "title": "高手下山，我有九个无敌师父！",
-        "author": "小殇殇",
-        "category": "都市",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 11
-      },
-      {
-        "title": "惊鸿",
-        "author": "一夕烟雨",
-        "category": "综合",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 12
-      },
-      {
-        "title": "玄幻，我顿悟了混沌体",
-        "author": "叶大刀",
-        "category": "综合",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 13
-      },
-      {
-        "title": "武碎星河",
-        "author": "妖夜",
-        "category": "玄幻仙侠",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 14
-      },
-      {
-        "title": "萤火之城",
-        "author": "童童",
-        "category": "综合",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 15
-      },
-      {
-        "title": "娇养玫瑰",
-        "author": "美绿哔哔",
-        "category": "古代言情",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 16
-      },
-      {
-        "title": "天灾，我囤几十亿物资在末世求生",
-        "author": "袅袅鱼音",
-        "category": "科幻",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 17
-      },
-      {
-        "title": "够野",
-        "author": "纠纠猫",
-        "category": "综合",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 18
-      },
-      {
-        "title": "皇后重生要谋反",
-        "author": "流心蜜糖",
-        "category": "古代言情",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 19
-      },
-      {
-        "title": "开局虚实神格，修仙界我开私服",
-        "author": "独钓寒江雪又一夜",
-        "category": "玄幻仙侠",
-        "heat": 1000,
-        "source": "番茄小说",
-        "url": "",
-        "is_real": true,
-        "crawl_time": "2026-03-29 21:10:05",
-        "rank": 20
-      }
-    ],
     "晋江文学城": [
       {
         "rank": 1,
@@ -456,127 +12,127 @@
         "url": "https://m.jjwxc.net/book2/9898641",
         "book_id": "9898641",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 2,
-        "title": "呜呜我尽量哭得小小声",
+        "title": "他的光影",
         "author": "",
         "category": "",
         "heat": 990,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/6886628",
-        "book_id": "6886628",
+        "url": "https://m.jjwxc.net/book2/9108793",
+        "book_id": "9108793",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 3,
-        "title": "他的光影",
+        "title": "协议恋爱，但大佬失忆了",
         "author": "",
         "category": "",
         "heat": 980,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/9108793",
-        "book_id": "9108793",
+        "url": "https://m.jjwxc.net/book2/8608477",
+        "book_id": "8608477",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 4,
-        "title": "昨日书",
+        "title": "我有一座安全城",
         "author": "",
         "category": "",
         "heat": 970,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/6126256",
-        "book_id": "6126256",
+        "url": "https://m.jjwxc.net/book2/9027064",
+        "book_id": "9027064",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 5,
-        "title": "我有一座安全城",
+        "title": "金手指有点多",
         "author": "",
         "category": "",
         "heat": 960,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/9027064",
-        "book_id": "9027064",
+        "url": "https://m.jjwxc.net/book2/10625552",
+        "book_id": "10625552",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 6,
-        "title": "院里（gb）",
+        "title": "昨日书",
         "author": "",
         "category": "",
         "heat": 950,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/10560714",
-        "book_id": "10560714",
+        "url": "https://m.jjwxc.net/book2/6126256",
+        "book_id": "6126256",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 7,
-        "title": "协议恋爱，但大佬失忆了",
+        "title": "还阳",
         "author": "",
         "category": "",
         "heat": 940,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/8608477",
-        "book_id": "8608477",
+        "url": "https://m.jjwxc.net/book2/8511936",
+        "book_id": "8511936",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 8,
-        "title": "凭什么她一回头我就在",
+        "title": "隐热秘密",
         "author": "",
         "category": "",
         "heat": 930,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/8712357",
-        "book_id": "8712357",
+        "url": "https://m.jjwxc.net/book2/7866377",
+        "book_id": "7866377",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 9,
-        "title": "还阳",
+        "title": "贵妃娘娘宠冠后宫",
         "author": "",
         "category": "",
         "heat": 920,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/8511936",
-        "book_id": "8511936",
+        "url": "https://m.jjwxc.net/book2/9288574",
+        "book_id": "9288574",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 10,
-        "title": "这不对吧？",
+        "title": "我养成了两个死对头皇子",
         "author": "",
         "category": "",
         "heat": 910,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/10623130",
-        "book_id": "10623130",
+        "url": "https://m.jjwxc.net/book2/6686695",
+        "book_id": "6686695",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 11,
-        "title": "隐热秘密",
+        "title": "这不对吧？",
         "author": "",
         "category": "",
         "heat": 900,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/7866377",
-        "book_id": "7866377",
+        "url": "https://m.jjwxc.net/book2/10623130",
+        "book_id": "10623130",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 12,
@@ -588,133 +144,577 @@
         "url": "https://m.jjwxc.net/book2/7776832",
         "book_id": "7776832",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 13,
-        "title": "我养成了两个死对头皇子",
+        "title": "梦鱼记",
         "author": "",
         "category": "",
         "heat": 880,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/6686695",
-        "book_id": "6686695",
+        "url": "https://m.jjwxc.net/book2/9284228",
+        "book_id": "9284228",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 14,
-        "title": "贵妃娘娘宠冠后宫",
+        "title": "男频文里的白月光（快穿）",
         "author": "",
         "category": "",
         "heat": 870,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/9288574",
-        "book_id": "9288574",
+        "url": "https://m.jjwxc.net/book2/9246713",
+        "book_id": "9246713",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 15,
-        "title": "男频文里的白月光（快穿）",
+        "title": "如何阻止道侣杀掉男主",
         "author": "",
         "category": "",
         "heat": 860,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/9246713",
-        "book_id": "9246713",
+        "url": "https://m.jjwxc.net/book2/7913790",
+        "book_id": "7913790",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 16,
-        "title": "总有小动物来找我报案",
+        "title": "南街面包店[九零]",
         "author": "",
         "category": "",
         "heat": 850,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/10523241",
-        "book_id": "10523241",
+        "url": "https://m.jjwxc.net/book2/6361771",
+        "book_id": "6361771",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 17,
-        "title": "如何阻止道侣杀掉男主",
+        "title": "我真不是算命的！[香江]",
         "author": "",
         "category": "",
         "heat": 840,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/7913790",
-        "book_id": "7913790",
+        "url": "https://m.jjwxc.net/book2/8536158",
+        "book_id": "8536158",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 18,
-        "title": "[香江]我真不是算命的！",
+        "title": "怀上权臣男主的崽",
         "author": "",
         "category": "",
         "heat": 830,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/8536158",
-        "book_id": "8536158",
+        "url": "https://m.jjwxc.net/book2/10372650",
+        "book_id": "10372650",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 19,
-        "title": "怀上权臣男主的崽",
+        "title": "我生来最恨反派",
         "author": "",
         "category": "",
         "heat": 820,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/10372650",
-        "book_id": "10372650",
+        "url": "https://m.jjwxc.net/book2/6794110",
+        "book_id": "6794110",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
       },
       {
         "rank": 20,
-        "title": "我生来最恨反派",
+        "title": "风月地",
         "author": "",
         "category": "",
         "heat": 810,
         "source": "晋江文学城",
-        "url": "https://m.jjwxc.net/book2/6794110",
-        "book_id": "6794110",
+        "url": "https://m.jjwxc.net/book2/10252100",
+        "book_id": "10252100",
         "is_real": true,
-        "crawl_time": "2026-03-29 21:10:06"
+        "crawl_time": "2026-04-04 21:11:14"
+      }
+    ],
+    "番茄小说": [
+      {
+        "title": "心肝宠",
+        "author": "九棂",
+        "category": "古代言情",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 1
+      },
+      {
+        "title": "反派：我的弟弟是天选之子",
+        "author": "家养了只肥兔",
+        "category": "综合",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 2
+      },
+      {
+        "title": "重生医妃一睁眼，全京城排队抢亲",
+        "author": "忍冬藤",
+        "category": "古代言情",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 3
+      },
+      {
+        "title": "末世：开局先囤十亿物资",
+        "author": "恨年少无知",
+        "category": "科幻",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 4
+      },
+      {
+        "title": "我在修仙界搞内卷",
+        "author": "丛月",
+        "category": "玄幻仙侠",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 5
+      },
+      {
+        "title": "我以狐仙镇百鬼",
+        "author": "紫梦游龙",
+        "category": "玄幻仙侠",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 6
+      },
+      {
+        "title": "穿到荒年后，我成了极品恶婆婆",
+        "author": "朝云紫",
+        "category": "综合",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 7
+      },
+      {
+        "title": "皇家金牌县令",
+        "author": "板面王仔",
+        "category": "玄幻仙侠",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 8
+      },
+      {
+        "title": "部族荣光",
+        "author": "丧狐",
+        "category": "综合",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 9
+      },
+      {
+        "title": "莫若凌霄",
+        "author": "月关",
+        "category": "综合",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 10
+      },
+      {
+        "title": "高手下山，我有九个无敌师父！",
+        "author": "小殇殇",
+        "category": "都市",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 11
+      },
+      {
+        "title": "惊鸿",
+        "author": "一夕烟雨",
+        "category": "综合",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 12
+      },
+      {
+        "title": "玄幻，我顿悟了混沌体",
+        "author": "叶大刀",
+        "category": "综合",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 13
+      },
+      {
+        "title": "武碎星河",
+        "author": "妖夜",
+        "category": "玄幻仙侠",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 14
+      },
+      {
+        "title": "萤火之城",
+        "author": "童童",
+        "category": "综合",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 15
+      },
+      {
+        "title": "娇养玫瑰",
+        "author": "美绿哔哔",
+        "category": "古代言情",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 16
+      },
+      {
+        "title": "天灾，我囤几十亿物资在末世求生",
+        "author": "袅袅鱼音",
+        "category": "科幻",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 17
+      },
+      {
+        "title": "够野",
+        "author": "纠纠猫",
+        "category": "综合",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 18
+      },
+      {
+        "title": "皇后重生要谋反",
+        "author": "流心蜜糖",
+        "category": "古代言情",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 19
+      },
+      {
+        "title": "重生2000风水秘术传人",
+        "author": "爱吃砂锅的石头",
+        "category": "都市",
+        "heat": 1000,
+        "source": "番茄小说",
+        "url": "",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14",
+        "rank": 20
+      }
+    ],
+    "起点中文网": [
+      {
+        "rank": 1,
+        "title": "玄鉴仙族",
+        "author": "季越人",
+        "category": "仙侠",
+        "heat": 210000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1035420986/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 2,
+        "title": "捞尸人",
+        "author": "纯洁滴小龙",
+        "category": "都市",
+        "heat": 200000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1041637443/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 3,
+        "title": "夜无疆",
+        "author": "辰东",
+        "category": "玄幻",
+        "heat": 190000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1040765595/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 4,
+        "title": "青山",
+        "author": "会说话的肘子",
+        "category": "玄幻",
+        "heat": 180000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1033014772/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 5,
+        "title": "没钱修什么仙？",
+        "author": "熊狼狗",
+        "category": "仙侠",
+        "heat": 170000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1042256511/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 6,
+        "title": "苟在武道世界成圣",
+        "author": "在水中的纸老虎",
+        "category": "玄幻",
+        "heat": 160000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1045003390/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 7,
+        "title": "以神通之名",
+        "author": "猪心虾仁",
+        "category": "都市",
+        "heat": 150000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1044896207/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 8,
+        "title": "诡秘之主",
+        "author": "爱潜水的乌贼",
+        "category": "玄幻",
+        "heat": 140000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1010868264/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 9,
+        "title": "苟在两界修仙",
+        "author": "文抄公",
+        "category": "仙侠",
+        "heat": 130000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1047213880/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 10,
+        "title": "廓晋",
+        "author": "榴弹怕水",
+        "category": "历史",
+        "heat": 120000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1047881102/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 11,
+        "title": "我在永夜打造庇护所",
+        "author": "中世纪的兔子",
+        "category": "玄幻",
+        "heat": 110000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1046692521/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 12,
+        "title": "诳言法师的十三试炼",
+        "author": "王子2326",
+        "category": "轻小说",
+        "heat": 100000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1048302379/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 13,
+        "title": "元始法则",
+        "author": "飞天鱼",
+        "category": "玄幻",
+        "heat": 90000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1042108416/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 14,
+        "title": "1984：从破产川菜馆开始",
+        "author": "轻语江湖",
+        "category": "都市",
+        "heat": 80000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1044818845/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 15,
+        "title": "人在美利坚：我的叔叔堂吉诃德",
+        "author": "喜欢吃圣代",
+        "category": "都市",
+        "heat": 70000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1047259146/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 16,
+        "title": "以一龙之力打倒整个世界！",
+        "author": "唐宋元明氢",
+        "category": "轻小说",
+        "heat": 60000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1043128588/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 17,
+        "title": "我，枪神！",
+        "author": "如水意",
+        "category": "都市",
+        "heat": 50000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1047166699/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 18,
+        "title": "异度旅社",
+        "author": "远瞳",
+        "category": "科幻",
+        "heat": 40000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1041604040/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 19,
+        "title": "腐朽世界",
+        "author": "滚开",
+        "category": "玄幻",
+        "heat": 30000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1046465651/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
+      },
+      {
+        "rank": 20,
+        "title": "从魔法少女开始独断万古",
+        "author": "绿茶藨子",
+        "category": "轻小说",
+        "heat": 20000,
+        "source": "起点中文网",
+        "url": "https://m.qidian.com/book/1045929618/",
+        "is_real": true,
+        "crawl_time": "2026-04-04 21:11:14"
       }
     ],
     "男频题材榜": [
       {
         "name": "玄幻",
-        "heat": 1481.9,
-        "avg_heat": 105.8,
-        "works_count": 14,
+        "heat": 1419.8,
+        "avg_heat": 109.2,
+        "works_count": 13,
         "top_works": [
-          "夜无疆",
-          "苟在武道世界成圣",
-          "诡秘之主"
+          "如何阻止道侣杀掉男主",
+          "我在修仙界搞内卷",
+          "我以狐仙镇百鬼"
         ]
       },
       {
         "name": "都市",
-        "heat": 760.8,
-        "avg_heat": 108.7,
+        "heat": 729.8,
+        "avg_heat": 104.2,
         "works_count": 7,
         "top_works": [
-          "捞尸人",
-          "以神通之名",
-          "1984：从破产川菜馆开始"
+          "高手下山，我有九个无敌师父！",
+          "重生2000风水秘术传人",
+          "捞尸人"
         ]
       },
       {
         "name": "仙侠",
-        "heat": 532.8,
-        "avg_heat": 133.2,
-        "works_count": 4,
+        "heat": 412.5,
+        "avg_heat": 137.5,
+        "works_count": 3,
         "top_works": [
           "玄鉴仙族",
           "没钱修什么仙？",
@@ -722,183 +722,183 @@
         ]
       },
       {
-        "name": "科幻",
-        "heat": 294.3,
-        "avg_heat": 98.1,
+        "name": "历史",
+        "heat": 312.9,
+        "avg_heat": 104.3,
         "works_count": 3,
         "top_works": [
-          "异度旅社",
-          "末世：开局先囤十亿物资",
-          "天灾，我囤几十亿物资在末世求生"
+          "重生医妃一睁眼，全京城排队抢亲",
+          "皇后重生要谋反",
+          "廓晋"
         ]
       },
       {
-        "name": "历史",
-        "heat": 275.7,
-        "avg_heat": 91.9,
+        "name": "科幻",
+        "heat": 285.3,
+        "avg_heat": 95.1,
         "works_count": 3,
         "top_works": [
-          "同时穿越：继承万界遗产",
-          "重生医妃一睁眼，全京城排队抢亲",
-          "皇后重生要谋反"
+          "末世：开局先囤十亿物资",
+          "天灾，我囤几十亿物资在末世求生",
+          "异度旅社"
         ]
       }
     ],
     "女频题材榜": [
       {
         "name": "现代言情",
-        "heat": 760.8,
-        "avg_heat": 108.7,
+        "heat": 729.8,
+        "avg_heat": 104.2,
         "works_count": 7,
         "top_works": [
-          "捞尸人",
-          "以神通之名",
-          "1984：从破产川菜馆开始"
+          "高手下山，我有九个无敌师父！",
+          "重生2000风水秘术传人",
+          "捞尸人"
         ]
       },
       {
         "name": "玄幻言情",
-        "heat": 457.0,
-        "avg_heat": 114.3,
+        "heat": 484.6,
+        "avg_heat": 121.2,
         "works_count": 4,
         "top_works": [
+          "我以狐仙镇百鬼",
           "玄鉴仙族",
-          "没钱修什么仙？",
-          "我以狐仙镇百鬼"
+          "没钱修什么仙？"
         ]
       },
       {
         "name": "古代言情",
-        "heat": 450.3,
+        "heat": 450.6,
         "avg_heat": 90.1,
         "works_count": 5,
         "top_works": [
+          "贵妃娘娘宠冠后宫",
           "心肝宠",
-          "重生医妃一睁眼，全京城排队抢亲",
-          "娇养玫瑰"
+          "重生医妃一睁眼，全京城排队抢亲"
         ]
       },
       {
         "name": "幻想未来",
-        "heat": 294.3,
-        "avg_heat": 98.1,
+        "heat": 285.3,
+        "avg_heat": 95.1,
         "works_count": 3,
         "top_works": [
-          "异度旅社",
           "末世：开局先囤十亿物资",
-          "天灾，我囤几十亿物资在末世求生"
+          "天灾，我囤几十亿物资在末世求生",
+          "异度旅社"
         ]
       },
       {
         "name": "仙侠奇缘",
-        "heat": 257.7,
-        "avg_heat": 128.8,
+        "heat": 247.1,
+        "avg_heat": 123.5,
         "works_count": 2,
         "top_works": [
-          "苟在两界修仙",
-          "我在修仙界搞内卷"
+          "我在修仙界搞内卷",
+          "苟在两界修仙"
         ]
       }
     ],
     "男频类型榜": [
       {
         "name": "修仙",
-        "heat": 1146.1,
-        "works_count": 11,
+        "heat": 965.2,
+        "works_count": 9,
         "top_works": [
-          "玄鉴仙族",
-          "苟在武道世界成圣",
-          "没钱修什么仙？"
+          "如何阻止道侣杀掉男主",
+          "我在修仙界搞内卷",
+          "我以狐仙镇百鬼"
         ]
       },
       {
         "name": "都市异能",
-        "heat": 760.8,
+        "heat": 729.8,
         "works_count": 7,
         "top_works": [
-          "捞尸人",
-          "以神通之名",
-          "1984：从破产川菜馆开始"
+          "高手下山，我有九个无敌师父！",
+          "重生2000风水秘术传人",
+          "捞尸人"
         ]
       },
       {
         "name": "末世",
-        "heat": 376.7,
+        "heat": 362.9,
         "works_count": 4,
         "top_works": [
-          "我在永夜打造庇护所",
-          "异度旅社",
-          "末世：开局先囤十亿物资"
-        ]
-      },
-      {
-        "name": "穿越",
-        "heat": 160.1,
-        "works_count": 3,
-        "top_works": [
-          "同时穿越：继承万界遗产",
-          "穿到荒年后，我成了极品恶婆婆",
-          "统帅穿成我的机器人男友"
+          "末世：开局先囤十亿物资",
+          "天灾，我囤几十亿物资在末世求生",
+          "我在永夜打造庇护所"
         ]
       },
       {
         "name": "重生",
-        "heat": 128.6,
-        "works_count": 2,
+        "heat": 165.9,
+        "works_count": 3,
         "top_works": [
           "重生医妃一睁眼，全京城排队抢亲",
-          "皇后重生要谋反"
+          "皇后重生要谋反",
+          "重生2000风水秘术传人"
+        ]
+      },
+      {
+        "name": "历史军事",
+        "heat": 120.0,
+        "works_count": 1,
+        "top_works": [
+          "廓晋"
         ]
       }
     ],
     "女频类型榜": [
       {
         "name": "修仙",
-        "heat": 1024.1,
-        "works_count": 9,
+        "heat": 847.8,
+        "works_count": 7,
         "top_works": [
-          "玄鉴仙族",
-          "没钱修什么仙？",
-          "苟在两界修仙"
+          "我在修仙界搞内卷",
+          "我以狐仙镇百鬼",
+          "皇家金牌县令"
         ]
       },
       {
         "name": "末世",
-        "heat": 214.0,
+        "heat": 209.2,
         "works_count": 3,
         "top_works": [
-          "我在永夜打造庇护所",
           "末世：开局先囤十亿物资",
-          "天灾，我囤几十亿物资在末世求生"
-        ]
-      },
-      {
-        "name": "快穿",
-        "heat": 188.0,
-        "works_count": 4,
-        "top_works": [
-          "同时穿越：继承万界遗产",
-          "穿到荒年后，我成了极品恶婆婆",
-          "统帅穿成我的机器人男友"
-        ]
-      },
-      {
-        "name": "宫斗",
-        "heat": 156.6,
-        "works_count": 3,
-        "top_works": [
-          "重生医妃一睁眼，全京城排队抢亲",
-          "皇后重生要谋反",
-          "贵妃娘娘宠冠后宫"
+          "天灾，我囤几十亿物资在末世求生",
+          "我在永夜打造庇护所"
         ]
       },
       {
         "name": "重生",
-        "heat": 128.6,
-        "works_count": 2,
+        "heat": 165.9,
+        "works_count": 3,
         "top_works": [
           "重生医妃一睁眼，全京城排队抢亲",
+          "皇后重生要谋反",
+          "重生2000风水秘术传人"
+        ]
+      },
+      {
+        "name": "宫斗",
+        "heat": 156.8,
+        "works_count": 3,
+        "top_works": [
+          "贵妃娘娘宠冠后宫",
+          "重生医妃一睁眼，全京城排队抢亲",
           "皇后重生要谋反"
+        ]
+      },
+      {
+        "name": "快穿",
+        "heat": 132.9,
+        "works_count": 3,
+        "top_works": [
+          "统帅穿成我的机器人男友",
+          "男频文里的白月光（快穿）",
+          "穿到荒年后，我成了极品恶婆婆"
         ]
       }
     ],

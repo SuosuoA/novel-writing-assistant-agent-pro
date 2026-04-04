@@ -290,6 +290,19 @@ class OptimizedLauncher:
             failed = [k for k, v in core_results.items() if not v]
             raise RuntimeError(f"Core modules failed to load: {failed}")
         
+        # V2.24修复：初始化核心服务（包括AIServiceManager注册）
+        # 这确保service_locator中有ai_service
+        try:
+            from .bootstrap import get_bootstrap_service
+            bootstrap = get_bootstrap_service()
+            init_results = bootstrap.initialize()
+            if init_results.get("AIServiceManager"):
+                logger.info("AIServiceManager registered successfully")
+            else:
+                logger.warning(f"AIServiceManager initialization failed: {init_results}")
+        except Exception as e:
+            logger.error(f"Failed to initialize bootstrap services: {e}")
+        
         # 异步加载其他层
         if self._config.async_load:
             logger.info("Loading remaining layers asynchronously...")

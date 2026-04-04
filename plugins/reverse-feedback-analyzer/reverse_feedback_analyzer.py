@@ -861,13 +861,14 @@ class ReverseFeedbackAnalyzer(AnalyzerPlugin):
             except ImportError:
                 logger.warning("无法加载人物管理器")
 
-        # 获取世界观解析器
+        # 获取世界观解析器（从插件系统）
         if "worldview_parser" in v5_modules:
             self._worldview_parser = v5_modules["worldview_parser"]
         else:
             try:
-                from scripts.universal_worldview_parser import UniversalWorldviewParser
-                self._worldview_parser = UniversalWorldviewParser()
+                # 使用插件系统加载世界观解析器
+                from plugins.worldview-parser-v1.plugin import WorldviewParserPlugin
+                self._worldview_parser = WorldviewParserPlugin()
                 logger.info("动态加载世界观解析器成功")
             except ImportError:
                 logger.warning("无法加载世界观解析器")

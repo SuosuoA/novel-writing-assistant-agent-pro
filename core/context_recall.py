@@ -222,14 +222,15 @@ class ContextRecaller:
                 import os
                 from infrastructure.vector_store import get_vector_store
                 
-                # 设置本地模型缓存目录到F:\
-                cache_dir = os.path.join("F:\\", "sentence_transformers_cache")
-                os.makedirs(cache_dir, exist_ok=True)
-                os.environ["SENTENCE_TRANSFORMERS_HOME"] = cache_dir
+                # 设置本地模型缓存目录到项目内部
+                project_root = self.workspace_root
+                cache_dir = project_root / "sentence_transformers_cache"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(cache_dir)
                 
                 # 设置HuggingFace国内镜像加速
                 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-                self._logger.info(f"[ContextRecall] 本地模型缓存目录: {cache_dir}")
+                self._logger.info(f"[ContextRecall] 本地模型缓存目录: {str(cache_dir)}")
                 self._logger.info(f"[ContextRecall] 使用HuggingFace镜像: https://hf-mirror.com")
                 
                 # 从配置读取embedding类型

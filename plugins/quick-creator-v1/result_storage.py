@@ -30,7 +30,10 @@ try:
     JSONSCHEMA_AVAILABLE = True
 except ImportError:
     JSONSCHEMA_AVAILABLE = False
-    logger.warning("jsonschema库未安装，Schema验证功能不可用")
+    # logger在模块导入后定义，这里不记录警告
+
+# 创建logger实例
+logger = logging.getLogger(__name__)
 
 # 项目内部模型
 from core.models import (

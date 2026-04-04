@@ -252,7 +252,8 @@ class EmbeddingFunction:
     def _init_local_model(self):
         """初始化本地模型（离线模式已在gui_main.py入口设置）
         
-        V1.1版本更新（2026-03-28）：
+        V1.2版本更新（2026-04-04）：
+        - 模型缓存目录迁移到项目内部：sentence_transformers_cache
         - 离线模式环境变量已在程序入口（gui_main.py）设置
         - 此处仅做安全检查和模型加载
         - 避免重复设置导致日志混乱
@@ -260,11 +261,13 @@ class EmbeddingFunction:
         try:
             import os
             from sentence_transformers import SentenceTransformer
+            from pathlib import Path
             
-            # 设置模型缓存目录到F:\
-            cache_dir = os.path.join("F:\\", "sentence_transformers_cache")
-            os.makedirs(cache_dir, exist_ok=True)
-            os.environ["SENTENCE_TRANSFORMERS_HOME"] = cache_dir
+            # 设置模型缓存目录到项目内部
+            project_root = Path(__file__).parent.parent
+            cache_dir = project_root / "sentence_transformers_cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(cache_dir)
             
             logger.info(f"[VectorStore] 本地模型缓存目录: {cache_dir}")
             

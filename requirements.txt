@@ -21,6 +21,8 @@ apscheduler>=3.10.0
 
 # GUI
 sv-ttk>=2.2.0
+matplotlib>=3.7.0         # 人物关系图谱可视化
+networkx>=3.6.1            # 人物关系网络分析
 
 # Testing
 pytest>=8.0.0

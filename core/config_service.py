@@ -478,6 +478,15 @@ class ConfigService:
                         if isinstance(value, dict):
                             for sub_key, sub_value in value.items():
                                 self.set(f"local.{sub_key}", sub_value, source="ai_config_update")
+
+                # V3.2新增：发布config.changed事件
+                if self._event_bus:
+                    self._event_bus.publish("config.changed", {
+                        "type": "ai_config",
+                        "data": new_config
+                    })
+                    logger.info(f"[ConfigService] 已发布config.changed事件: {new_config.get('provider')}")
+
             except Exception as e:
                 # P0-3修复：回滚到旧值
                 logger.error(f"更新AI配置失败，正在回滚: {e}")

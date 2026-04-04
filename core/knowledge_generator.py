@@ -210,21 +210,59 @@ KNOWLEDGE_DOMAINS = {
         "history": "奇幻历史（纪元、战争、传说）",
         "culture": "奇幻文化（语言、宗教、艺术）"
     },
-    # 灵异类
-    "supernatural": {
+    # 灵异类（修复：GUI中题材名"灵异"映射为"lingyi"，此处键名必须对应）
+    "lingyi": {
         "folklore": "民俗传说（鬼怪、妖怪、禁忌）",
         "psychology": "心理恐怖（恐惧、暗示、创伤）",
         "religion": "宗教神秘（道教、佛教、密宗）",
         "legend": "都市传说（怪谈、诅咒、预言）",
-        "occultism": "神秘学（通灵、降灵、仪式）"
+        "occultism": "神秘学（通灵、降灵、仪式）",
+        "spirituality": "灵学体系（灵体、阴气、魂魄）"
     },
-    # 同人类
-    "fanfiction": {
+    # 同人类（修复：GUI中题材名"同人"映射为"tongren"，此处键名必须对应）
+    "tongren": {
         "analysis": "原著分析（剧情、人物、设定）",
         "characters": "人物研究（性格、成长、关系）",
         "plot": "剧情延展（if线、番外、后续）",
         "setting": "设定扩展（世界观、背景、细节）",
         "culture": "文化背景（时代、社会、潮流）"
+    },
+    # 写作技巧类（V5.3新增）
+    "writing_technique": {
+        "narrative": "叙事技巧（线性、倒叙、多线）",
+        "description": "描写技巧（人物、环境、心理）",
+        "rhetoric": "修辞技巧（比喻、象征、反讽）",
+        "structure": "结构技巧（开篇、转折、结尾）",
+        "special_sentence": "特殊句式（长句、短句、排比）",
+        "advanced": "高级技法（意识流、蒙太奇）"
+    },
+    # 恐怖类（修复：GUI中题材名"恐怖"映射为"horror"）
+    "horror": {
+        "psychology": "恐怖心理（恐惧、惊悚、压抑）",
+        "folklore": "恐怖民俗（鬼怪、诅咒、禁忌）",
+        "atmosphere": "氛围营造（音效、光影、环境）",
+        "monster": "怪物设定（异形、丧尸、未知生物）"
+    },
+    # 推理类（修复：GUI中题材名"推理"映射为"mystery"）
+    "mystery": {
+        "logic": "逻辑推理（演绎、归纳、破案）",
+        "forensics": "法医知识（尸体、痕迹、鉴定）",
+        "psychology": "犯罪心理（动机、行为分析）",
+        "law": "法律知识（刑侦、证据、审判）"
+    },
+    # 体育类（修复：GUI中题材名"体育"映射为"sports"）
+    "sports": {
+        "technique": "体育技术（训练、战术、技能）",
+        "psychology": "运动心理（竞技、团队、压力）",
+        "physiology": "运动生理（体能、营养、康复）",
+        "competition": "赛事规则（赛制、裁判、历史）"
+    },
+    # 哲学类（修复：GUI中题材名"哲学"映射为"philosophy"）
+    "philosophy": {
+        "existence": "存在主义（存在、自由、选择）",
+        "ethics": "伦理学（道德、善恶、价值）",
+        "logic": "逻辑学（推理、论证、谬误）",
+        "metaphysics": "形而上学（本质、存在、真理）"
     },
     # 通用写作类 - 新增
     "general": {
@@ -335,44 +373,57 @@ class KnowledgeGeneratorV4:
         """
         延迟获取LLM客户端（与全局设置统一）
 
+        V5.5修复：支持本地AI模式（service_mode=local）
+        
         优先级：
-        1. 从加密存储读取API Key（推荐）
-        2. 从config.yaml读取（兼容旧配置）
+        1. 本地AI模式：使用local_url（如 http://localhost:8000/v1）
+        2. 在线模式：从加密存储或config.yaml读取API Key
         """
         if self._llm_client is None:
             try:
                 from openai import OpenAI
 
                 # 读取基础配置
+                service_mode = self._config.get("service_mode", "online")
                 model = self._config.get("model", "deepseek-chat")
                 provider = self._config.get("provider", "DeepSeek")
 
-                # 根据provider设置base_url
-                provider_urls = {
-                    "DeepSeek": "https://api.deepseek.com",
-                    "OpenAI": "https://api.openai.com/v1",
-                    "Anthropic": "https://api.anthropic.com"
-                }
-                base_url = self._config.get("base_url", "") or provider_urls.get(provider, "https://api.deepseek.com")
+                # V5.5新增：处理本地AI模式
+                if service_mode == "local":
+                    local_url = self._config.get("local_url", "http://localhost:8000/v1")
+                    print(f"[KnowledgeGenerator] 检测到本地AI模式: {provider} @ {local_url}")
+                    
+                    # 本地AI通常不需要API Key，使用占位符即可
+                    api_key = "local-no-key-needed"
+                    base_url = local_url
+                    
+                else:
+                    # 在线模式：根据provider设置base_url
+                    provider_urls = {
+                        "DeepSeek": "https://api.deepseek.com",
+                        "OpenAI": "https://api.openai.com/v1",
+                        "Anthropic": "https://api.anthropic.com"
+                    }
+                    base_url = self._config.get("base_url", "") or provider_urls.get(provider, "https://api.deepseek.com")
 
-                # 方法1: 从加密存储读取API Key
-                api_key = None
-                try:
-                    from core.api_key_encryption import APIKeyEncryption
-                    encryption = APIKeyEncryption(self.workspace_root)
-                    api_key = encryption.get_api_key(provider)
-                    if api_key:
-                        print(f"[KnowledgeGenerator] 从加密存储加载API Key: {provider}")
-                except Exception as e:
-                    print(f"[KnowledgeGenerator] 加密存储读取失败: {e}")
+                    # 方法1: 从加密存储读取API Key
+                    api_key = None
+                    try:
+                        from core.api_key_encryption import APIKeyEncryption
+                        encryption = APIKeyEncryption(self.workspace_root)
+                        api_key = encryption.get_api_key(provider)
+                        if api_key:
+                            print(f"[KnowledgeGenerator] 从加密存储加载API Key: {provider}")
+                    except Exception as e:
+                        print(f"[KnowledgeGenerator] 加密存储读取失败: {e}")
 
-                # 方法2: 从config.yaml读取（兼容旧配置）
-                if not api_key:
-                    config_key = self._config.get("api_key", "")
-                    # 检查是否为占位符
-                    if config_key and not config_key.startswith("ENCRYPTED") and not config_key.startswith("YOUR_"):
-                        api_key = config_key
-                        print(f"[KnowledgeGenerator] 从config.yaml加载API Key")
+                    # 方法2: 从config.yaml读取（兼容旧配置）
+                    if not api_key:
+                        config_key = self._config.get("api_key", "")
+                        # 检查是否为占位符
+                        if config_key and not config_key.startswith("ENCRYPTED") and not config_key.startswith("YOUR_"):
+                            api_key = config_key
+                            print(f"[KnowledgeGenerator] 从config.yaml加载API Key")
 
                 if api_key:
                     # 禁用系统代理，避免本地未启动的代理（如 127.0.0.1:7897）导致连接失败
@@ -398,7 +449,12 @@ class KnowledgeGeneratorV4:
                     # 附加model属性
                     self._llm_client.model = model
                     self._llm_client.provider = provider
-                    print(f"[KnowledgeGenerator] LLM客户端初始化成功: {provider}/{model}")
+                    self._llm_client.service_mode = service_mode  # V5.5新增
+                    print(f"[KnowledgeGenerator] LLM客户端初始化成功: {service_mode}/{provider}/{model} @ {base_url}")
+                    
+                    # V3.2.2新增：本地服务健康检查
+                    if service_mode == "local" and provider.lower() == "qwen":
+                        self._check_qwen_service_health(base_url)
                 else:
                     print(f"[KnowledgeGenerator] 未找到有效的API Key")
 
@@ -408,6 +464,56 @@ class KnowledgeGeneratorV4:
                 traceback.print_exc()
 
         return self._llm_client
+    
+    def _check_qwen_service_health(self, base_url: str) -> bool:
+        """
+        检查Qwen服务健康状态（V3.2.2新增）
+        
+        Args:
+            base_url: API端点（如 http://localhost:8000/v1）
+        
+        Returns:
+            bool: 服务是否健康
+        """
+        try:
+            import requests
+            
+            # 提取根URL（移除/v1后缀）
+            health_url = base_url.replace("/v1", "").rstrip("/") + "/health"
+            
+            print(f"[KnowledgeGenerator] 检查Qwen服务健康: {health_url}")
+            
+            response = requests.get(health_url, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                model_loaded = data.get("model_loaded", False)
+                
+                if model_loaded:
+                    print(f"[KnowledgeGenerator] ✓ Qwen服务正常: {data.get('model', 'unknown')}")
+                    return True
+                else:
+                    print(f"[KnowledgeGenerator] ⚠ Qwen服务模型未加载")
+                    return False
+            else:
+                print(f"[KnowledgeGenerator] ✗ Qwen服务返回错误: {response.status_code}")
+                return False
+                
+        except requests.exceptions.ConnectionError:
+            print(f"[KnowledgeGenerator] ✗ Qwen服务未启动！")
+            print(f"[KnowledgeGenerator] 请先启动Qwen服务：")
+            print(f"[KnowledgeGenerator]   cd F:\\Qwen")
+            print(f"[KnowledgeGenerator]   python start_server_v2.py")
+            print(f"[KnowledgeGenerator] 等待模型加载完成（约60秒）后再试")
+            return False
+            
+        except requests.exceptions.Timeout:
+            print(f"[KnowledgeGenerator] ✗ Qwen服务响应超时")
+            return False
+            
+        except Exception as e:
+            print(f"[KnowledgeGenerator] ✗ Qwen服务健康检查失败: {e}")
+            return False
     
     def generate_knowledge(
         self,
@@ -589,14 +695,14 @@ class KnowledgeGeneratorV4:
                         "status": "valid",
                         "keywords_count": len(kp.get("keywords", []))
                     })
-                    print(f"[KnowledgeGenerator] ✓ 通过质量检查", flush=True)
+                    print(f"[KnowledgeGenerator] [OK] 通过质量检查", flush=True)
                 else:
                     result.details.append({
                         "title": kp.get("title", "未知"),
                         "status": "invalid",
                         "reason": reason
                     })
-                    print(f"[KnowledgeGenerator] ✗ 未通过质量检查: {reason}", flush=True)
+                    print(f"[KnowledgeGenerator] [FAIL] 未通过质量检查: {reason}", flush=True)
 
             result.generated = len(valid_knowledge)
 
@@ -629,17 +735,17 @@ class KnowledgeGeneratorV4:
                         if create_result.success:
                             result.saved += 1
                             result.knowledge_ids.append(create_result.knowledge_id)
-                            print(f"[KnowledgeGenerator] ✓ 保存成功，ID: {create_result.knowledge_id}", flush=True)
+                            print(f"[KnowledgeGenerator] [OK] 保存成功，ID: {create_result.knowledge_id}", flush=True)
                         else:
                             error_msg = getattr(create_result, 'error', None) or getattr(create_result, 'message', None) or "未知错误"
-                            print(f"[KnowledgeGenerator] ✗ 保存失败: {error_msg}", flush=True)
+                            print(f"[KnowledgeGenerator] [FAIL] 保存失败: {error_msg}", flush=True)
                             result.errors.append(f"保存失败: {error_msg}")
                     except Exception as e:
                         error_msg = f"保存异常: {str(e)[:100]}"
                         print(f"[KnowledgeGenerator] {error_msg}", flush=True)
                         result.errors.append(error_msg)
             else:
-                print(f"[KnowledgeGenerator] ✗ 无法获取知识管理器", flush=True)
+                print(f"[KnowledgeGenerator] [FAIL] 无法获取知识管理器", flush=True)
                 result.errors.append("知识管理器初始化失败")
 
             # 计算预估成本（基于总生成量）
@@ -691,9 +797,14 @@ class KnowledgeGeneratorV4:
             "wuxia": "武侠",
             "game": "游戏",
             "fantasy": "奇幻",
-            "supernatural": "灵异",
-            "fanfiction": "同人",
-            "general": "通用"
+            "lingyi": "灵异",  # 修复：与GUI映射一致（gui_main.py中"灵异"→"lingyi"）
+            "tongren": "同人",  # 修复：与GUI映射一致（gui_main.py中"同人"→"tongren"）
+            "horror": "恐怖",  # V5.3新增
+            "mystery": "推理",  # V5.3新增
+            "sports": "体育",  # V5.3新增
+            "general": "通用",
+            "writing_technique": "写作技巧",
+            "philosophy": "哲学"
         }
         
         domain_names = KNOWLEDGE_DOMAINS.get(request.category, {})
@@ -1556,10 +1667,25 @@ class KnowledgeGeneratorV4:
     ) -> str:
         """构建大纲生成Prompt"""
         category_names = {
-            "scifi": "科幻",
             "xuanhuan": "玄幻",
+            "xianxia": "仙侠",
+            "urban": "都市",
+            "romance": "言情",
             "history": "历史",
-            "general": "通用"
+            "scifi": "科幻",
+            "suspense": "悬疑",
+            "military": "军事",
+            "wuxia": "武侠",
+            "game": "游戏",
+            "fantasy": "奇幻",
+            "lingyi": "灵异",
+            "tongren": "同人",
+            "horror": "恐怖",
+            "mystery": "推理",
+            "sports": "体育",
+            "general": "通用",
+            "writing_technique": "写作技巧",
+            "philosophy": "哲学"
         }
         
         domain_names = KNOWLEDGE_DOMAINS.get(request.category, {})
@@ -1777,10 +1903,25 @@ class KnowledgeGeneratorV4:
     ) -> str:
         """根据大纲构建详细生成Prompt"""
         category_names = {
-            "scifi": "科幻",
             "xuanhuan": "玄幻",
+            "xianxia": "仙侠",
+            "urban": "都市",
+            "romance": "言情",
             "history": "历史",
-            "general": "通用"
+            "scifi": "科幻",
+            "suspense": "悬疑",
+            "military": "军事",
+            "wuxia": "武侠",
+            "game": "游戏",
+            "fantasy": "奇幻",
+            "lingyi": "灵异",
+            "tongren": "同人",
+            "horror": "恐怖",
+            "mystery": "推理",
+            "sports": "体育",
+            "general": "通用",
+            "writing_technique": "写作技巧",
+            "philosophy": "哲学"
         }
         
         domain_names = KNOWLEDGE_DOMAINS.get(category, {})
