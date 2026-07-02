@@ -31,7 +31,12 @@ from .event_bus import EventBus, get_event_bus
 from .models import PluginMetadata
 from .plugin_interface import BasePlugin
 from .plugin_registry import PluginRegistry, PluginState, get_plugin_registry
-from .hot_swap_manager import HotSwapManager, HotSwapPermission
+from .hot_swap_manager import (
+    DEV_MODE,
+    SKIP_SIGNATURE_CHECK,
+    HotSwapManager,
+    HotSwapPermission,
+)
 
 # 尝试导入结构化日志器
 try:
@@ -94,21 +99,31 @@ class PluginSignatureVerifier:
     # P1-3修复：最大遍历深度
     MAX_TRAVERSAL_DEPTH = 20
     
+    # V2.1修复：签名载体文件必须排除在哈希之外，否则签名写入 plugin.json 后
+    # 目录哈希立即改变 → 任何签名一经写入即自我失效（鸡生蛋缺陷），
+    # 该机制自设计以来从未可能通过校验（生产模式全部插件被 L3 拦截）。
+    SIGNATURE_CARRIER_FILES = frozenset({"plugin.json", "plugin.sig"})
+
     @classmethod
     def _calculate_directory_hash(cls, directory: Path) -> str:
         """计算目录的SHA256哈希
-        
+
         用于验证插件完整性。
         忽略__pycache__等缓存目录。
-        
+
         P1-3修复：
         - 添加符号链接检测，避免无限循环
         - 添加遍历深度限制
         - 添加文件大小限制
-        
+
+        V2.1修复：
+        - 排除插件根目录的签名载体文件（plugin.json/plugin.sig），消除鸡生蛋缺陷
+        - 遍历按文件名排序，保证跨平台哈希确定性（iterdir顺序依赖OS）
+        - 与 scripts/add_plugin_signatures.py 的哈希算法必须保持一致
+
         Args:
             directory: 插件目录路径
-        
+
         Returns:
             SHA256哈希值
         """
@@ -117,20 +132,25 @@ class PluginSignatureVerifier:
         total_size = 0
         max_file_size = 10 * 1024 * 1024  # 10MB
         max_total_size = 100 * 1024 * 1024  # 100MB
-        
+
         # P1-3修复：使用安全的遍历方法
         def safe_walk(current_dir: Path, depth: int = 0):
             """安全遍历目录，带深度和符号链接检测"""
             nonlocal file_count, total_size
-            
+
             if depth > cls.MAX_TRAVERSAL_DEPTH:
                 logger.warning(f"Max traversal depth reached: {current_dir}")
                 return
-            
+
             try:
-                for item in current_dir.iterdir():
+                # V2.1修复：排序遍历保证哈希确定性
+                for item in sorted(current_dir.iterdir(), key=lambda p: p.name):
                     # 跳过__pycache__目录
                     if item.name == "__pycache__":
+                        continue
+
+                    # V2.1修复：跳过插件根目录的签名载体文件
+                    if depth == 0 and item.name in cls.SIGNATURE_CARRIER_FILES:
                         continue
                     
                     # P1-3修复：检测符号链接，避免无限循环
@@ -181,10 +201,25 @@ class PluginSignatureVerifier:
                 logger.debug(f"Error traversing {current_dir}: {e}")
         
         safe_walk(directory)
-        
+
+        # V2.1修复：manifest（去除signature字段后）纳入哈希，保护入口/权限声明完整性。
+        # 规范化序列化（sort_keys）保证与签名脚本产出一致。
+        manifest_path = directory / "plugin.json"
+        if manifest_path.exists():
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                manifest.pop("signature", None)
+                canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True)
+                hasher.update(canonical.encode("utf-8"))
+                file_count += 1
+            except Exception as e:
+                # manifest不可解析时上游 verify_plugin_signature 已报错；此处仅记录
+                logger.warning(f"Manifest not hashable for {directory}: {e}")
+
         if file_count == 0:
             logger.warning(f"No files hashed in {directory}")
-        
+
         return hasher.hexdigest()
 
 
@@ -480,7 +515,10 @@ class PluginLoader:
                 )
 
             # 官方插件必须签名验证通过
-            if is_official and not sig_verified:
+            # V2.1修复：与 HotSwapPermission._determine_level 的开发豁免保持一致——
+            # DEV_MODE/SKIP_SIGNATURE_CHECK 下改动插件代码无需重签名（原白名单全是
+            # 旧ID致此检查从未触发；白名单修正后若不豁免，开发模式将无法迭代插件）。
+            if is_official and not sig_verified and not (SKIP_SIGNATURE_CHECK or DEV_MODE):
                 return PluginLoadResult(
                     success=False,
                     plugin_id=plugin_id,

@@ -17,5 +17,6 @@
   ],
   "min_platform_version": "6.0.0",
   "entry_class": "CharacterManagerPlugin",
-  "entry_module": "plugin"
+  "entry_module": "plugin",
+  "signature": "ba0368f6e817d4f5b7d30657f7bcad737112988e307118e4680b970cba3e4604"
 }

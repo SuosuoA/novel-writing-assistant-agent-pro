@@ -13,5 +13,6 @@
   "conflicts": [],
   "permissions": [],
   "min_platform_version": "1.0.0",
-  "entry_class": "HelloWorldPlugin"
+  "entry_class": "HelloWorldPlugin",
+  "signature": "a1db7a550afc85488858d2d28caf3935337d4e26c51c7bad7fa04a2876614b7a"
 }

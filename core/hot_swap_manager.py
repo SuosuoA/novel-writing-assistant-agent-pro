@@ -141,27 +141,46 @@ class HotSwapPermission:
     }
 
     # 官方插件白名单
+    # V2.1修复：原名单是迁移前的旧插件ID（novel-generator/style-learner等），
+    # 与现役任何插件ID都不匹配 → is_official 恒为False，官方信任分级从未生效。
+    # 更新为当前部署的20个官方插件ID（plugins/目录名==plugin.json的id字段）。
     OFFICIAL_PLUGINS = {
-        "novel-generator",
-        "novel-analyzer",
-        "novel-validator",
-        "style-learner",
-        "character-manager",
-        "worldview-parser",
+        "ai-service-router-v1",
+        "ai-status-manager-v1",
+        "api-config-manager-v1",
+        "character-manager-v1",
+        "context-builder-v1",
+        "continuation-generator-v1",
+        "expert-novel-v1",
+        "hello-world",
+        "hot-ranking-v1",
+        "iterative-generator-v2",
+        "knowledge-validator",
+        "local-service-v1",
+        "novel-generator-v3",
+        "outline-parser-v3",
+        "project-manager-v1",
+        "quality-validator-v1",
+        "quick-creator-v1",
+        "reverse-feedback-analyzer",
+        "style-learner-v5",
+        "worldview-parser-v1",
     }
 
     # V5核心保护模块（禁止热插拔）
+    # V2.1修复：原名单9个ID中7个是旧名（style-learner-v2/character-manager等），
+    # 实际只保护了2个模块。更新为CLAUDE.md明确的9个受保护核心模块的现役ID。
     V5_PROTECTED_MODULES = frozenset(
         [
             "outline-parser-v3",
-            "style-learner-v2",
-            "character-manager",
-            "worldview-parser",
-            "context-builder",
+            "style-learner-v5",
+            "character-manager-v1",
+            "worldview-parser-v1",
+            "context-builder-v1",
             "iterative-generator-v2",
-            "weighted-validator",
-            "optimized-generator-v2",
-            "hot-ranking",
+            "quality-validator-v1",
+            "novel-generator-v3",
+            "hot-ranking-v1",
         ]
     )
 

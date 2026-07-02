@@ -16,5 +16,6 @@
   ],
   "min_platform_version": "6.0.0",
   "entry_class": "WorldviewParserPlugin",
-  "entry_module": "plugin"
+  "entry_module": "plugin",
+  "signature": "e4d38e986494b7113225c90ee381128781d0ceea2b242592302b750f7fb62677"
 }

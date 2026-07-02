@@ -12,5 +12,6 @@
   "conflicts": [],
   "permissions": [],
   "min_platform_version": "6.0.0",
-  "entry_class": "ProjectManagerPlugin"
+  "entry_class": "ProjectManagerPlugin",
+  "signature": "e022a60d77dd3b18d8633579916bb7a804ce579d29d4dd698a249e756ee8bc7c"
 }

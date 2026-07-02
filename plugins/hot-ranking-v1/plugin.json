@@ -19,5 +19,6 @@
     "file.write"
   ],
   "min_platform_version": "6.0.0",
-  "entry_class": "HotRankingPlugin"
+  "entry_class": "HotRankingPlugin",
+  "signature": "29ffab709c57fde50459aca7d04b40e9c1e3abed2634117cee0a99ac3bea3ab2"
 }

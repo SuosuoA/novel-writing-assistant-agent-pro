@@ -1237,14 +1237,20 @@ class QuickCreationPlugin(BasePlugin):
         """
         if not self._storage_manager:
             self._storage_manager = ResultStorageManager()
-        
+
         from pathlib import Path
         save_path = Path(output_path) if output_path else None
-        
+
+        # Claw化：本次会话的评分历史随结果沉淀（生成 评分记录.json）
+        try:
+            self._storage_manager.sync_score_history(self._score_history)
+        except Exception as e:
+            logger.warning(f"同步评分历史失败（不影响结果保存）: {e}")
+
         return str(self._storage_manager.save_result(
-            result, 
-            project_name, 
-            save_path, 
+            result,
+            project_name,
+            save_path,
             format
         ))
     

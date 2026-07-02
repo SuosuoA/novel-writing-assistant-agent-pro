@@ -69,7 +69,10 @@ class QualityValidationAgent(BaseAgent):
     AGENT_TYPE = "quality_validation"
     PLUGIN_ID = "quality-validator-v1"
     
-    # 评分权重配置（强制保护 - 不可变更）
+    # 【已废弃-仅存档】旧6维权重表，从不参与计算。
+    # 权重归属原则（ADR-010）：加权计算只在 quality-validator-v1 插件层完成，
+    # 本Agent只读取插件返回的 ValidationScores.total_score/passed，不做任何加权。
+    # 现行权重为九维锁定权重（见插件 DEFAULT_WEIGHTS 与 config/validator_weights.yaml V2.0）。
     WEIGHTS = {
         'word_count': 0.10,
         'outline': 0.15,

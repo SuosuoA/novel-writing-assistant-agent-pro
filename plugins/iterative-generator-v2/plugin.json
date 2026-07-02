@@ -17,5 +17,6 @@
     "file.write"
   ],
   "min_platform_version": "6.0.0",
-  "entry_class": "IterativeGeneratorPlugin"
+  "entry_class": "IterativeGeneratorPlugin",
+  "signature": "fb72fe5b69e3e2d034fffa7bd89bf9ff471f1b1f042fd8fbe65a28d1e5d945e7"
 }

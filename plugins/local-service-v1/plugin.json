@@ -21,5 +21,6 @@
     "auto_stop_on_exit": true,
     "health_check_interval": 30,
     "max_restart_attempts": 3
-  }
+  },
+  "signature": "6f9411b4f732b93b3c84983e6af0903d781b1f005dd75c086f1de5e519038f4f"
 }

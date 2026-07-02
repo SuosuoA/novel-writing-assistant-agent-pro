@@ -79,5 +79,6 @@
     ],
     "architecture": "OpenClaw mem9 L2温记忆（LanceDB向量库）",
     "adr": "ADR-003: 知识库双层设计"
-  }
+  },
+  "signature": "9747a03f9780826d78fb87746ddd76c5f6deeac00e25db08e50f52570763ace7"
 }

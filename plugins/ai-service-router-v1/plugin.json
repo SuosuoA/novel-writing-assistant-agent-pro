@@ -26,5 +26,6 @@
   "ui_integration": {
     "settings_page": false,
     "menu_items": []
-  }
+  },
+  "signature": "0faaccbbf26174c60f6e4dc31a2343fe99e307a087096e819d202c2771496608"
 }

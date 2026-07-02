@@ -20,5 +20,6 @@
     "file.write"
   ],
   "min_platform_version": "6.0.0",
-  "entry_class": "NovelGeneratorPlugin"
+  "entry_class": "NovelGeneratorPlugin",
+  "signature": "0e9a64bef5796fca05c56d09e9c26aa4a0d074f9dd207b483a82919cedd07964"
 }

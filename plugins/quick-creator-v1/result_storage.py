@@ -278,12 +278,79 @@ class ResultStorageManager:
     def __init__(self, project_path: Optional[Path] = None):
         """
         初始化存储管理器
-        
+
         参数:
             project_path: 项目根目录路径
         """
         self.project_path = project_path
+        # Claw化设计：结果存储包含评分记录（模块 → 评分记录列表），
+        # 质量分随结果沉淀，供后续回读参考（见 12.7Claw化终极优化方案）
+        self._score_records: Dict[str, List[Dict[str, Any]]] = {}
         self._ensure_project_structure()
+
+    # ==================== 评分记录（Claw化） ====================
+
+    def record_score(
+        self,
+        module: str,
+        score: float,
+        iteration: int = 0,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """记录单个模块的一次评分
+
+        参数:
+            module: 模块名（worldview/outline/characters/plot 等）
+            score: 评分值（0.0-1.0）
+            iteration: 迭代轮次
+            extra: 附加信息（可选）
+        """
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            raise ValueError(f"评分必须为数值: {score!r}")
+        record: Dict[str, Any] = {
+            "score": float(score),
+            "iteration": int(iteration),
+            "recorded_at": datetime.now().isoformat(),
+        }
+        if extra:
+            record.update(extra)
+        self._score_records.setdefault(module, []).append(record)
+
+    def sync_score_history(self, history: Dict[str, List[float]]) -> None:
+        """从插件侧整体同步评分历史（替换语义，幂等，重复保存不累积）
+
+        参数:
+            history: 模块 → 评分列表（quick-creator 的 _score_history 形状）
+        """
+        now = datetime.now().isoformat()
+        records: Dict[str, List[Dict[str, Any]]] = {}
+        for module, scores in (history or {}).items():
+            records[module] = [
+                {"score": float(s), "iteration": i, "recorded_at": now}
+                for i, s in enumerate(scores)
+            ]
+        self._score_records = records
+
+    def get_score_records(self) -> Dict[str, List[Dict[str, Any]]]:
+        """获取当前评分记录（副本）"""
+        return {m: list(recs) for m, recs in self._score_records.items()}
+
+    def _save_score_history(self, save_path: Path, timestamp: str) -> None:
+        """保存评分记录到项目目录（无记录时不生成文件）"""
+        if not self._score_records:
+            return
+        payload = {
+            "updated_at": timestamp,
+            "summary": {
+                module: recs[-1]["score"]
+                for module, recs in self._score_records.items() if recs
+            },
+            "modules": self._score_records,
+        }
+        file_path = save_path / "评分记录.json"
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.debug(f"评分记录已保存: {file_path}")
     
     def set_project_path(self, path: Union[str, Path]) -> None:
         """设置项目路径"""
@@ -455,7 +522,10 @@ class ResultStorageManager:
             
             # 保存项目元数据
             self._save_project_metadata(save_path, project_name, result, timestamp)
-            
+
+            # Claw化：评分记录随结果沉淀
+            self._save_score_history(save_path, timestamp)
+
             logger.info(f"结果已保存到: {save_path}")
             return save_path
             

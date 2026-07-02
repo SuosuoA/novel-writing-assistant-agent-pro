@@ -15,5 +15,6 @@
     "ai.call"
   ],
   "min_platform_version": "6.0.0",
-  "entry_class": "ContextBuilderPlugin"
+  "entry_class": "ContextBuilderPlugin",
+  "signature": "7c5288abddc2b6826a1239d478ac5924c466f10bd1d5d96486b2bf9980386010"
 }

@@ -15,5 +15,6 @@
     "cache.readwrite"
   ],
   "min_platform_version": "6.0.0",
-  "entry_class": "ContinuationGeneratorPlugin"
+  "entry_class": "ContinuationGeneratorPlugin",
+  "signature": "4a2561764f1a2068fcaa2c945d3ef6a3880d707fa378547dbcf3e20489417f1d"
 }

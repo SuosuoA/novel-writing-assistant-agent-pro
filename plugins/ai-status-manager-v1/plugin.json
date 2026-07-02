@@ -34,5 +34,6 @@
       "default": 3,
       "description": "最大重试次数"
     }
-  }
+  },
+  "signature": "b765ec69b4e598026eb79b4a107a7b4717f4e73419c2b6bec1cb4d9f8a455cbd"
 }
