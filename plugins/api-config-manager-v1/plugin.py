@@ -121,14 +121,6 @@ class APIConfigManagerPlugin(ToolPlugin):
             author="Agent Pro Team",
             plugin_type=PluginType.TOOL
         )
-        
-        # 配置存储
-        self._config: Optional[APIConfig] = None
-        self._encryption: Optional[APIKeyEncryption] = None
-        
-        # 配置文件路径
-        self._config_path: Optional[Path] = None
-        self._event_bus: Optional[EventBus] = None
     
     @property
     def category(self) -> str:
@@ -146,7 +138,8 @@ class APIConfigManagerPlugin(ToolPlugin):
         """
         try:
             self._context = context
-            self._state = PluginState.LOADING
+            # V1.49.35修复：核心PluginState无LOADING，使用LOADED
+            self._state = PluginState.LOADED
             
             # 获取EventBus
             if context.event_bus:

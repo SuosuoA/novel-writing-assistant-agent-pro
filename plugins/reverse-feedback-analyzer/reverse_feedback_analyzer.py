@@ -478,10 +478,21 @@ class LLMAnalyzer:
         worldview: str,
         chapter_id: str
     ) -> str:
-        """构建分析提示"""
+        """构建分析提示
+        
+        V1.49.48修复：兼容characters的字典/列表格式
+        """
+        # V1.49.48修复：确保characters始终是列表格式
+        if isinstance(characters, dict):
+            characters = list(characters.values()) if characters else []
+        elif not isinstance(characters, list):
+            characters = []
+
         # 简化人物设定格式（使用类常量）
         char_summary = []
         for char in characters[:self.MAX_CHARACTERS_IN_PROMPT]:
+            if not isinstance(char, dict):
+                continue
             char_summary.append(
                 f"- {char.get('name', '未知')}: "
                 f"性格={char.get('personality', '未设定')}, "
@@ -612,49 +623,77 @@ class LLMAnalyzer:
         基于规则的分析（LLM不可用时的降级方案）
         
         P1-5修复：使用jieba分词增强人名识别
+        V1.49.48修复：兼容characters的字典/列表格式
+        V1.49.49修复：优化jieba性能，限制分析文本长度避免卡顿
         """
         issues = []
 
-        # 1. 人物检测（P1-5修复：jieba增强）
-        char_names = [char.get("name", "") for char in characters if char.get("name")]
-        
-        if JIEBA_AVAILABLE:
-            # 使用jieba进行命名实体识别
-            words = pseg.cut(chapter_text)
-            # 提取人名标记（nr）
-            detected_names = {word.word for word in words if word.flag == 'nr'}
-            
-            # 合并设定中的人名和检测到的人名
-            all_names = set(char_names) | detected_names
-            
-            # 检测未在设定中出现的人物
-            unknown_names = detected_names - set(char_names)
-            if unknown_names:
-                issues.append({
-                    "issue_type": "character",
-                    "severity": "medium",
-                    "element_name": "未知角色",
-                    "description": f"检测到章节中出现未在设定中的角色：{', '.join(list(unknown_names)[:5])}",
-                    "suggested_fix": "建议将这些角色添加到人物设定中",
-                    "original_content": "无",
-                    "chapter_reference": chapter_id,
-                    "confidence": 0.7
-                })
-        else:
-            # 降级到简单字符串匹配
-            all_names = set(char_names)
-            logger.debug("jieba未安装，使用简单字符串匹配")
+        # V1.49.48修复：确保characters始终是列表格式
+        if isinstance(characters, dict):
+            # 字典格式{id: {name, ...}}转换为列表格式[{name, ...}]
+            characters = list(characters.values()) if characters else []
+        elif not isinstance(characters, list):
+            characters = []
 
-        # 2. 人物能力与性格检测
+        # V1.49.49修复：限制分析文本长度，避免卡顿
+        # jieba词性标注对长文本非常耗时，只分析前2000字
+        MAX_ANALYSIS_LENGTH = 2000
+        analysis_text = chapter_text[:MAX_ANALYSIS_LENGTH] if len(chapter_text) > MAX_ANALYSIS_LENGTH else chapter_text
+
+        # 1. 人物检测（V1.49.49优化：使用快速模式）
+        char_names = [char.get("name", "") for char in characters if isinstance(char, dict) and char.get("name")]
+        char_names_set = set(char_names)
+        
+        # 快速模式：先用字符串匹配检测已知人物
+        detected_in_setting = {name for name in char_names if name in chapter_text}
+        
+        # 只对未知人物进行jieba分析（限制范围）
+        if JIEBA_AVAILABLE and len(analysis_text) > 100:
+            try:
+                # 使用jieba进行命名实体识别（只分析限制长度的文本）
+                words = pseg.cut(analysis_text)
+                # 提取人名标记（nr）
+                jieba_names = {word.word for word in words if word.flag == 'nr' and len(word.word) >= 2}
+                
+                # 检测未在设定中出现的人物
+                unknown_names = jieba_names - char_names_set
+                if unknown_names:
+                    issues.append({
+                        "issue_type": "character",
+                        "severity": "medium",
+                        "element_name": "未知角色",
+                        "description": f"检测到章节中出现未在设定中的角色：{', '.join(list(unknown_names)[:5])}",
+                        "suggested_fix": "建议将这些角色添加到人物设定中",
+                        "original_content": "无",
+                        "chapter_reference": chapter_id,
+                        "confidence": 0.7
+                    })
+            except Exception as e:
+                logger.warning(f"jieba分析失败，使用简单匹配: {e}")
+        
+        all_names = char_names_set | detected_in_setting
+
+        # 2. 人物能力与性格检测（V1.49.49优化：限制分析范围）
         for char in characters:
+            if not isinstance(char, dict):
+                continue
+                
             name = char.get("name", "")
             if not name:
                 continue
 
-            # 检测角色是否出现
-            if name in chapter_text or (JIEBA_AVAILABLE and name in all_names):
+            # 检测角色是否出现（快速字符串匹配）
+            if name in chapter_text:
                 # 检测能力关键词
+                # V1.49.50修复：ability可能是字典或列表
                 ability = char.get("ability", "")
+                if isinstance(ability, dict):
+                    ability = " ".join([str(v) for v in ability.values() if v])
+                elif isinstance(ability, list):
+                    ability = " ".join([str(a) for a in ability if a])
+                elif not isinstance(ability, str):
+                    ability = ""
+                    
                 if ability and ability not in chapter_text:
                     # 角色出现但能力未提及（低优先级提示）
                     issues.append({
@@ -668,14 +707,23 @@ class LLMAnalyzer:
                         "confidence": 0.6
                     })
 
-                # P1-5修复：使用jieba分析性格关键词
+                # V1.49.49优化：简化性格关键词检测，不使用jieba对全文分词
+                # V1.49.50修复：personality可能是字典或列表
                 personality = char.get("personality", "")
-                if personality and JIEBA_AVAILABLE:
-                    # 提取性格关键词
-                    personality_keywords = set(jieba.cut(personality))
-                    # 章节中的性格相关描述
-                    chapter_keywords = self._extract_keywords(chapter_text)
-                    # 检测性格关键词覆盖率
+                if isinstance(personality, dict):
+                    # 从字典中提取文本（常见格式：{"核心性格": "乐观", "优点": "..."}）
+                    personality = " ".join([str(v) for v in personality.values() if v])
+                elif isinstance(personality, list):
+                    # 列表格式：["乐观", "开朗"]
+                    personality = " ".join([str(p) for p in personality if p])
+                elif not isinstance(personality, str):
+                    personality = ""
+                    
+                if personality and len(personality) > 0:
+                    # 使用简单的关键词匹配，避免jieba对全文分词
+                    personality_keywords = set(personality.replace("，", " ").replace("、", " ").split())
+                    # 只在限制长度的文本中检查关键词
+                    chapter_keywords = self._extract_keywords(analysis_text)
                     overlap = personality_keywords & chapter_keywords
                     if len(personality_keywords) > 0 and len(overlap) / len(personality_keywords) < 0.3:
                         issues.append({
@@ -689,11 +737,12 @@ class LLMAnalyzer:
                             "confidence": 0.5
                         })
 
-        # 3. 大纲关键词检测
+        # 3. 大纲关键词检测（V1.49.49优化：限制分析范围）
         if outline:
             # 提取大纲中的关键事件
             outline_keywords = self._extract_keywords(outline)
-            chapter_keywords = self._extract_keywords(chapter_text)
+            # 使用限制长度的文本进行检测
+            chapter_keywords = self._extract_keywords(analysis_text)
 
             # 检测大纲关键事件是否体现
             missing_keywords = outline_keywords - chapter_keywords
@@ -794,7 +843,13 @@ class ReverseFeedbackAnalyzer(AnalyzerPlugin):
                 return False
 
             # 初始化缓存（P1-3修复：支持持久化）
-            config = context.config_manager.get_plugin_config("reverse-feedback-analyzer")
+            # V1.49.46修复：处理config_manager为None的情况
+            config = {}
+            if context.config_manager:
+                try:
+                    config = context.config_manager.get_plugin_config("reverse-feedback-analyzer")
+                except Exception as e:
+                    logger.warning(f"获取插件配置失败，使用默认值: {e}")
             cache_size = config.get("max_cache_size", 500)
             cache_ttl = config.get("cache_ttl_seconds", 3600)
             
@@ -839,26 +894,28 @@ class ReverseFeedbackAnalyzer(AnalyzerPlugin):
         v5_modules = context.v5_modules if hasattr(context, 'v5_modules') else {}
 
         # 获取大纲解析器
+        # V2.1修复：旧路径 scripts.outline_parser_v3 已随V5模块迁移进插件而不存在，
+        # 导致此处永远加载失败、"逆向反馈影响大纲"设计目标失效。
+        # 改为：优先从插件注册表取已初始化实例，退回 importlib 动态加载（与世界观同款模式）。
         if "outline_parser" in v5_modules:
             self._outline_parser = v5_modules["outline_parser"]
         else:
-            # 尝试动态导入
-            try:
-                from scripts.outline_parser_v3 import OutlineParserV3
-                self._outline_parser = OutlineParserV3()
+            self._outline_parser = self._load_plugin_module(
+                "outline-parser-v3", "OutlineParserPlugin", context)
+            if self._outline_parser:
                 logger.info("动态加载大纲解析器成功")
-            except ImportError:
+            else:
                 logger.warning("无法加载大纲解析器")
 
-        # 获取人物管理器
+        # 获取人物管理器（V2.1修复：同上，旧 scripts 路径不存在）
         if "character_manager" in v5_modules:
             self._character_manager = v5_modules["character_manager"]
         else:
-            try:
-                from scripts.enhanced_character_manager import EnhancedCharacterManager
-                self._character_manager = EnhancedCharacterManager()
+            self._character_manager = self._load_plugin_module(
+                "character-manager-v1", "CharacterManagerPlugin", context)
+            if self._character_manager:
                 logger.info("动态加载人物管理器成功")
-            except ImportError:
+            else:
                 logger.warning("无法加载人物管理器")
 
         # 获取世界观解析器（从插件系统）
@@ -866,12 +923,56 @@ class ReverseFeedbackAnalyzer(AnalyzerPlugin):
             self._worldview_parser = v5_modules["worldview_parser"]
         else:
             try:
-                # 使用插件系统加载世界观解析器
-                from plugins.worldview-parser-v1.plugin import WorldviewParserPlugin
-                self._worldview_parser = WorldviewParserPlugin()
-                logger.info("动态加载世界观解析器成功")
-            except ImportError:
-                logger.warning("无法加载世界观解析器")
+                # 使用importlib动态加载（V1.49.34修复：模块名含连字符，不能用from import）
+                import importlib
+                worldview_mod = importlib.import_module("plugins.worldview-parser-v1.plugin")
+                WorldviewParserPlugin = getattr(worldview_mod, "WorldviewParserPlugin", None)
+                if WorldviewParserPlugin is not None:
+                    self._worldview_parser = WorldviewParserPlugin()
+                    logger.info("动态加载世界观解析器成功")
+                else:
+                    logger.warning("WorldviewParserPlugin class not found")
+            except ImportError as e:
+                logger.warning(f"无法加载世界观解析器: {e}")
+
+    def _load_plugin_module(self, plugin_id: str, class_name: str, context) -> Optional[Any]:
+        """加载兄弟插件实例（V2.1新增）。
+
+        优先级：
+        1. 插件注册表中已初始化的实例（真实运行环境，状态完整）
+        2. importlib 动态加载插件模块并实例化（降级，与世界观解析器同款模式）
+        失败返回 None，调用方自行降级。
+        """
+        # 1) 注册表已初始化实例
+        try:
+            registry = getattr(context, 'plugin_registry', None)
+            if registry is not None:
+                inst = registry.get_plugin(plugin_id)
+                if inst is not None:
+                    return inst
+        except Exception as e:
+            logger.debug(f"从注册表获取 {plugin_id} 失败: {e}")
+
+        # 2) importlib 动态加载
+        try:
+            import importlib
+            mod = importlib.import_module(f"plugins.{plugin_id}.plugin")
+            cls = getattr(mod, class_name, None)
+            if cls is not None:
+                inst = cls()
+                # 裸实例需初始化后才可用（如 OutlineParserPlugin.analyze 依赖
+                # initialize() 建立的内部状态）；失败也返回实例，调用方已有 try 保护
+                try:
+                    init_fn = getattr(inst, 'initialize', None)
+                    if callable(init_fn):
+                        init_fn(context)
+                except Exception as ie:
+                    logger.debug(f"{plugin_id} 初始化未完成（降级可用性）: {ie}")
+                return inst
+            logger.warning(f"{class_name} class not found in {plugin_id}")
+        except Exception as e:
+            logger.debug(f"动态加载 {plugin_id} 失败: {e}")
+        return None
 
     def _init_llm_client(self, context: PluginContext) -> None:
         """初始化LLM客户端"""
@@ -1222,9 +1323,12 @@ class ReverseFeedbackAnalyzer(AnalyzerPlugin):
         result = {}
 
         # 使用大纲解析器增强大纲信息
+        # V2.1修复：兼容双接口——旧V5类提供 parse()，迁移后的插件提供 analyze()
         if self._outline_parser and outline:
             try:
-                parsed_outline = self._outline_parser.parse(outline)
+                parse_fn = getattr(self._outline_parser, 'parse', None) \
+                    or getattr(self._outline_parser, 'analyze', None)
+                parsed_outline = parse_fn(outline) if parse_fn else None
                 if parsed_outline:
                     result["outline"] = self._format_parsed_outline(parsed_outline)
             except Exception as e:

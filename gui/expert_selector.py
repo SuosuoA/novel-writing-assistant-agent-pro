@@ -22,6 +22,7 @@ from tkinter import ttk, messagebox
 from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass, field
 import logging
+import sys
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -76,35 +77,96 @@ class ExpertSelectorWidget:
         self.current_expert: Optional[ExpertInfo] = None
         self.expert_configs: Dict[str, Dict[str, Any]] = {}
         
-        # 可用专家列表（预定义）
-        self.available_experts = [
-            ExpertInfo(
-                expert_id="expert-novel-v1",
-                name="小说创作专家",
-                description="专门优化小说质量，整合世界观/人设/大纲/风格/知识库/写作技巧",
-                version="1.0.0",
-                capabilities=[
-                    "世界观整合",
-                    "人设增强",
-                    "大纲对齐",
-                    "风格优化",
-                    "知识库注入",
-                    "写作技巧应用"
-                ],
-                config={
-                    "enable_memory": True,
-                    "enable_local_model": True,
-                    "quality_threshold": 0.8,
-                    "max_iterations": 5
-                }
-            )
-        ]
+        # 可用专家列表（从plugin.json动态加载）
+        self.available_experts = []
+        self._load_available_experts()
         
         # 创建UI
         self.frame = ttk.Frame(parent)
         self._create_widgets()
         
         logger.info("专家选择器初始化完成")
+    
+    def _load_available_experts(self):
+        """
+        从插件目录加载可用专家列表
+        
+        设计原则：
+        - 读取plugins目录下的专家插件plugin.json
+        - 不依赖PluginRegistry（避免启动时加载问题）
+        - 专家插件延迟加载（仅在用户选择时加载）
+        """
+        import os
+        import json
+        from pathlib import Path
+        
+        # 预定义的专家信息（作为后备）
+        default_expert = ExpertInfo(
+            expert_id="expert-novel-v1",
+            name="小说创作专家",
+            description="专门优化小说质量，整合世界观/人设/大纲/风格/知识库/写作技巧",
+            version="1.5.0",
+            capabilities=[
+                "世界观整合",
+                "人设增强",
+                "大纲对齐",
+                "风格优化",
+                "知识库注入",
+                "写作技巧应用",
+                "AI痕迹检测",
+                "Humanizer集成",
+                "Fiction-writing增强"
+            ],
+            config={
+                "enable_memory": True,
+                "enable_local_model": True,
+                # V10.1修复(P0)：阈值从0.8降至0.75，与插件V10.0设计对齐
+                # 原因（V9.3诊断）：重写评分算法后理论上限~0.83，0.75提供合理容差
+                "quality_threshold": 0.75,
+                "max_iterations": 5
+            }
+        )
+        
+        # 尝试从plugins目录读取专家插件信息
+        try:
+            plugins_dir = Path(__file__).parent.parent / "plugins"
+            if plugins_dir.exists():
+                # 查找expert-*目录
+                for plugin_dir in plugins_dir.iterdir():
+                    if plugin_dir.is_dir() and plugin_dir.name.startswith("expert-"):
+                        plugin_json = plugin_dir / "plugin.json"
+                        if plugin_json.exists():
+                            try:
+                                with open(plugin_json, 'r', encoding='utf-8') as f:
+                                    meta = json.load(f)
+                                
+                                expert = ExpertInfo(
+                                    expert_id=meta.get('id', plugin_dir.name),
+                                    name=meta.get('name', plugin_dir.name),
+                                    description=meta.get('description', ''),
+                                    version=meta.get('version', '1.0.0'),
+                                    capabilities=meta.get('capabilities', []),
+                                    config={
+                                        "enable_memory": meta.get('enable_memory', True),
+                                        "enable_local_model": meta.get('enable_local_model', True),
+                                        # V10.1修复(P0)：阈值默认0.75（与插件V10.0设计对齐）
+                                        "quality_threshold": meta.get('quality_threshold', 0.75),
+                                        "max_iterations": meta.get('max_iterations', 5)
+                                    }
+                                )
+                                self.available_experts.append(expert)
+                                logger.info(f"加载专家插件: {expert.name} v{expert.version}")
+                            except Exception as e:
+                                logger.warning(f"读取专家插件 {plugin_dir.name} 失败: {e}")
+            
+            # 如果没有找到专家插件，使用默认配置
+            if not self.available_experts:
+                self.available_experts = [default_expert]
+                logger.info("未找到专家插件，使用默认配置")
+                
+        except Exception as e:
+            logger.warning(f"加载专家列表失败，使用默认配置: {e}")
+            self.available_experts = [default_expert]
     
     def _create_widgets(self):
         """创建UI组件"""
@@ -221,6 +283,48 @@ class ExpertSelectorWidget:
         """
         return self.current_expert
     
+    def load_expert_plugin(self, expert_id: str):
+        """
+        加载专家插件（V2.0修订 - 遵循微内核原则）
+        
+        设计原则：
+        - ExpertSelector只负责选择和触发
+        - 插件加载/注册/初始化由PluginRegistry统一管理
+        - PluginContext由PluginLoader内部安全构建（使用已有的核心服务实例）
+        
+        Args:
+            expert_id: 专家插件ID
+            
+        Returns:
+            插件实例，加载失败返回None
+        """
+        if not self.plugin_registry:
+            logger.error("PluginRegistry未初始化，无法加载专家插件")
+            return None
+        
+        # 1. 先检查是否已加载且激活
+        existing = self.plugin_registry.get_plugin(expert_id)
+        if existing and hasattr(existing, 'state') and existing.state.value == 'active':
+            logger.info(f"专家插件 {expert_id} 已加载，直接返回")
+            return existing
+        
+        # 2. 通过PluginRegistry统一加载（包含发现、注册、初始化、激活全流程）
+        # PluginLoader.load_plugin()内部已实现：
+        #   - importlib动态加载
+        #   - 安全构建PluginContext（使用get_event_bus/get_service_locator/get_config_manager）
+        #   - 调用plugin.initialize(context)
+        #   - PluginRegistry.register() + activate()
+        success, error_msg = self.plugin_registry.load_plugin_runtime(expert_id)
+        
+        if success:
+            plugin_instance = self.plugin_registry.get_plugin(expert_id)
+            if plugin_instance:
+                logger.info(f"专家插件 {expert_id} 加载成功")
+                return plugin_instance
+        
+        logger.error(f"专家插件 {expert_id} 加载失败: {error_msg}")
+        return None
+    
     def pack(self, **kwargs):
         """包装pack方法"""
         self.frame.pack(**kwargs)
@@ -258,10 +362,13 @@ class ExpertConfigDialog:
         # 创建对话框
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(f"{expert.name} - 配置")
-        self.dialog.geometry("450x400")
+        self.dialog.geometry("520x530")  # V1.49.15修复：优化尺寸，减少空白，确保内容完整显示
         self.dialog.resizable(False, False)
         self.dialog.transient(parent)
         self.dialog.grab_set()
+        
+        # 设置最小尺寸
+        self.dialog.minsize(520, 530)
         
         # 居中显示
         self._center_window()
@@ -283,29 +390,39 @@ class ExpertConfigDialog:
     
     def _create_widgets(self):
         """创建UI组件"""
-        # 主框架
-        main_frame = ttk.Frame(self.dialog, padding=15)
+        # V1.49.11修复：先创建底部按钮框架，确保始终可见
+        # V1.49.15优化：减少padding，给内容更多空间
+        button_frame = ttk.Frame(self.dialog, padding=5)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # 使用pack布局，三个按钮均匀分布
+        ttk.Button(button_frame, text="恢复默认", command=self._reset_to_default, width=12).pack(side=tk.LEFT, padx=10)
+        ttk.Button(button_frame, text="确定", command=self._on_ok, width=12).pack(side=tk.RIGHT, padx=10)
+        ttk.Button(button_frame, text="取消", command=self._on_cancel, width=12).pack(side=tk.RIGHT, padx=5)
+
+        # 主框架 - 在按钮框架之后创建
+        main_frame = ttk.Frame(self.dialog, padding=10)  # 减少padding从15到10
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         # 专家信息
-        info_frame = ttk.LabelFrame(main_frame, text="专家信息", padding=10)
-        info_frame.pack(fill=tk.X, pady=(0, 10))
+        info_frame = ttk.LabelFrame(main_frame, text="专家信息", padding=8)  # 减少padding从10到8
+        info_frame.pack(fill=tk.X, pady=(0, 5))  # 减少pady从10到5
         
         ttk.Label(info_frame, text=f"名称: {self.expert.name}", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor=tk.W)
         ttk.Label(info_frame, text=f"版本: {self.expert.version}", font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W)
-        ttk.Label(info_frame, text=f"描述: {self.expert.description}", font=("Microsoft YaHei UI", 9), wraplength=400).pack(anchor=tk.W, pady=(5, 0))
+        ttk.Label(info_frame, text=f"描述: {self.expert.description}", font=("Microsoft YaHei UI", 9), wraplength=450).pack(anchor=tk.W, pady=(5, 0))
         
         # 能力列表
         if self.expert.capabilities:
-            caps_frame = ttk.LabelFrame(main_frame, text="核心能力", padding=10)
-            caps_frame.pack(fill=tk.X, pady=(0, 10))
+            caps_frame = ttk.LabelFrame(main_frame, text="核心能力", padding=8)  # 减少padding从10到8
+            caps_frame.pack(fill=tk.X, pady=(0, 5))  # 减少pady从10到5
             
             caps_text = " | ".join(self.expert.capabilities)
-            ttk.Label(caps_frame, text=caps_text, font=("Microsoft YaHei UI", 9), wraplength=400, foreground="gray").pack(anchor=tk.W)
+            ttk.Label(caps_frame, text=caps_text, font=("Microsoft YaHei UI", 9), wraplength=450, foreground="gray").pack(anchor=tk.W)
         
         # 配置选项
-        config_frame = ttk.LabelFrame(main_frame, text="配置选项", padding=10)
-        config_frame.pack(fill=tk.X, pady=(0, 10))
+        config_frame = ttk.LabelFrame(main_frame, text="配置选项", padding=8)  # 减少padding从10到8
+        config_frame.pack(fill=tk.X, pady=(0, 5))  # 减少pady从10到5
         
         # 记忆集成开关
         self.memory_var = tk.BooleanVar(value=True)
@@ -325,7 +442,8 @@ class ExpertConfigDialog:
         threshold_frame = ttk.Frame(config_frame)
         threshold_frame.pack(fill=tk.X, pady=5)
         ttk.Label(threshold_frame, text="质量阈值:", font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
-        self.threshold_var = tk.DoubleVar(value=0.8)
+        # V10.1修复(P0)：阈值默认值0.75（与插件V10.0设计对齐）
+        self.threshold_var = tk.DoubleVar(value=0.75)
         threshold_spin = ttk.Spinbox(threshold_frame, from_=0.5, to=1.0, increment=0.05, textvariable=self.threshold_var, width=8)
         threshold_spin.pack(side=tk.LEFT, padx=5)
         ttk.Label(threshold_frame, text="(低于此分数触发优化)", font=("Microsoft YaHei UI", 8), foreground="gray").pack(side=tk.LEFT)
@@ -338,14 +456,6 @@ class ExpertConfigDialog:
         iter_spin = ttk.Spinbox(iter_frame, from_=1, to=10, increment=1, textvariable=self.iter_var, width=8)
         iter_spin.pack(side=tk.LEFT, padx=5)
         ttk.Label(iter_frame, text="(最多重新生成次数)", font=("Microsoft YaHei UI", 8), foreground="gray").pack(side=tk.LEFT)
-        
-        # 按钮框架
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        ttk.Button(button_frame, text="确定", command=self._on_ok, width=10).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(button_frame, text="取消", command=self._on_cancel, width=10).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(button_frame, text="恢复默认", command=self._reset_to_default, width=10).pack(side=tk.LEFT)
     
     def _load_config(self):
         """加载初始配置"""

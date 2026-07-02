@@ -1,41 +1,40 @@
 """
-质量验证器插件 V1.2
+质量验证器插件 V2.0
 
-版本: 1.2.0
+版本: 2.0.0
 创建日期: 2026-03-23
-最后更新: 2026-03-26
+最后更新: 2026-04-08
 迁移来源: V5 scripts/enhanced_weighted_validator.py
 
-功能（V1.7版本 - 8维度评分体系）:
-- 字数符合性评分 (8%)
-- 知识点引用评分 (8%) - V1.7新增
+功能（V2.0版本 - 9维度评分体系）:
+- 世界观一致性评分 (12%)
+- 人设一致性评分 (19%)
 - 大纲符合性评分 (13%)
 - 风格一致性评分 (19%)
-- 人设一致性评分 (19%)
-- 世界观一致性评分 (12%)
-- 逆向反馈评分 (11%) - V1.7新增
-- 自然度评分 (10%)
+- 知识库引用评分 (8%)
+- 写作技巧评分 (8%) - V2.0新增
+- 字数符合性评分 (8%)
+- 上下文衔接评分 (8%) - V2.0新增
+- AI感检测评分 (5%) - V2.0新增
 
-V1.2 新增功能:
-- 升级为8维度评分体系（V1.7版本）
-- 新增知识点引用评分维度（knowledge_reference_score）
-- 新增逆向反馈评分维度（reverse_feedback_score）
-- 动态权重配置支持（通过enhanced_weighted_validator.py）
-- 集成逆向反馈分析器，实现上下文衔接一致性检查
-- 集成知识库检索，验证知识点引用
+V2.0 变更:
+- 升级为9维度评分体系（与expert-novel-v1/validator.py统一）
+- 新增写作技巧评分维度（writing_technique_score）
+- 新增上下文衔接评分维度（context_coherence_score，替代reverse_feedback）
+- 新增AI感检测评分维度（ai_feeling_score，替代naturalness）
+- 保持向后兼容（旧字段映射到新维度）
 
 核心规则（强制保护）:
 1. 章节结束必须添加【本章完】标记
 2. 评分阈值 >= 0.8 才能输出
 3. 迭代上限 5 次
-4. 8维度评分权重可通过配置文件调整
+4. 9维度评分权重可通过配置文件调整
 5. 世界观严重违背一票否决
 
 参考文档:
 - 《项目总体架构设计说明书V1.5》第四章
 - 《插件接口定义V2.1》
-- 《逆向反馈分析器插件实现说明》
-- 《11.1生成和评分完善计划✅️.md》
+- 《12.95开始创作修复方案.md》
 """
 
 import re
@@ -126,19 +125,21 @@ class QualityValidatorPlugin(ValidatorPlugin):
     # 类常量
     PLUGIN_ID = "quality-validator-v1"
     PLUGIN_NAME = "质量验证器 V1"
-    PLUGIN_VERSION = "1.2.0"
+    PLUGIN_VERSION = "2.0.0"
 
-    # 评分权重配置（V1.7版本 - 8维度）
+    # 评分权重配置（V2.0版本 - 9维度）
     # 实际权重从config/validator_weights.yaml动态加载
+    # 与expert-novel-v1/validator.py维度统一
     DEFAULT_WEIGHTS = {
-        'word_count': 0.08,
-        'knowledge_reference': 0.08,
-        'outline': 0.13,
-        'style': 0.19,
-        'character': 0.19,
-        'worldview': 0.12,
-        'reverse_feedback': 0.11,
-        'naturalness': 0.10
+        'worldview': 0.12,         # 世界观一致性
+        'character': 0.19,         # 人设一致性
+        'outline': 0.13,           # 大纲符合性
+        'style': 0.19,             # 风格一致性
+        'knowledge': 0.08,         # 知识库引用
+        'writing_technique': 0.08, # 写作技巧
+        'word_count': 0.08,        # 字数符合性
+        'context_coherence': 0.08, # 上下文衔接
+        'ai_feeling': 0.05,        # AI感检测
     }
 
     def __init__(self):
@@ -147,7 +148,7 @@ class QualityValidatorPlugin(ValidatorPlugin):
             id=self.PLUGIN_ID,
             name=self.PLUGIN_NAME,
             version=self.PLUGIN_VERSION,
-            description="6维度加权评分验证器",
+            description="9维度加权评分验证器（V2.0）",
             author="项目组",
             plugin_type=PluginType.VALIDATOR,
             api_version="1.0",
@@ -216,7 +217,7 @@ class QualityValidatorPlugin(ValidatorPlugin):
             id=cls.PLUGIN_ID,
             name=cls.PLUGIN_NAME,
             version=cls.PLUGIN_VERSION,
-            description="6维度加权评分验证器",
+            description="9维度加权评分验证器（V2.0）",
             author="项目组",
             plugin_type=PluginType.VALIDATOR,
             api_version="1.0",
@@ -228,6 +229,45 @@ class QualityValidatorPlugin(ValidatorPlugin):
             min_platform_version="6.0.0",
             entry_class="QualityValidatorPlugin",
         )
+
+    @classmethod
+    def get_dimension_display_map(cls) -> Dict[str, str]:
+        """获取维度英文→中文映射（唯一真值来源）
+        
+        V3.0修订：GUI层通过此方法获取维度映射，避免硬编码。
+        当维度增删时只需修改此处和DEFAULT_WEIGHTS。
+        """
+        return {
+            'worldview': '世界观',
+            'character': '人设',
+            'outline': '大纲',
+            'style': '风格',
+            'knowledge': '知识库',
+            'writing_technique': '写作技巧',
+            'word_count': '字数',
+            'context_coherence': '上下文衔接',
+            'ai_feeling': 'AI感',
+        }
+
+    @classmethod
+    def get_dimension_attr_map(cls) -> Dict[str, str]:
+        """获取ValidationScores属性名→维度名的映射（唯一真值来源）
+        
+        V3.0修订：与get_dimension_display_map()对称，
+        GUI层通过此方法获取属性映射，避免硬编码。
+        当ValidationScores字段增删时只需修改此处。
+        """
+        return {
+            'worldview_score': 'worldview',
+            'character_score': 'character',
+            'outline_score': 'outline',
+            'style_score': 'style',
+            'knowledge_reference_score': 'knowledge',
+            'writing_technique_score': 'writing_technique',
+            'word_count_score': 'word_count',
+            'context_coherence_score': 'context_coherence',
+            'ai_feeling_score': 'ai_feeling',
+        }
 
     def initialize(self, context: PluginContext) -> bool:
         """初始化插件"""
@@ -244,14 +284,18 @@ class QualityValidatorPlugin(ValidatorPlugin):
             self._weight_validator = None
 
         # 获取逆向反馈分析器插件引用
+        # V2.1修复：quality-validator 按字母序先于 reverse-feedback-analyzer 加载，
+        # 初始化时查找必然失败 → 上下文一致性检查永远跳过。
+        # 改为：保存 registry 引用，初始化时查一次，使用时惰性重查（见 _get_reverse_analyzer）。
         self._reverse_feedback_analyzer = None
+        self._plugin_registry_ref = getattr(context, 'plugin_registry', None)
         try:
-            if hasattr(context, 'plugin_registry') and context.plugin_registry:
-                self._reverse_feedback_analyzer = context.plugin_registry.get_plugin("reverse-feedback-analyzer")
+            if self._plugin_registry_ref:
+                self._reverse_feedback_analyzer = self._plugin_registry_ref.get_plugin("reverse-feedback-analyzer")
                 if self._reverse_feedback_analyzer:
                     self._logger.info("[质量验证器] 成功获取逆向反馈分析器插件引用")
                 else:
-                    self._logger.warning("[质量验证器] 逆向反馈分析器插件未找到，上下文一致性检查将跳过")
+                    self._logger.info("[质量验证器] 逆向反馈分析器尚未加载，将在使用时惰性获取")
         except Exception as e:
             self._logger.warning(f"[质量验证器] 获取逆向反馈分析器插件失败: {e}")
 
@@ -307,10 +351,20 @@ class QualityValidatorPlugin(ValidatorPlugin):
         character_profiles = context.get('character_profiles')
         world_view = context.get('world_view')
 
-        # 1. 字数符合性评分
-        word_count_score = self._score_word_count(content, target_word_count)
+        # 1. 世界观一致性评分（一票否决）
+        if world_view:
+            worldview_consistency, worldview_violation = self._score_worldview_consistency(content, world_view)
+        else:
+            worldview_consistency = 0.7
+            worldview_violation = False
 
-        # 2. 大纲符合性评分
+        # 2. 人设一致性评分
+        if character_profiles:
+            character_consistency = self._score_character_consistency(content, character_profiles)
+        else:
+            character_consistency = 0.7
+
+        # 3. 大纲符合性评分
         if chapter_outline:
             outline_compliance = self._score_outline_compliance(content, chapter_outline)
         else:
@@ -322,36 +376,23 @@ class QualityValidatorPlugin(ValidatorPlugin):
                 missing_plot_points=[]
             )
 
-        # 3. 风格一致性评分
+        # 4. 风格一致性评分
         style_consistency = self._score_style_consistency(content, style_profile)
 
-        # 4. 人设一致性评分
-        if character_profiles:
-            character_consistency = self._score_character_consistency(content, character_profiles)
-        else:
-            character_consistency = 0.7
+        # 5. 知识库引用评分（V2.0维度 - 从原knowledge_reference维度升级）
+        knowledge_score, recalled_knowledge = self._score_knowledge(content, context)
 
-        # 5. 世界观一致性评分（一票否决）
-        if world_view:
-            worldview_consistency, worldview_violation = self._score_worldview_consistency(content, world_view)
-        else:
-            worldview_consistency = 0.7
-            worldview_violation = False
+        # 6. 写作技巧评分（V2.0新增维度）
+        writing_technique_score = self._score_writing_technique(content, context)
 
-        # 6. 自然度评分
-        naturalness = self._score_naturalness(content)
+        # 7. 字数符合性评分
+        word_count_score = self._score_word_count(content, target_word_count)
 
-        # 7. 逆向反馈评分（V1.7新增维度 - 上下文衔接一致性）
-        reverse_feedback_score, reverse_feedback_issues = self._score_reverse_feedback(content, context)
+        # 8. 上下文衔接评分（V2.0新增维度 - 替代原reverse_feedback维度）
+        context_coherence_score, coherence_issues = self._score_context_coherence(content, context)
 
-        # 如果存在高优先级冲突，记录警告
-        if reverse_feedback_score < 0.6:
-            self._logger.warning(f"逆向反馈评分较低: {reverse_feedback_score:.2f}")
-            for issue in reverse_feedback_issues:
-                self._logger.warning(f"  - {issue}")
-
-        # 8. 知识点引用评分（V1.7新增维度 - 知识库功能）
-        knowledge_reference_score, recalled_knowledge = self._score_knowledge_reference(content, context)
+        # 9. AI感检测评分（V2.0新增维度 - 从原naturalness维度升级）
+        ai_feeling_score, ai_issues = self._score_ai_feeling(content)
 
         # 检查严重违背世界观（一票否决）
         if worldview_violation:
@@ -359,39 +400,45 @@ class QualityValidatorPlugin(ValidatorPlugin):
             total_score = 0.0
             passed = False
         else:
-            # 计算加权总分（V1.7版本 - 8维度）
+            # 计算加权总分（V2.0版本 - 9维度）
             total_score = (
-                word_count_score.score * weights['word_count'] +
-                knowledge_reference_score * weights['knowledge_reference'] +
+                worldview_consistency * weights['worldview'] +
+                character_consistency * weights['character'] +
                 outline_compliance.score * weights['outline'] +
                 style_consistency * weights['style'] +
-                character_consistency * weights['character'] +
-                worldview_consistency * weights['worldview'] +
-                reverse_feedback_score * weights['reverse_feedback'] +
-                naturalness.score * weights['naturalness']
+                knowledge_score * weights['knowledge'] +
+                writing_technique_score * weights['writing_technique'] +
+                word_count_score.score * weights['word_count'] +
+                context_coherence_score * weights['context_coherence'] +
+                ai_feeling_score * weights['ai_feeling']
             )
 
             # 必须同时满足：总分达标 + 包含结束标记
             passed = (total_score >= 0.8 and has_ending_marker)
 
-        # 创建ValidationScores对象（V1.7版本 - 8维度）
+        # 创建ValidationScores对象（V2.0版本 - 9维度）
         scores = ValidationScores(
             word_count_score=word_count_score.score,
-            knowledge_reference_score=knowledge_reference_score,
             outline_score=outline_compliance.score,
             style_score=style_consistency,
             character_score=character_consistency,
             worldview_score=worldview_consistency,
-            reverse_feedback_score=reverse_feedback_score,
-            naturalness_score=naturalness.score,
+            naturalness_score=ai_feeling_score,  # AI感检测映射到naturalness
+            knowledge_reference_score=knowledge_score,  # 兼容旧字段
+            reverse_feedback_score=context_coherence_score,  # 兼容旧字段
+            # V2.0新增维度字段
+            writing_technique_score=writing_technique_score,
+            context_coherence_score=context_coherence_score,
+            ai_feeling_score=ai_feeling_score,
             total_score=total_score,
-            has_chapter_end=has_ending_marker
+            has_chapter_end=has_ending_marker,
+            passed=passed  # V2.1：达标判断归属插件层（ADR-010），供Agent/GUI直接读取
         )
-        # 设置逆向反馈详情
-        if reverse_feedback_issues:
+        # 设置上下文衔接问题
+        if coherence_issues:
             scores.reverse_feedback_issues = [
                 {"description": issue, "severity": "medium"}
-                for issue in reverse_feedback_issues
+                for issue in coherence_issues
             ]
         # 设置召回的知识点
         if recalled_knowledge:
@@ -399,7 +446,7 @@ class QualityValidatorPlugin(ValidatorPlugin):
 
         scores.calculate_total()
 
-        self._logger.info(f"验证完成: 总分={total_score:.2f}, 通过={passed}, 逆向反馈={reverse_feedback_score:.2f}")
+        self._logger.info(f"验证完成: 总分={total_score:.2f}, 通过={passed}, 上下文衔接={context_coherence_score:.2f}, AI感={ai_feeling_score:.2f}")
         return scores
 
     def validate_with_weights(
@@ -459,44 +506,57 @@ class QualityValidatorPlugin(ValidatorPlugin):
             passed = False
         else:
             total_score = validation_scores.total_score
-            passed = validation_scores.passed
+            passed = (total_score >= 0.8 and has_ending_marker)
 
-        # 构建反馈
+        # 构建反馈（V3.0版本 - 9维度，使用英文key作为唯一真值来源）
+        # V6.0关键修复：feedback必须使用与get_dimension_display_map()一致的英文key，
+        # 否则GUI层的dim_display.get(key)查找失败，导致维度名无法正确显示！
         feedback = {
-            '章节结束标记': {
+            'chapter_end': {
                 'score': 1.0 if has_ending_marker else 0.0,
                 'details': '✓ 包含【本章完】' if has_ending_marker else '✗ 缺少【本章完】'
             },
-            '字数符合性': {
-                'score': word_count_score.score,
-                'details': f"目标{target_word_count}字，实际{word_count_score.actual_words}字"
-            },
-            '大纲符合性': {
-                'score': outline_compliance.score,
-                'details': f"匹配{outline_compliance.matched_plot_points}/{outline_compliance.total_plot_points}个情节点"
-            },
-            '风格一致性': {
-                'score': style_consistency,
-                'details': '与学习风格的匹配度'
-            },
-            '人设一致性': {
-                'score': character_consistency,
-                'details': '人物行为是否符合设定'
-            },
-            '世界观一致性': {
-                'score': worldview_consistency,
+            'worldview': {
+                'score': validation_scores.worldview_score,
                 'details': '是否符合世界观设定' + ('（一票否决）' if worldview_violation else '')
             },
-            '自然度': {
-                'score': naturalness.score,
-                'details': f"AI痕迹概率: {naturalness.ai_probability:.1%}"
+            'character': {
+                'score': validation_scores.character_score,
+                'details': '人物行为是否符合设定'
+            },
+            'outline': {
+                'score': validation_scores.outline_score,
+                'details': f"匹配{outline_compliance.matched_plot_points}/{outline_compliance.total_plot_points}个情节点"
+            },
+            'style': {
+                'score': validation_scores.style_score,
+                'details': '与学习风格的匹配度'
+            },
+            'knowledge': {
+                'score': validation_scores.knowledge_reference_score,
+                'details': '知识库知识点引用情况'
+            },
+            'writing_technique': {
+                'score': validation_scores.writing_technique_score,
+                'details': '描写手法、叙事技巧运用程度'
+            },
+            'word_count': {
+                'score': validation_scores.word_count_score,
+                'details': f"目标{target_word_count}字，实际{word_count_score.actual_words}字"
+            },
+            'context_coherence': {
+                'score': validation_scores.context_coherence_score,
+                'details': '与前文的衔接连贯性'
+            },
+            'ai_feeling': {
+                'score': validation_scores.ai_feeling_score,
+                'details': f"AI痕迹检测（越低越明显）"
             }
         }
 
-        # 生成改进建议
-        suggestions = self._generate_suggestions(
-            word_count_score, outline_compliance, style_consistency,
-            character_consistency, worldview_consistency, naturalness
+        # 生成改进建议（V2.0版本 - 9维度）
+        suggestions = self._generate_suggestions_v2(
+            word_count_score, outline_compliance, validation_scores
         )
 
         if not has_ending_marker:
@@ -516,16 +576,17 @@ class QualityValidatorPlugin(ValidatorPlugin):
         )
 
     def get_validation_dimensions(self) -> List[str]:
-        """获取验证维度"""
+        """获取验证维度（V2.0版本 - 9维度）"""
         return [
-            "word_count",          # 字数（8%）
-            "knowledge_reference", # 知识点引用（8%）- V1.7新增
-            "outline",             # 大纲（13%）
-            "style",               # 风格（19%）
-            "character",           # 人设（19%）
-            "worldview",           # 世界观（12%）
-            "reverse_feedback",    # 逆向反馈（11%）- V1.7新增
-            "naturalness",         # 自然度（10%）
+            "worldview",          # 世界观（12%）
+            "character",          # 人设（19%）
+            "outline",            # 大纲（13%）
+            "style",              # 风格（19%）
+            "knowledge",          # 知识库（8%）
+            "writing_technique",  # 写作技巧（8%）- V2.0新增
+            "word_count",         # 字数（8%）
+            "context_coherence",  # 上下文衔接（8%）- V2.0新增
+            "ai_feeling",         # AI感（5%）- V2.0新增
         ]
     
     def _get_current_weights(self) -> Dict[str, float]:
@@ -538,9 +599,18 @@ class QualityValidatorPlugin(ValidatorPlugin):
         if self._weight_validator:
             # 检查配置文件是否修改
             self._weight_validator.check_and_reload_if_modified()
-            return self._weight_validator.weights
-        
-        # 否则使用默认配置（V1.7版本 - 8维度）
+            weights = self._weight_validator.weights
+            # V2.1修复：enhanced_weighted_validator 输出的是旧8维键名
+            # （knowledge_reference/reverse_feedback/naturalness，且无 writing_technique），
+            # 而本插件九维加权用新键名 → KeyError: 'knowledge' → 普通模式评分整体崩溃降级。
+            # 仅当动态配置包含全部九维新键时才使用；否则回落锁定的九维默认权重
+            # （九维度权重为锁定资产，遗留8维配置不应改变它）。
+            if isinstance(weights, dict) and all(k in weights for k in self.DEFAULT_WEIGHTS):
+                return weights
+            self._logger.debug("[权重] 动态配置为遗留8维键名，使用锁定的九维默认权重")
+            return self.DEFAULT_WEIGHTS
+
+        # 否则使用默认配置（V2.0版本 - 9维度）
         return self.DEFAULT_WEIGHTS
     
     def update_weights(self, new_weights: Dict[str, float], updated_by: str = "api") -> bool:
@@ -923,6 +993,15 @@ class QualityValidatorPlugin(ValidatorPlugin):
         Returns:
             Tuple[float, List[str]]: (评分, 问题列表)
         """
+        # V2.1修复：惰性重查（初始化时因加载顺序拿不到，此时应已加载）
+        if not self._reverse_feedback_analyzer and getattr(self, '_plugin_registry_ref', None):
+            try:
+                self._reverse_feedback_analyzer = self._plugin_registry_ref.get_plugin("reverse-feedback-analyzer")
+                if self._reverse_feedback_analyzer:
+                    self._logger.info("[质量验证器] 惰性获取逆向反馈分析器成功")
+            except Exception:
+                pass
+
         # 如果逆向反馈分析器不可用，返回默认评分
         if not self._reverse_feedback_analyzer:
             self._logger.debug("逆向反馈分析器不可用，跳过上下文一致性检查")
@@ -1073,8 +1152,221 @@ class QualityValidatorPlugin(ValidatorPlugin):
             self._logger.error(f"知识点引用评分失败: {e}")
             return 0.6, []
 
+    def _score_knowledge(self, text: str, context: Dict[str, Any]) -> Tuple[float, List[Dict[str, Any]]]:
+        """知识库引用评分（V2.0版本 - 包装原_score_knowledge_reference）
+
+        维度说明：验证生成内容是否正确引用知识库知识点。
+        权重：8%
+
+        Returns:
+            Tuple[float, List[Dict]]: (评分, 召回的知识点列表)
+        """
+        return self._score_knowledge_reference(text, context)
+
+    def _score_writing_technique(self, text: str, context: Dict[str, Any]) -> float:
+        """写作技巧评分（V2.0新增维度）
+
+        维度说明：评估文本中写作技巧的运用程度，包括描写手法、
+        叙事技巧、修辞运用等。权重：8%
+
+        评分逻辑：
+        - 对话比例（0-0.25）：合理对话占比增加评分
+        - 描写密度（0-0.25）：感官描写（视觉/听觉/触觉等）
+        - 修辞运用（0-0.25）：比喻/拟人/排比等
+        - 节奏变化（0-0.25）：长短句交替、段落变化
+
+        Returns:
+            float: 0.4-1.0
+        """
+        if not text or len(text) < 100:
+            return 0.5
+
+        scores = []
+
+        # 1. 对话比例评分（合理对话占比30%-50%为佳）
+        dialog_markers = ['"', '"', '「', '」', '『', '』']
+        dialog_chars = sum(1 for c in text if c in dialog_markers)
+        dialog_ratio = dialog_chars / len(text) if len(text) > 0 else 0
+        if 0.03 <= dialog_ratio <= 0.15:
+            scores.append(1.0)
+        elif 0.01 <= dialog_ratio <= 0.25:
+            scores.append(0.8)
+        elif dialog_ratio > 0:
+            scores.append(0.6)
+        else:
+            scores.append(0.4)
+
+        # 2. 感官描写密度
+        sensory_keywords = [
+            '看', '望', '瞧', '见',  # 视觉
+            '听', '闻', '响',  # 听觉
+            '摸', '触', '冷', '热', '温暖', '冰凉',  # 触觉
+            '香', '臭', '味',  # 嗅觉
+            '甜', '苦', '咸', '辣',  # 味觉
+        ]
+        sensory_count = sum(1 for kw in sensory_keywords if kw in text)
+        ideal_count = max(1, len(text) / 800)
+        if sensory_count >= ideal_count * 2:
+            scores.append(1.0)
+        elif sensory_count >= ideal_count:
+            scores.append(0.8)
+        elif sensory_count > 0:
+            scores.append(0.6)
+        else:
+            scores.append(0.4)
+
+        # 3. 修辞运用
+        rhetoric_patterns = [
+            r'像[^。？！]{2,15}一样',  # 明喻
+            r'仿佛[^。？！]{2,15}般',  # 暗喻
+            r'是[^。？！]{2,10}的[^。？！]{2,10}',  # 判断式
+        ]
+        rhetoric_count = sum(len(re.findall(p, text)) for p in rhetoric_patterns)
+        if rhetoric_count >= 3:
+            scores.append(1.0)
+        elif rhetoric_count >= 1:
+            scores.append(0.8)
+        else:
+            scores.append(0.5)
+
+        # 4. 节奏变化（长短句交替）
+        sentences = self._split_sentences(text)
+        if len(sentences) >= 4:
+            lengths = [len(s) for s in sentences]
+            avg_len = sum(lengths) / len(lengths)
+            variance = sum((l - avg_len) ** 2 for l in lengths) / len(lengths)
+            std_dev = variance ** 0.5
+            variation_coefficient = std_dev / avg_len if avg_len > 0 else 0
+
+            if 0.3 <= variation_coefficient <= 0.8:
+                scores.append(1.0)
+            elif 0.1 <= variation_coefficient <= 1.2:
+                scores.append(0.7)
+            else:
+                scores.append(0.5)
+        else:
+            scores.append(0.5)
+
+        # 加权平均
+        weights = [0.25, 0.25, 0.25, 0.25]
+        final_score = sum(s * w for s, w in zip(scores, weights))
+        return max(0.4, min(1.0, final_score))
+
+    def _score_context_coherence(self, text: str, context: Dict[str, Any]) -> Tuple[float, List[str]]:
+        """上下文衔接评分（V2.0新增维度）
+
+        维度说明：评估当前章节与前文的衔接连贯性。权重：8%
+
+        评分逻辑：
+        - 优先调用逆向反馈分析器（如果可用）
+        - 降级为本地衔接标记检测
+
+        Returns:
+            Tuple[float, List[str]]: (评分, 问题列表)
+        """
+        issues = []
+
+        # 策略1：调用逆向反馈分析器（复用已有能力）
+        if self._reverse_feedback_analyzer:
+            try:
+                reverse_score, reverse_issues = self._score_reverse_feedback(text, context)
+                return reverse_score, reverse_issues
+            except Exception:
+                pass
+
+        # 策略2：本地衔接标记检测
+        coherence_score = 0.7  # 基础分
+
+        # 检测章节开头衔接词
+        opening_text = text[:200] if len(text) > 200 else text
+        has_opening_hook = any(
+            marker in opening_text
+            for marker in ['却', '而', '然而', '不过', '但是', '原来', '此时', '这时', '随后', '接着']
+        )
+        if has_opening_hook:
+            coherence_score += 0.1
+
+        # 检测人物承接（开头是否出现前文人物名）
+        character_profiles = context.get('character_profiles', [])
+        if character_profiles:
+            for char_profile in character_profiles[:3]:
+                char_name = char_profile.get('name', '') or char_profile.get('basic_info', {}).get('name', '')
+                if char_name and char_name in opening_text:
+                    coherence_score += 0.05
+                    break
+
+        # 检测时间/空间连贯性标记
+        time_markers = ['次日', '翌日', '三天后', '一周后', '月余', '半年后', '此时']
+        space_markers = ['回到', '来到', '走进', '离开', '抵达']
+        has_continuity = any(m in opening_text for m in time_markers + space_markers)
+        if has_continuity:
+            coherence_score += 0.05
+
+        # 检测突兀转折（无铺垫的重大变化）
+        abrupt_markers = ['突然之间', '毫无征兆', '就在这一刻', '谁也没想到']
+        abrupt_count = sum(1 for m in abrupt_markers if m in text)
+        if abrupt_count > 2:
+            coherence_score -= 0.1
+            issues.append(f"存在{abrupt_count}处突兀转折，缺乏铺垫")
+
+        coherence_score = max(0.4, min(1.0, coherence_score))
+
+        if coherence_score < 0.6:
+            issues.append("上下文衔接度较低，建议增加过渡段落")
+
+        return coherence_score, issues
+
+    def _score_ai_feeling(self, text: str) -> Tuple[float, List[str]]:
+        """AI感检测评分（V2.0新增维度）
+
+        维度说明：检测文本中AI生成的痕迹，分数越高表示越自然。
+        权重：5%（最低权重，因为该维度不确定性较高）
+
+        评分逻辑：
+        - 复用已有naturalness评分的核心逻辑
+        - 返回评分和检测到的AI痕迹问题
+
+        Returns:
+            Tuple[float, List[str]]: (评分0.4-1.0, 问题列表)
+        """
+        issues = []
+
+        # 复用自然度评分的核心检测
+        naturalness = self._score_naturalness(text)
+
+        # 额外检测：过度正式
+        formal_phrases = ['值得注意的是', '综上所述', '总而言之', '不言而喻', '毋庸置疑']
+        formal_count = sum(1 for p in formal_phrases if p in text)
+        if formal_count >= 2:
+            issues.append(f"存在{formal_count}处过度正式表达")
+
+        # 额外检测：三段式结构
+        if re.search(r'首先[^。]+。其次[^。]+。最后[^。]+。', text):
+            issues.append("检测到典型的三段式AI结构")
+
+        # 额外检测：过度排比
+        parallel_count = len(re.findall(r'[^。？！]{4,12}，[^。？！]{4,12}，[^。？！]{4,12}[。？！]', text))
+        if parallel_count >= 3:
+            issues.append(f"排比结构过多({parallel_count}处)")
+
+        score = naturalness.score
+        # 每个额外问题扣0.05
+        score = max(0.4, score - len(issues) * 0.05)
+
+        return score, issues
+
     def _score_naturalness(self, text: str) -> NaturalnessScore:
-        """自然度评分"""
+        """自然度评分（V2.0独立方法 - 被validate_with_weights和_score_ai_feeling共同调用）
+
+        检测文本中的AI生成痕迹，返回NaturalnessScore对象。
+        V6.0修复：从_score_ai_feeling内部错误缩进中提取为独立方法。
+
+        Args:
+            text: 待检测的文本
+
+        Returns:
+            NaturalnessScore: 包含评分、AI概率、公式化程度等详细信息
+        """
         detected_patterns = []
         pattern_scores = {}
 
@@ -1126,20 +1418,20 @@ class QualityValidatorPlugin(ValidatorPlugin):
             score = 0.4
 
         # 生成问题列表
-        issues = []
+        issues_found = []
         if ai_probability > 0.4:
-            issues.append(f"AI生成概率较高: {ai_probability:.1%}")
+            issues_found.append(f"AI生成概率较高: {ai_probability:.1%}")
         if formulaic_score > 0.6:
-            issues.append("公式化程度较高")
+            issues_found.append("公式化程度较高")
         if cliche_score > 0.05:
-            issues.append("陈词滥调较多")
+            issues_found.append("陈词滥调较多")
 
         return NaturalnessScore(
             score=score,
             ai_probability=ai_probability,
             formulaic_score=formulaic_score,
             cliche_score=cliche_score,
-            issues_found=issues
+            issues_found=issues_found
         )
 
     def _generate_suggestions(
@@ -1180,6 +1472,56 @@ class QualityValidatorPlugin(ValidatorPlugin):
         # 自然度问题
         if naturalness.score < 0.7:
             suggestions.append("AI痕迹检测: 建议增加口语化表达和个性化细节")
+
+        return suggestions[:5]
+
+    def _generate_suggestions_v2(
+        self,
+        word_count_score: WordCountScore,
+        outline_compliance: OutlineComplianceScore,
+        scores: ValidationScores
+    ) -> List[str]:
+        """生成改进建议（V2.0版本 - 9维度）"""
+        suggestions = []
+
+        # 世界观问题
+        if scores.worldview_score < 0.7:
+            suggestions.append(f"世界观不一致(评分{scores.worldview_score:.2f}): 请检查世界观设定是否准确")
+
+        # 人设问题
+        if scores.character_score < 0.7:
+            suggestions.append(f"人设不符合(评分{scores.character_score:.2f}): 请检查人物对话是否符合性格特征")
+
+        # 风格问题
+        if scores.style_score < 0.7:
+            suggestions.append(f"风格不一致(评分{scores.style_score:.2f}): 请调整语言表达与风格档案保持一致")
+
+        # 大纲符合性
+        if outline_compliance.score < 0.8 and outline_compliance.missing_plot_points:
+            suggestions.append(f"大纲符合度低: 缺失情节: {'、'.join(outline_compliance.missing_plot_points[:3])}")
+
+        # 知识库引用
+        if scores.knowledge_reference_score < 0.6:
+            suggestions.append(f"知识库引用不足(评分{scores.knowledge_reference_score:.2f}): 建议增加专业知识细节")
+
+        # 写作技巧
+        if scores.writing_technique_score < 0.6:
+            suggestions.append(f"写作技巧不足(评分{scores.writing_technique_score:.2f}): 建议增加对话、感官描写和修辞手法")
+
+        # 字数问题
+        if word_count_score.score < 0.8:
+            if word_count_score.difference > 0:
+                suggestions.append(f"字数超标(超出{word_count_score.difference}字): 请精简内容")
+            else:
+                suggestions.append(f"字数不足(缺少{abs(word_count_score.difference)}字): 请增加细节描写")
+
+        # 上下文衔接
+        if scores.context_coherence_score < 0.6:
+            suggestions.append(f"上下文衔接不足(评分{scores.context_coherence_score:.2f}): 建议增加过渡段落")
+
+        # AI感
+        if scores.ai_feeling_score < 0.6:
+            suggestions.append("AI痕迹明显: 建议增加口语化表达和个性化细节")
 
         return suggestions[:5]
 

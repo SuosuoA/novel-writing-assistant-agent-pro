@@ -138,7 +138,8 @@ class AIServiceRouterPlugin(AIPlugin):
         """
         try:
             self._context = context
-            self._state = PluginState.LOADING
+            # V1.49.35修复：核心PluginState无LOADING，使用LOADED
+            self._state = PluginState.LOADED
             
             # 获取EventBus
             if context.event_bus:

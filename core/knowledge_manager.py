@@ -338,6 +338,8 @@ class KnowledgeManager:
             "xuanhuan", "xianxia", "urban", "romance", "history",
             "scifi", "suspense", "military", "wuxia", "game",
             "fantasy", "lingyi", "tongren", "general",
+            # V5.3新增：恐怖/推理/体育题材
+            "horror", "mystery", "sports",
             # 特殊分类
             "writing_technique", "philosophy"
         ]
@@ -346,12 +348,14 @@ class KnowledgeManager:
     
     def _load_all_knowledge(self):
         """加载所有知识库到缓存"""
-        # V1.19.0修复：扩展支持16种小说分类
+        # V1.19.0修复：扩展支持19种小说分类
         categories = [
             # 小说类型分类
             "xuanhuan", "xianxia", "urban", "romance", "history",
             "scifi", "suspense", "military", "wuxia", "game",
             "fantasy", "lingyi", "tongren", "general",
+            # V5.3新增：恐怖/推理/体育题材
+            "horror", "mystery", "sports",
             # 特殊分类
             "writing_technique", "philosophy"
         ]
@@ -367,7 +371,7 @@ class KnowledgeManager:
             for json_file in category_dir.glob("*.json"):
                 domain = json_file.stem
                 try:
-                    with open(json_file, "r", encoding="utf-8") as f:
+                    with open(json_file, "r", encoding="utf-8-sig") as f:
                         data = json.load(f)
                     
                     # 支持两种JSON格式：
@@ -503,6 +507,8 @@ class KnowledgeManager:
             
             # 生成知识点ID
             if knowledge_id is None:
+                if category not in self._counters:
+                    self._counters[category] = {}
                 if domain not in self._counters[category]:
                     self._counters[category][domain] = 0
                 self._counters[category][domain] += 1
@@ -854,7 +860,7 @@ class KnowledgeManager:
                 result.errors.append({"file": str(json_path), "error": "文件不存在"})
                 return result
             
-            with open(json_path, "r", encoding="utf-8") as f:
+            with open(json_path, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             
             # 获取分类和领域

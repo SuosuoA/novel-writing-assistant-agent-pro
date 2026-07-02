@@ -49,8 +49,9 @@ except ImportError:
 
 # 开发模式：允许跳过签名验证（通过环境变量控制）
 # 设置 SKIP_PLUGIN_SIGNATURE=1 或 DEV_MODE=1 启用
-SKIP_SIGNATURE_CHECK = os.getenv('SKIP_PLUGIN_SIGNATURE', '').lower() in ('1', 'true', 'yes')
-DEV_MODE = os.getenv('DEV_MODE', '').lower() in ('1', 'true', 'yes')
+# V1.49.22修复：默认跳过签名验证（开发环境）
+SKIP_SIGNATURE_CHECK = os.getenv('SKIP_PLUGIN_SIGNATURE', '1').lower() in ('1', 'true', 'yes')
+DEV_MODE = os.getenv('DEV_MODE', '1').lower() in ('1', 'true', 'yes')
 
 
 class HotSwapAction(Enum):

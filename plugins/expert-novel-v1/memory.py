@@ -23,10 +23,33 @@ from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass
 
+# V1.49.6修复：支持三种导入方式
 try:
     from .models import ExpertEvaluation, OptimizationSuggestion, UserFeedback
 except ImportError:
-    from models import ExpertEvaluation, OptimizationSuggestion, UserFeedback
+    import sys
+    
+    # 从sys.modules获取（plugin.py已注册）
+    def _get_module_classes(module_name, class_names):
+        possible_ids = [
+            f"expert_novel_v1_{module_name}",
+            f"plugins.expert-novel-v1.{module_name}"
+        ]
+        
+        for module_id in possible_ids:
+            if module_id in sys.modules:
+                module = sys.modules[module_id]
+                return {cls: getattr(module, cls) for cls in class_names if hasattr(module, cls)}
+        
+        return None
+    
+    models_classes = _get_module_classes('models', ['ExpertEvaluation', 'OptimizationSuggestion', 'UserFeedback'])
+    if models_classes:
+        ExpertEvaluation = models_classes.get('ExpertEvaluation')
+        OptimizationSuggestion = models_classes.get('OptimizationSuggestion')
+        UserFeedback = models_classes.get('UserFeedback')
+    else:
+        raise ImportError(f"无法导入models模块，请确保plugin.py已正确初始化")
 
 logger = logging.getLogger(__name__)
 

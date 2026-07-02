@@ -479,9 +479,11 @@ class QuickCreationPlugin(BasePlugin):
             QuickCreationTimeoutError: 调用超时
             QuickCreationAPIError: API调用失败
         """
+        # V2.1修复：残留门卫——实际调用走 _do_api_call → AIServiceManager 统一入口，
+        # 并不使用 api_client；此多余检查曾让快捷创作在ai_service未注册时整体不可用。
         if not self.api_client:
-            raise QuickCreationAPIError("API客户端未设置，请先调用set_api_client()")
-        
+            logger.debug("[QuickCreator] api_client 未设置（不影响，实际走AIServiceManager）")
+
         try:
             # V1.1新增：使用concurrent.futures实现强制超时
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
@@ -1320,9 +1322,16 @@ class QuickCreationPlugin(BasePlugin):
         """
         if self._validator is None:
             try:
-                from plugins.quality_validator_v1.plugin import QualityValidatorPlugin
-                if self._context and hasattr(self._context, 'service_locator'):
-                    self._validator = self._context.service_locator.get_service("quality_validator")
+                # V2.1修复：旧下划线导入永远失败→评分器恒不可用。
+                # 改为服务定位器→插件注册表两级获取。
+                if self._context and hasattr(self._context, 'service_locator') and self._context.service_locator:
+                    try:
+                        self._validator = self._context.service_locator.get_service("quality_validator")
+                    except Exception:
+                        self._validator = None
+                if self._validator is None:
+                    from core.plugin_registry import get_plugin_registry
+                    self._validator = get_plugin_registry().get_plugin("quality-validator-v1")
                 if self._validator is None:
                     logger.debug("[QuickCreator] 评分器服务不可用")
             except Exception as e:

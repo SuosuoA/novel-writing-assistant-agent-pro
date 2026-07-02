@@ -64,16 +64,29 @@ except ImportError:
 
 @dataclass
 class OutlineChapter:
-    """章节数据结构"""
+    """章节数据结构
+    
+    核心字段：
+    - chapter_number: 章节序号
+    - title: 章节标题
+    - estimated_words: 预期字数
+    - summary: 故事梗概
+    - characters: 出场人物（主要人物名单）
+    - supporting_characters: 配角人数
+    - plot_points: 关键情节（核心内容）
+    - keywords: 关键词
+    """
     title: str
     level: int  # 标题级别(1-6)
     chapter_number: int  # 章节序号
     content: str
     estimated_words: int
     keywords: List[str] = field(default_factory=list)
-    characters: List[str] = field(default_factory=list)
-    plot_points: List[str] = field(default_factory=list)
-    summary: str = ""
+    characters: List[str] = field(default_factory=list)  # 主要人物名单
+    supporting_characters: int = 0  # 配角人数
+    plot_points: List[str] = field(default_factory=list)  # 关键情节
+    summary: str = ""  # 故事梗概
+    key_content: str = ""  # 核心内容
     raw_metadata: Dict = field(default_factory=dict)
 
 
@@ -294,6 +307,7 @@ class OutlineParserPlugin(AnalyzerPlugin):
             "success": True,
             "metadata": asdict(metadata),
             "chapters": [asdict(chapter) for chapter in chapters],
+            "volumes": [],  # 【修复V3.3】卷结构（初始为空，通过add_volume添加）
             "total_chapters": len(chapters),
             "total_estimated_words": sum(ch.estimated_words for ch in chapters),
             "parsed_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -578,7 +592,8 @@ class OutlineParserPlugin(AnalyzerPlugin):
                 match = re.match(pattern, line_stripped, re.UNICODE)
                 if match:
                     chapter_number_str = match.group(1)
-                    chapter_title = match.group(2) if len(match.groups()) > 1 else ""
+                    # 提取纯标题（不包含章节前缀）
+                    chapter_title = match.group(2).strip() if len(match.groups()) > 1 else ""
                     
                     chapter_number = self._parse_chapter_number(chapter_number_str)
                     level = self._determine_heading_level(line_stripped)
@@ -586,7 +601,8 @@ class OutlineParserPlugin(AnalyzerPlugin):
                     position = sum(len(l) + 1 for l in lines[:line_num])
                     
                     headers.append({
-                        'title': line_stripped,
+                        'title': chapter_title,  # 使用纯标题，不包含章节前缀
+                        'full_title': line_stripped,  # 保留完整标题供参考
                         'chapter_number': chapter_number,
                         'level': level,
                         'pattern_type': pattern_type,
@@ -636,7 +652,11 @@ class OutlineParserPlugin(AnalyzerPlugin):
         characters = self._extract_characters_v3(content)
         plot_points = self._extract_plot_points_v3(content)
         summary = chapter_metadata.get('summary', '')
+        key_content = chapter_metadata.get('key_content', '')
         keywords = self._extract_keywords_v3(content)
+        
+        # 计算配角人数（出场人物中排除主要人物）
+        supporting_count = max(0, len(characters) - 1)  # 假设第一个是主角
         
         return OutlineChapter(
             title=clean_title,
@@ -646,23 +666,111 @@ class OutlineParserPlugin(AnalyzerPlugin):
             estimated_words=estimated_words,
             keywords=keywords,
             characters=characters,
+            supporting_characters=supporting_count,
             plot_points=plot_points,
             summary=summary,
+            key_content=key_content,
             raw_metadata=chapter_metadata
         )
 
     def _extract_chapter_metadata(self, content: str) -> Dict:
-        """提取章节元数据"""
+        """提取章节元数据
+        
+        提取字段：
+        - estimated_words: 预计字数
+        - summary: 章节梗概/故事概要
+        - main_characters: 主要人物（区分主配）
+        - supporting_characters: 配角人数
+        - key_content: 关键内容/核心情节
+        """
         metadata = {}
         lines = content.split('\n')
         
-        for line in lines:
+        # 状态标记
+        in_section = None  # 当前所在段落
+        
+        for i, line in enumerate(lines):
             line_stripped = line.strip()
+            if not line_stripped:
+                continue
             
+            # 1. 提取预计字数
             if '预计字数' in line_stripped or '**预计字数**' in line_stripped:
                 match = re.search(r'[:：]\s*(\d+)\s*字', line_stripped)
                 if match:
                     metadata['estimated_words'] = int(match.group(1))
+                continue
+            
+            # 2. 提取章节梗概（多种格式）
+            if '**章节梗概**' in line_stripped or '**故事梗概**' in line_stripped or '**梗概**' in line_stripped:
+                in_section = 'summary'
+                # 检查是否同行有内容
+                if '：' in line_stripped or ':' in line_stripped:
+                    after_colon = re.split(r'[:：]', line_stripped, 1)
+                    if len(after_colon) > 1 and after_colon[1].strip():
+                        metadata['summary'] = after_colon[1].strip()
+                        in_section = None
+                continue
+            
+            # 3. 提取关键内容/核心情节
+            if '**关键内容**' in line_stripped or '**核心情节**' in line_stripped or '**主要内容**' in line_stripped:
+                in_section = 'key_content'
+                # 检查是否同行有内容
+                if '：' in line_stripped or ':' in line_stripped:
+                    after_colon = re.split(r'[:：]', line_stripped, 1)
+                    if len(after_colon) > 1 and after_colon[1].strip():
+                        metadata['key_content'] = after_colon[1].strip()
+                        in_section = None
+                continue
+            
+            # 4. 检测人物标记 - 从同行提取
+            if '**登场人物**' in line_stripped or '**出场人物**' in line_stripped:
+                if '：' in line_stripped or ':' in line_stripped:
+                    after_colon = re.split(r'[:：]', line_stripped, 1)
+                    if len(after_colon) > 1 and after_colon[1].strip():
+                        char_text = after_colon[1].strip()
+                        # 简单计数，实际人物提取在 _extract_characters_v3 中
+                        char_list = re.split(r'[、，,和\s]+', char_text)
+                        valid_chars = [c.strip() for c in char_list if 2 <= len(c.strip()) <= 4]
+                        metadata['character_preview'] = '、'.join(valid_chars[:5])
+                continue
+            
+            # 5. 检查是否进入其他标记段落（终止当前段落）
+            if line_stripped.startswith('**') and line_stripped.endswith('**'):
+                if in_section and in_section in ['summary', 'key_content']:
+                    in_section = None
+                continue
+            
+            # 6. 收集段落内容
+            if in_section == 'summary' and not line_stripped.startswith('-'):
+                # 梗概通常是多行文本
+                if 'summary' not in metadata:
+                    metadata['summary'] = line_stripped
+                else:
+                    metadata['summary'] += ' ' + line_stripped
+                continue
+            
+            if in_section == 'key_content':
+                # 关键内容通常是列表项或文本
+                if line_stripped.startswith('-') or line_stripped.startswith('*'):
+                    clean_point = re.sub(r'^[-*]\s*', '', line_stripped).strip()
+                    if 'key_content' not in metadata:
+                        metadata['key_content'] = clean_point
+                    else:
+                        metadata['key_content'] += '；' + clean_point
+                elif not line_stripped.startswith('**'):
+                    # 也支持纯文本形式
+                    if 'key_content' not in metadata:
+                        metadata['key_content'] = line_stripped
+                    else:
+                        metadata['key_content'] += ' ' + line_stripped
+                continue
+        
+        # 7. 清理摘要文本
+        if 'summary' in metadata:
+            metadata['summary'] = metadata['summary'].strip()
+            if len(metadata['summary']) > 500:
+                metadata['summary'] = metadata['summary'][:500] + '...'
         
         return metadata
 
@@ -675,25 +783,43 @@ class OutlineParserPlugin(AnalyzerPlugin):
         for line in lines:
             line_stripped = line.strip()
             
+            # 检测人物段落开始
             if '**登场人物**' in line_stripped or '**出场人物**' in line_stripped:
                 in_character_section = True
+                # 检查是否同行有内容（如 "**登场人物**：林风、李雪"）
+                if '：' in line_stripped or ':' in line_stripped:
+                    after_colon = re.split(r'[:：]', line_stripped, 1)
+                    if len(after_colon) > 1 and after_colon[1].strip():
+                        # 提取同行的人物
+                        char_text = after_colon[1].strip()
+                        char_list = re.split(r'[、，,和\s]+', char_text)
+                        for char in char_list:
+                            char_clean = char.strip()
+                            if char_clean and 2 <= len(char_clean) <= 4:
+                                if char_clean not in ['电话', '手机', '消息', '通知', '声音', '主要', '配角']:
+                                    if char_clean not in characters:
+                                        characters.append(char_clean)
                 continue
             
+            # 检测人物段落结束（遇到其他**标记）
             elif in_character_section and line_stripped.startswith('**'):
                 if not any(keyword in line_stripped for keyword in 
                           ['**关键转折**', '**关键情节**', '**语言风格**', '**关键词**']):
                     break
             
+            # 提取人物列表（下一行内容）
             elif in_character_section and line_stripped:
+                # 去除项目符号
                 clean_line = re.sub(r'^[-*]\s*', '', line_stripped)
                 clean_line = re.sub(r'^[**]*\w+[**]*[:：]\s*', '', clean_line)
                 
-                if clean_line and '等' not in clean_line and ':' not in clean_line:
-                    chars = re.split(r'[、，和]', clean_line)
-                    for char in chars:
+                if clean_line and '等' not in clean_line:
+                    # 按分隔符分割人物
+                    char_list = re.split(r'[、，,和\s]+', clean_line)
+                    for char in char_list:
                         char_clean = char.strip()
-                        if char_clean and len(char_clean) >= 2 and len(char_clean) <= 4:
-                            if char_clean not in ['电话', '手机', '消息', '通知', '声音']:
+                        if char_clean and 2 <= len(char_clean) <= 4:
+                            if char_clean not in ['电话', '手机', '消息', '通知', '声音', '主要', '配角']:
                                 if char_clean not in characters:
                                     characters.append(char_clean)
         
@@ -915,6 +1041,424 @@ class OutlineParserPlugin(AnalyzerPlugin):
         """获取支持的分析类型"""
         return ["outline", "structure", "chapters"]
 
+    # ========================================================================
+    # 章节管理操作（增删改）
+    # ========================================================================
+    
+    def add_volume(self, outline_data: Dict, volume_name: str, 
+                   volume_description: str = "",
+                   selected_chapters: Optional[List[int]] = None) -> Dict[str, Any]:
+        """添加卷
+        
+        Args:
+            outline_data: 现有大纲数据
+            volume_name: 卷名称
+            volume_description: 卷描述
+            selected_chapters: 选中的章节索引列表（可选）
+            
+        Returns:
+            更新后的大纲数据
+        """
+        try:
+            volumes = outline_data.get('volumes', [])
+            chapters = outline_data.get('chapters', [])
+            
+            # 计算卷号
+            volume_number = len(volumes) + 1
+            
+            # 确定卷包含的章节
+            volume_chapters = []
+            if selected_chapters:
+                # 使用选中的章节索引
+                for idx in selected_chapters:
+                    if 0 <= idx < len(chapters):
+                        volume_chapters.append(idx)
+            
+            # 创建新卷
+            new_volume = {
+                "volume_number": volume_number,
+                "volume_name": volume_name or f"第{volume_number}卷",
+                "description": volume_description,
+                "chapters": volume_chapters,  # 存储章节索引列表
+                "chapter_count": len(volume_chapters),
+                "created_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            volumes.append(new_volume)
+            outline_data['volumes'] = volumes
+            outline_data['modified_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            self._logger.info(f"添加卷成功: {volume_name}（包含{len(volume_chapters)}章）")
+            
+            return {
+                "success": True,
+                "outline_data": outline_data,
+                "volume": new_volume,
+                "message": f"卷 '{volume_name}' 添加成功"
+            }
+            
+        except Exception as e:
+            self._logger.error(f"添加卷失败: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def delete_volume(self, outline_data: Dict, volume_index: int, 
+                      keep_chapters: bool = True) -> Dict[str, Any]:
+        """删除卷
+        
+        Args:
+            outline_data: 现有大纲数据
+            volume_index: 卷索引（0开始）
+            keep_chapters: 是否保留章节（True则章节变为未分类）
+            
+        Returns:
+            更新后的大纲数据
+        """
+        try:
+            volumes = outline_data.get('volumes', [])
+            
+            if volume_index < 0 or volume_index >= len(volumes):
+                return {"success": False, "error": f"无效的卷索引: {volume_index}"}
+            
+            # 获取被删除的卷信息
+            deleted_volume = volumes.pop(volume_index)
+            deleted_name = deleted_volume.get('volume_name', f'第{volume_index+1}卷')
+            
+            # 重新编号剩余卷
+            for i, vol in enumerate(volumes):
+                vol['volume_number'] = i + 1
+            
+            outline_data['volumes'] = volumes
+            outline_data['modified_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            self._logger.info(f"删除卷成功: {deleted_name}")
+            
+            return {
+                "success": True,
+                "outline_data": outline_data,
+                "deleted_volume": deleted_volume,
+                "message": f"卷 '{deleted_name}' 删除成功"
+            }
+            
+        except Exception as e:
+            self._logger.error(f"删除卷失败: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def move_chapter_to_volume(self, outline_data: Dict, chapter_index: int,
+                               volume_index: int) -> Dict[str, Any]:
+        """将章节移入卷
+        
+        Args:
+            outline_data: 现有大纲数据
+            chapter_index: 章节索引（0开始）
+            volume_index: 目标卷索引（0开始，-1表示移出所有卷）
+            
+        Returns:
+            更新后的大纲数据
+        """
+        try:
+            chapters = outline_data.get('chapters', [])
+            volumes = outline_data.get('volumes', [])
+            
+            if chapter_index < 0 or chapter_index >= len(chapters):
+                return {"success": False, "error": f"无效的章节索引: {chapter_index}"}
+            
+            chapter_title = chapters[chapter_index].get('title', f'第{chapter_index+1}章')
+            
+            # 先从所有卷中移除该章节
+            for vol in volumes:
+                vol_chapters = vol.get('chapters', [])
+                if chapter_index in vol_chapters:
+                    vol_chapters.remove(chapter_index)
+                    vol['chapter_count'] = len(vol_chapters)
+            
+            # 如果目标卷有效（>=0），添加到目标卷
+            if volume_index >= 0 and volume_index < len(volumes):
+                target_vol = volumes[volume_index]
+                vol_chapters = target_vol.get('chapters', [])
+                if chapter_index not in vol_chapters:
+                    vol_chapters.append(chapter_index)
+                    # 保持有序
+                    target_vol['chapters'] = sorted(vol_chapters)
+                    target_vol['chapter_count'] = len(vol_chapters)
+                    vol_name = target_vol.get('volume_name', f'第{volume_index+1}卷')
+                    message = f"章节 '{chapter_title}' 已移入卷 '{vol_name}'"
+                else:
+                    message = f"章节 '{chapter_title}' 已在目标卷中"
+            else:
+                message = f"章节 '{chapter_title}' 已移出所有卷"
+            
+            outline_data['volumes'] = volumes
+            outline_data['modified_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            self._logger.info(message)
+            
+            return {
+                "success": True,
+                "outline_data": outline_data,
+                "message": message
+            }
+            
+        except Exception as e:
+            self._logger.error(f"移动章节失败: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def update_volume(self, outline_data: Dict, volume_index: int,
+                      volume_data: Dict) -> Dict[str, Any]:
+        """编辑卷信息
+        
+        Args:
+            outline_data: 现有大纲数据
+            volume_index: 卷索引（0开始）
+            volume_data: 更新的卷数据（volume_name, description等）
+            
+        Returns:
+            更新后的大纲数据
+        """
+        try:
+            volumes = outline_data.get('volumes', [])
+            
+            if volume_index < 0 or volume_index >= len(volumes):
+                return {"success": False, "error": f"无效的卷索引: {volume_index}"}
+            
+            volume = volumes[volume_index]
+            old_name = volume.get('volume_name', f'第{volume_index+1}卷')
+            
+            # 更新卷信息
+            if 'volume_name' in volume_data:
+                volume['volume_name'] = volume_data['volume_name']
+            if 'description' in volume_data:
+                volume['description'] = volume_data['description']
+            
+            outline_data['volumes'] = volumes
+            outline_data['modified_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            new_name = volume.get('volume_name', old_name)
+            self._logger.info(f"编辑卷成功: {old_name} -> {new_name}")
+            
+            return {
+                "success": True,
+                "outline_data": outline_data,
+                "volume": volume,
+                "message": f"卷 '{new_name}' 更新成功"
+            }
+            
+        except Exception as e:
+            self._logger.error(f"编辑卷失败: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def add_chapter(self, outline_data: Dict, chapter_data: Dict,
+                    volume_index: Optional[int] = None,
+                    after_chapter: Optional[int] = None) -> Dict[str, Any]:
+        """添加章节
+        
+        Args:
+            outline_data: 现有大纲数据
+            chapter_data: 章节数据（包含title, summary, characters, estimated_words等）
+            volume_index: 卷索引（可选，None表示添加到最后）
+            after_chapter: 在某章节后插入（可选，None表示添加到末尾）
+            
+        Returns:
+            更新后的大纲数据
+        """
+        try:
+            chapters = outline_data.get('chapters', [])
+            
+            # 创建新章节
+            new_chapter = {
+                "title": chapter_data.get('title', '未命名章节'),
+                "level": chapter_data.get('level', 3),
+                "chapter_number": len(chapters) + 1,
+                "content": chapter_data.get('content', ''),
+                "estimated_words": chapter_data.get('estimated_words', 2000),
+                "keywords": chapter_data.get('keywords', []),
+                "characters": chapter_data.get('characters', []),
+                "supporting_characters": chapter_data.get('supporting_characters', 0),
+                "plot_points": chapter_data.get('plot_points', []),
+                "summary": chapter_data.get('summary', ''),
+                "key_content": chapter_data.get('key_content', ''),
+                "raw_metadata": {}
+            }
+            
+            # 确定插入位置
+            if after_chapter is not None and 0 <= after_chapter < len(chapters):
+                chapters.insert(after_chapter + 1, new_chapter)
+            else:
+                chapters.append(new_chapter)
+            
+            # 重新编号所有章节
+            for i, chapter in enumerate(chapters):
+                chapter['chapter_number'] = i + 1
+            
+            outline_data['chapters'] = chapters
+            outline_data['total_chapters'] = len(chapters)
+            outline_data['modified_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            self._logger.info(f"添加章节成功: {new_chapter['title']}")
+            
+            return {
+                "success": True,
+                "outline_data": outline_data,
+                "chapter": new_chapter,
+                "chapter_index": len(chapters) - 1,
+                "message": f"章节 '{new_chapter['title']}' 添加成功"
+            }
+            
+        except Exception as e:
+            self._logger.error(f"添加章节失败: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def update_chapter(self, outline_data: Dict, chapter_index: int,
+                       chapter_data: Dict) -> Dict[str, Any]:
+        """编辑章节
+        
+        Args:
+            outline_data: 现有大纲数据
+            chapter_index: 章节索引（0开始）
+            chapter_data: 更新的章节数据
+            
+        Returns:
+            更新后的大纲数据
+        """
+        try:
+            chapters = outline_data.get('chapters', [])
+            
+            if chapter_index < 0 or chapter_index >= len(chapters):
+                return {"success": False, "error": f"无效的章节索引: {chapter_index}"}
+            
+            # 更新章节（保留未提供的字段）
+            chapter = chapters[chapter_index]
+            for key, value in chapter_data.items():
+                if value is not None:
+                    chapter[key] = value
+            
+            outline_data['chapters'] = chapters
+            outline_data['modified_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            self._logger.info(f"编辑章节成功: 第{chapter_index + 1}章")
+            
+            return {
+                "success": True,
+                "outline_data": outline_data,
+                "chapter": chapter,
+                "message": f"章节 '{chapter.get('title', '')}' 更新成功"
+            }
+            
+        except Exception as e:
+            self._logger.error(f"编辑章节失败: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def delete_chapter(self, outline_data: Dict, chapter_index: int) -> Dict[str, Any]:
+        """删除章节
+        
+        Args:
+            outline_data: 现有大纲数据
+            chapter_index: 章节索引（0开始）
+            
+        Returns:
+            更新后的大纲数据
+        """
+        try:
+            chapters = outline_data.get('chapters', [])
+            
+            if chapter_index < 0 or chapter_index >= len(chapters):
+                return {"success": False, "error": f"无效的章节索引: {chapter_index}"}
+            
+            # 删除章节
+            deleted_chapter = chapters.pop(chapter_index)
+            
+            # 重新编号所有章节
+            for i, chapter in enumerate(chapters):
+                chapter['chapter_number'] = i + 1
+            
+            outline_data['chapters'] = chapters
+            outline_data['total_chapters'] = len(chapters)
+            outline_data['modified_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            self._logger.info(f"删除章节成功: {deleted_chapter.get('title', '')}")
+            
+            return {
+                "success": True,
+                "outline_data": outline_data,
+                "deleted_chapter": deleted_chapter,
+                "message": f"章节 '{deleted_chapter.get('title', '')}' 删除成功"
+            }
+            
+        except Exception as e:
+            self._logger.error(f"删除章节失败: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def reorder_chapters(self, outline_data: Dict, from_index: int, to_index: int) -> Dict[str, Any]:
+        """重新排序章节（拖拽排序）
+        
+        【架构修复V3.3】业务逻辑在插件层实现，GUI只负责事件处理
+        
+        Args:
+            outline_data: 现有大纲数据
+            from_index: 源章节索引（0开始）
+            to_index: 目标章节索引（0开始）
+            
+        Returns:
+            更新后的大纲数据
+        """
+        try:
+            chapters = outline_data.get('chapters', [])
+            volumes = outline_data.get('volumes', [])
+            
+            if from_index < 0 or from_index >= len(chapters):
+                return {"success": False, "error": f"无效的源章节索引: {from_index}"}
+            
+            if to_index < 0 or to_index >= len(chapters):
+                return {"success": False, "error": f"无效的目标章节索引: {to_index}"}
+            
+            if from_index == to_index:
+                return {"success": True, "outline_data": outline_data, "message": "位置未变化"}
+            
+            # 移动章节
+            chapter = chapters.pop(from_index)
+            chapters.insert(to_index, chapter)
+            
+            # 重新编号所有章节
+            for i, ch in enumerate(chapters):
+                ch['chapter_number'] = i + 1
+            
+            outline_data['chapters'] = chapters
+            outline_data['modified_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # 更新卷数据中的章节索引
+            if volumes:
+                for vol in volumes:
+                    vol_chapters = vol.get('chapters', [])
+                    # 更新章节索引映射
+                    new_vol_chapters = []
+                    for old_idx in vol_chapters:
+                        if old_idx == from_index:
+                            new_vol_chapters.append(to_index)
+                        elif from_index < to_index:
+                            # 向后移动：from_index和to_index之间的章节索引减1
+                            if from_index < old_idx <= to_index:
+                                new_vol_chapters.append(old_idx - 1)
+                            else:
+                                new_vol_chapters.append(old_idx)
+                        else:
+                            # 向前移动：to_index和from_index之间的章节索引加1
+                            if to_index <= old_idx < from_index:
+                                new_vol_chapters.append(old_idx + 1)
+                            else:
+                                new_vol_chapters.append(old_idx)
+                    vol['chapters'] = sorted(new_vol_chapters)
+            
+            self._logger.info(f"章节排序成功: {from_index} -> {to_index}")
+            
+            return {
+                "success": True,
+                "outline_data": outline_data,
+                "message": f"章节移动成功: 位置{from_index + 1} -> {to_index + 1}"
+            }
+            
+        except Exception as e:
+            self._logger.error(f"章节排序失败: {e}")
+            return {"success": False, "error": str(e)}
+    
     def shutdown(self) -> bool:
         """优雅关闭插件
         

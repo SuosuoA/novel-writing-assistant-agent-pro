@@ -107,7 +107,8 @@ class WorldviewParserAdapter(AgentAdapter):
         支持格式：
         1. 字典列表格式：[{"name": "...", "category": "...", "description": "..."}]
         2. JSON字符串格式
-        3. Markdown格式
+        3. Markdown/TXT原始文本格式（委托给插件完整解析器）
+        4. 文件路径格式
 
         Args:
             worldview_content: 世界观内容（字符串、列表或字典）
@@ -130,7 +131,7 @@ class WorldviewParserAdapter(AgentAdapter):
 
             # 格式2：字符串
             elif isinstance(worldview_content, str):
-                # 尝试JSON解析
+                # 先尝试JSON解析
                 try:
                     parsed_data = json.loads(worldview_content)
                     if isinstance(parsed_data, list):
@@ -138,12 +139,21 @@ class WorldviewParserAdapter(AgentAdapter):
                     elif isinstance(parsed_data, dict) and 'elements' in parsed_data:
                         entries = self._parse_list_format(parsed_data['elements'])
                 except (json.JSONDecodeError, TypeError):
-                    # 不是JSON，尝试Markdown解析
-                    entries = self._parse_markdown_format(worldview_content)
+                    # 不是JSON — 检查是否是文件路径
+                    import os
+                    if os.path.isfile(worldview_content):
+                        entries = self._parse_file_to_display(worldview_content)
+                    else:
+                        # 【V1.49.43修复】原始文本委托给插件完整解析器
+                        # 不再使用简单的Markdown分块解析，而是调用插件的_try_markdown_format等完整方法
+                        entries = self._parse_raw_text_with_plugin(worldview_content)
 
             # 格式3：字典（带elements字段）
             elif isinstance(worldview_content, dict):
                 if 'elements' in worldview_content:
+                    entries = self._parse_list_format(worldview_content['elements'])
+                elif 'success' in worldview_content and 'elements' in worldview_content:
+                    # 插件analyze()返回的结果字典
                     entries = self._parse_list_format(worldview_content['elements'])
 
             return entries
@@ -152,8 +162,52 @@ class WorldviewParserAdapter(AgentAdapter):
             logger.error(f"解析世界观内容失败: {e}")
             return []
 
+    def _parse_file_to_display(self, file_path: str) -> List[Dict[str, Any]]:
+        """解析文件并转换为显示格式"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return self._parse_raw_text_with_plugin(content)
+        except Exception as e:
+            logger.error(f"读取世界观文件失败: {e}")
+            return []
+
+    def _parse_raw_text_with_plugin(self, content: str) -> List[Dict[str, Any]]:
+        """
+        【V1.49.43新增】委托给插件的完整解析引擎处理原始文本
+        
+        使用插件的多格式解析链：Markdown → 括号格式 → 列表格式 → 纯文本
+        确保与直接调用analyze()获得一致的完整结果。
+        """
+        if not self._initialized or not self._plugin_instance:
+            logger.warning("插件未初始化，降级到简单解析")
+            return self._parse_markdown_format(content)
+
+        try:
+            # 直接调用插件的_parse_content方法，走完整解析链
+            result = self._plugin_instance._parse_content(content, {})
+            
+            if result.get('success') and result.get('elements'):
+                elements = result['elements']
+                logger.info(f"插件完整解析完成: {len(elements)} 个元素")
+                return self._parse_list_format(elements)
+            else:
+                logger.warning(f"插件解析返回空结果: {result.get('error', '')}")
+                return self._parse_markdown_format(content)
+                
+        except Exception as e:
+            logger.error(f"插件解析失败，降级到简单解析: {e}")
+            return self._parse_markdown_format(content)
+
     def _parse_list_format(self, data: List[Dict]) -> List[Dict[str, Any]]:
-        """解析列表格式数据"""
+        """解析列表格式数据（支持插件analyze返回的多种字段格式）
+        
+        兼容的字段映射：
+        - name/title → name
+        - category/type → category  
+        - description/content → description
+        - elements（原始元素文本）/ attributes（属性字典）→ elements（显示用）
+        """
         entries = []
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M')
 
@@ -170,13 +224,21 @@ class WorldviewParserAdapter(AgentAdapter):
             # 提取描述（兼容多种字段名）
             description = entry.get('description', entry.get('content', ''))
 
-            # 提取要素
+            # 【V1.49.44修复】提取要素显示内容，优先级：
+            # 1. elements 字段（原始元素文本）
+            # 2. attributes 字典 → 格式化为可读字符串
+            # 3. description 文本
             elements = entry.get('elements', '')
-
-            # 如果没有elements，使用description作为elements
-            if not elements and description:
-                elements = description[:100] + '...' if len(description) > 100 else description
-
+            
+            if not elements:
+                # 尝试从attributes字典构建显示内容
+                attrs = entry.get('attributes')
+                if attrs and isinstance(attrs, dict):
+                    attr_parts = [f"{k}: {str(v)[:60]}" for k, v in list(attrs.items())[:5]]
+                    elements = ' | '.join(attr_parts)
+                elif not elements and description:
+                    elements = description[:100] + ('...' if len(description) > 100 else '')
+            
             # 如果没有description，使用elements作为description
             if not description and elements:
                 description = elements

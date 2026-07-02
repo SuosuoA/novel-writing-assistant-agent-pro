@@ -90,13 +90,25 @@ class StyleLearningAgent(BaseAgent):
                 except Exception as e:
                     self._logger.warning(f"[{self.AGENT_TYPE}] 服务定位器获取插件失败: {e}")
             
-            # 如果没有获取到，尝试动态导入
+            # V2.1修复：优先从插件注册表获取已初始化实例；
+            # 动态导入改用 importlib（插件目录名为连字符 style-learner-v5，
+            # 旧写法 plugins.style_learner_v5 永远 ImportError → 普通模式管线断裂）
             if not self._plugin:
                 try:
-                    from plugins.style_learner_v5.plugin import StyleLearnerPlugin
-                    self._plugin = StyleLearnerPlugin()
+                    from core.plugin_registry import get_plugin_registry
+                    self._plugin = get_plugin_registry().get_plugin("style-learner-v5")
+                    if self._plugin:
+                        self._logger.info(f"[{self.AGENT_TYPE}] 从插件注册表获取插件成功")
+                except Exception:
+                    pass
+            if not self._plugin:
+                try:
+                    import importlib
+                    mod = importlib.import_module("plugins.style-learner-v5.plugin")
+                    self._plugin = mod.StyleLearnerPlugin()
+                    self._init_local_plugin(self._plugin)  # 裸实例必须初始化（建立_config默认值等）
                     self._logger.info(f"[{self.AGENT_TYPE}] 创建本地插件实例: {self.PLUGIN_ID}")
-                except ImportError as e:
+                except Exception as e:
                     self._logger.error(f"[{self.AGENT_TYPE}] 无法导入插件: {e}")
                     self._set_state(AgentState.ERROR)
                     self._set_error(f"插件导入失败: {e}")
@@ -147,14 +159,44 @@ class StyleLearningAgent(BaseAgent):
             self._status.current_task_id = task_id
             
             # 提取参数
+            # V2.1修复：接线对齐管线载荷——payload 提供 style_profile/style_sample_path，
+            # 旧代码只读 content（管线中恒为空）→ 每轮都拿0字符样本做无效分析。
             content = payload.get("content", "")
-            file_path = payload.get("file_path")
+            file_path = payload.get("file_path") or payload.get("style_sample_path")
+            existing_profile = payload.get("style_profile")
+
+            # 已有风格档案且无新样本 → 直接透传（用户已在风格学习页完成学习）
+            if not content and not file_path and isinstance(existing_profile, dict) and existing_profile:
+                self._logger.info(f"[{self.AGENT_TYPE}] 已有风格档案，跳过重新学习: {task_id}")
+                self._increment_completed()
+                self._status.current_task_id = None
+                return AgentResult.success_result(
+                    task_id=task_id,
+                    agent_type=self.AGENT_TYPE,
+                    data={"success": True, "style_profile": existing_profile,
+                          "skipped": "已有风格档案"},
+                    metadata={"skipped": True},
+                )
+
+            # 完全无风格输入 → 优雅跳过（风格是可选设定，不应让管线做无效分析）
+            if not content and not file_path:
+                self._logger.info(f"[{self.AGENT_TYPE}] 未提供风格样本，跳过风格学习: {task_id}")
+                self._increment_completed()
+                self._status.current_task_id = None
+                return AgentResult.success_result(
+                    task_id=task_id,
+                    agent_type=self.AGENT_TYPE,
+                    data={"success": True, "style_profile": {},
+                          "skipped": "未提供风格样本"},
+                    metadata={"skipped": True},
+                )
+
             options = {
                 "author_name": payload.get("author_name", "未知作者"),
                 "genre": payload.get("genre", "未知类型"),
                 "analysis_type": payload.get("analysis_type", "full"),
             }
-            
+
             # 调用插件进行分析
             if file_path:
                 result = self._plugin.analyze(file_path, options)

@@ -373,6 +373,37 @@ class ConfigManager:
         with self._lock:
             return dict(self._config)
 
+    # ========== 插件兼容接口（V2.1新增，遵循"新增不改旧"模式）==========
+    # 背景：多个插件按早期设计调用 config_path / get_config() / get_plugin_config()，
+    # 但 ConfigManager 未提供这些接口，导致插件初始化失败或静默降级为默认配置
+    # （实测日志：api-config-manager-v1 初始化失败、continuation-generator-v1
+    # 读取配置失败、reverse-feedback-analyzer 使用默认值）。此处补齐接口修复数据流。
+
+    @property
+    def config_path(self) -> Path:
+        """配置文件路径（插件兼容接口）。
+
+        未显式指定时返回项目根目录的 config.yaml（与 GUI 实际使用的配置文件一致）。
+        """
+        if self._config_path is not None:
+            return self._config_path
+        return Path(__file__).resolve().parent.parent / "config.yaml"
+
+    def get_config(self) -> Dict[str, Any]:
+        """获取全部配置（插件兼容接口，等价于 get_all()）。"""
+        return self.get_all()
+
+    def get_plugin_config(self, plugin_id: str, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """获取指定插件的配置段（插件兼容接口）。
+
+        约定配置结构为 plugins.<plugin_id>；未配置时返回 default（默认空字典），
+        插件可安全地在其上使用 .get() 读取自身配置项。
+        """
+        value = self.get(f"plugins.{plugin_id}", None)
+        if isinstance(value, dict):
+            return value
+        return default if default is not None else {}
+
     def add_validator(self, key_path: str, validator: Callable[[Any], bool]) -> None:
         """
         添加配置验证器

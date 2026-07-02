@@ -439,7 +439,39 @@ class BaseAgent(ABC):
     def _increment_failed(self) -> None:
         """失败任务计数+1"""
         self._status.increment_failed()
-    
+
+    def _init_local_plugin(self, plugin) -> bool:
+        """初始化动态导入的裸插件实例（V2.1新增，各PluginAgent共用）。
+
+        背景：Agent 在插件注册表拿不到实例时会 importlib 动态创建裸实例，
+        但裸实例未经过 initialize()（缺 _config 默认值等内部状态），
+        直接调用 analyze()/generate() 会 KeyError。此方法用 ServiceLocator
+        中可得的服务构建 PluginContext 并初始化插件；失败仅告警不阻断
+        （调用方通常有自己的降级路径）。
+        """
+        try:
+            from core.plugin_interface import PluginContext
+            from core.event_bus import get_event_bus
+            from core.config_manager import get_config_manager
+            from core.plugin_registry import get_plugin_registry
+            from core.service_locator import get_service_locator
+            ctx = PluginContext(
+                event_bus=get_event_bus(),
+                service_locator=get_service_locator(),
+                config_manager=get_config_manager(),
+                plugin_registry=get_plugin_registry(),
+                logger=getattr(self, "_logger", None),
+            )
+            init_fn = getattr(plugin, "initialize", None)
+            if callable(init_fn):
+                return bool(init_fn(ctx))
+            return True
+        except Exception as e:
+            logger = getattr(self, "_logger", None)
+            if logger:
+                logger.warning(f"本地插件初始化未完成（降级可用性）: {e}")
+            return False
+
     # === 健康检查 ===
     
     def health_check(self) -> Dict[str, Any]:

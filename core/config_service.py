@@ -374,7 +374,7 @@ class ConfigService:
             - service_mode: "local" 或 "remote"
             - provider: 服务提供商
             - model: 模型名称
-            - api_key: API密钥
+            - api_key: API密钥（从加密存储读取）
             - base_url: API基础URL（可选）
             - temperature: 温度参数
             - max_tokens: 最大token数（可选）
@@ -382,11 +382,14 @@ class ConfigService:
         """
         config = self.get_config()
 
+        # V1.3修复：API Key从加密存储读取
+        api_key = self._get_decrypted_api_key(config.api_key, config.provider)
+
         ai_config = {
             "service_mode": config.service_mode,
             "provider": config.provider,
             "model": config.model,
-            "api_key": config.api_key,
+            "api_key": api_key,
             "temperature": config.temperature,
             "local_url": config.local_url,
         }
@@ -410,6 +413,47 @@ class ConfigService:
             ai_config["local"] = all_config["local"]
 
         return ai_config
+
+    def _get_decrypted_api_key(self, config_api_key: str, provider: str) -> str:
+        """
+        获取解密后的API Key
+
+        根据API安全使用方案（11.2文档），API Key应存储在加密文件中，
+        config.yaml中仅保存占位符。
+
+        Args:
+            config_api_key: config.yaml中的api_key值
+            provider: 服务提供商名称
+
+        Returns:
+            解密后的API Key，或原始值（如果未加密）
+        """
+        # 占位符检测：如果api_key是加密标记，从加密存储读取
+        ENCRYPTED_MARKER = "ENCRYPTED_IN_SECRETS_FILE"
+
+        if config_api_key == ENCRYPTED_MARKER or not config_api_key:
+            # 从加密存储读取
+            try:
+                from .api_key_encryption import get_api_key_encryption
+                encryption = get_api_key_encryption()
+                decrypted_key = encryption.get_api_key(provider)
+                if decrypted_key:
+                    return decrypted_key
+                else:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"API Key not found in encrypted storage for provider: {provider}"
+                    )
+                    return ""
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(
+                    f"Failed to decrypt API Key: {e}"
+                )
+                return ""
+
+        # 非占位符，直接返回原值（兼容旧配置）
+        return config_api_key
 
     def update_ai_config(self, new_config: Dict[str, Any]) -> None:
         """

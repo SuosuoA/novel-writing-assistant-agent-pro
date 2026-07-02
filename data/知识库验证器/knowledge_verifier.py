@@ -211,7 +211,7 @@ class KnowledgeVerifier:
         
         # 读取文件
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, 'r', encoding='utf-8-sig') as f:
                 data = json.load(f)
         except Exception as e:
             logger.error(f"[KNOWLEDGE_VERIFIER] 读取文件失败: {e}")
@@ -281,7 +281,7 @@ class KnowledgeVerifier:
         for json_file in self.knowledge_dir.rglob("*.json"):
             category = json_file.stem
             try:
-                with open(json_file, 'r', encoding='utf-8') as f:
+                with open(json_file, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                     count = len(data.get('knowledge_points', []))
                     if count > 0:
@@ -310,7 +310,7 @@ class KnowledgeVerifier:
         
         for json_file in self.knowledge_dir.rglob("*.json"):
             try:
-                with open(json_file, 'r', encoding='utf-8') as f:
+                with open(json_file, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                     
                     if 'knowledge_points' in data:
@@ -398,7 +398,7 @@ class KnowledgeVerifier:
         id_to_file = {}
         for json_file in self.knowledge_dir.rglob("*.json"):
             try:
-                with open(json_file, 'r', encoding='utf-8') as f:
+                with open(json_file, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                     
                     if 'knowledge_points' in data:

@@ -48,16 +48,32 @@ from .database import (
     get_database_pool,
     init_database,
 )
-from .vector_store import (
-    NovelVectorStore,
-    ChapterVector,
-    KnowledgeVector,
-    StyleVector,
-    VectorSearchResult,
-    EmbeddingFunction,
-    get_vector_store,
-    reset_vector_store,
-)
+# 启动性能修复：vector_store 会在模块导入时加载 lancedb（约1.9s），
+# 而向量召回是启动后才用到的功能。这里改为 PEP 562 惰性暴露——
+# 仅当真正访问下列符号时才导入 vector_store（及 lancedb），
+# 避免"导入 infrastructure（哪怕只为用 logger）"就把 lancedb 整个拖进来。
+_VECTOR_STORE_EXPORTS = {
+    "NovelVectorStore",
+    "ChapterVector",
+    "KnowledgeVector",
+    "StyleVector",
+    "VectorSearchResult",
+    "EmbeddingFunction",
+    "get_vector_store",
+    "reset_vector_store",
+}
+
+
+def __getattr__(name):
+    """惰性加载 vector_store 符号（PEP 562）。
+
+    使 `from infrastructure import get_vector_store` 等包级访问仍然可用，
+    但只有在实际访问时才触发 lancedb 的加载，从而不拖慢启动。
+    """
+    if name in _VECTOR_STORE_EXPORTS:
+        from . import vector_store as _vs
+        return getattr(_vs, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     # Logger

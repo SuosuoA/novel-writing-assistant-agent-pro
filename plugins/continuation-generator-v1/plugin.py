@@ -1375,9 +1375,10 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
         Returns:
             ContinuationResult: 最终结果
         """
-        if not self._api_client:
-            raise RuntimeError("API客户端未设置")
-        
+        # V2.1修复：残留门卫（流式路径同样走 AIServiceManager 统一入口，不用 _api_client）
+        if not self._api_client and self._logger:
+            self._logger.debug("[ContinuationGenerator] _api_client 未设置（不影响流式生成）")
+
         start_time = time.time()
         full_text = ""
         
@@ -1929,9 +1930,11 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
             LLMRateLimitError: 速率限制
             LLMError: 其他LLM错误
         """
-        if not self._api_client:
-            raise LLMError("API客户端未设置，请调用set_api_client()或通过服务定位器获取")
-        
+        # V2.1修复：残留门卫——实际调用走 _do_api_call → AIServiceManager 统一入口，
+        # 并不使用 _api_client；服务定位器未注册 ai_service 时续写会死在这个多余检查上。
+        if not self._api_client and self._logger:
+            self._logger.debug("[ContinuationGenerator] _api_client 未设置（不影响，实际走AIServiceManager）")
+
         # 构建系统提示词
         system_prompt = """你是一位专业的小说续写专家，擅长根据已有文本进行自然流畅的续写。
 
@@ -2298,9 +2301,16 @@ def _get_validator_claw(self) -> Optional[Any]:
     """
     if self._validator is None:
         try:
-            from plugins.quality_validator_v1.plugin import QualityValidatorPlugin
-            if self._context and hasattr(self._context, 'service_locator'):
-                self._validator = self._context.service_locator.get_service("quality_validator")
+            # V2.1修复：旧下划线导入永远失败→评分器恒不可用。
+            # 改为服务定位器→插件注册表两级获取。
+            if self._context and hasattr(self._context, 'service_locator') and self._context.service_locator:
+                try:
+                    self._validator = self._context.service_locator.get_service("quality_validator")
+                except Exception:
+                    self._validator = None
+            if self._validator is None:
+                from core.plugin_registry import get_plugin_registry
+                self._validator = get_plugin_registry().get_plugin("quality-validator-v1")
             if self._validator is None:
                 self._logger.debug("[ContinuationGenerator] 评分器服务不可用")
         except Exception as e:

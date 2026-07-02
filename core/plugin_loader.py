@@ -741,6 +741,17 @@ class PluginLoader:
             if not init_file.exists():
                 raise ImportError(f"No __init__.py in {plugin_path}")
 
+            # V1.49.34 P0修复：确保父包 'plugins' 已在 sys.modules 中注册
+            # 否则插件内的相对导入（from .xxx import yyy）会报：
+            # "parent 'plugins' not in sys.modules"
+            _parent_pkg = "plugins"
+            if _parent_pkg not in sys.modules:
+                import types
+                parent_pkg = types.ModuleType(_parent_pkg)
+                parent_pkg.__path__ = [str(plugin_path.parent)]
+                parent_pkg.__package__ = _parent_pkg
+                sys.modules[_parent_pkg] = parent_pkg
+
             # 使用importlib动态导入
             spec = importlib.util.spec_from_file_location(module_name, init_file)
 
@@ -796,11 +807,21 @@ _loader_instance: Optional[PluginLoader] = None
 _loader_lock = threading.Lock()
 
 
-def get_plugin_loader() -> PluginLoader:
-    """获取全局PluginLoader实例"""
+def get_plugin_loader(plugin_directories: Optional[List[str]] = None) -> PluginLoader:
+    """
+    获取全局PluginLoader实例
+
+    Args:
+        plugin_directories: 插件目录列表（仅首次初始化时有效）
+    """
     global _loader_instance
     if _loader_instance is None:
         with _loader_lock:
             if _loader_instance is None:
-                _loader_instance = PluginLoader()
+                # V1.49.26修复：默认插件目录
+                if plugin_directories is None:
+                    from pathlib import Path
+                    # 默认使用项目根目录下的plugins目录
+                    plugin_directories = [str(Path(__file__).parent.parent / "plugins")]
+                _loader_instance = PluginLoader(plugin_directories=plugin_directories)
     return _loader_instance

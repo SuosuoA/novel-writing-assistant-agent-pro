@@ -610,19 +610,30 @@ class NovelVectorStore:
                     return []
                 
                 table = self.db.open_table("chapters")
+
+                # 向量检索（V2.1修复：先嵌入query再按向量搜，字符串会误走FTS路径）
+                query_vector = self.embed_func.embed(query)
+                results = table.search(query_vector).limit(top_k).to_pandas()
                 
-                # 向量检索
-                results = table.search(query).limit(top_k).to_pandas()
-                
-                # 转换为结果对象
+                # 转换为结果对象（V7.0修复：兼容list和DataFrame两种返回类型）
                 search_results = []
-                for _, row in results.iterrows():
-                    search_results.append(VectorSearchResult(
-                        id=row["chapter_id"],
-                        content=row["content"],
-                        score=row["_distance"],  # LanceDB返回的是距离，越小越相似
-                        metadata=row.get("metadata", {})
-                    ))
+                if hasattr(results, 'iterrows'):
+                    for _, row in results.iterrows():
+                        search_results.append(VectorSearchResult(
+                            id=row["chapter_id"],
+                            content=row["content"],
+                            score=row["_distance"],  # LanceDB返回的是距离，越小越相似
+                            metadata=row.get("metadata", {})
+                        ))
+                elif isinstance(results, list):
+                    for row in results:
+                        if isinstance(row, dict):
+                            search_results.append(VectorSearchResult(
+                                id=row.get("chapter_id", ""),
+                                content=row.get("content", ""),
+                                score=row.get("_distance", 1.0),
+                                metadata=row.get("metadata", {})
+                            ))
                 
                 return search_results
             except Exception as e:
@@ -723,32 +734,68 @@ class NovelVectorStore:
                 
                 table = self.db.open_table("knowledge")
                 
-                # 向量检索
-                search = table.search(query).limit(top_k)
-                
-                # 添加过滤条件
-                if category:
-                    search = search.where(f"category = '{category}'")
-                if domain:
-                    search = search.where(f"domain = '{domain}'")
-                
-                results = search.to_pandas()
+                # 向量检索（V6.1修复：捕获INVERTED index缺失等LanceDB错误并优雅降级）
+                # V2.1修复：字符串直接传给 table.search() 会走全文检索路径（需要
+                # INVERTED index，未创建→必然降级）。表内数据带 vector 列（add_knowledge
+                # 已嵌入），正确姿势是先嵌入 query 再按向量搜——这才是"L2温记忆向量召回"
+                # 的设计本意，且无需任何索引（暴力扫描在千级数据量下毫秒级）。
+                try:
+                    query_vector = self.embed_func.embed(query)
+                    search = table.search(query_vector).limit(top_k)
+
+                    # 添加过滤条件
+                    if category:
+                        search = search.where(f"category = '{category}'")
+                    if domain:
+                        search = search.where(f"domain = '{domain}'")
+
+                    results = search.to_pandas()
+                except Exception as e:
+                    # V6.1修复：LanceDB 0.30+在缺少INVERTED index时会抛此错误
+                    # 优雅降级：返回空结果让调用方走keyword fallback路径
+                    if "INVERTED" in str(e) or "inverted" in str(e).lower() or "full.text" in str(e).lower():
+                        logger.warning(f"[VectorStore] 向量搜索需要INVERTED index(未创建)，降级为关键词搜索: {e}")
+                        results = []
+                    else:
+                        raise
                 
                 # 转换为结果对象
+                # V7.0修复：results可能是空列表（INVERTED index降级时返回[]），
+                # 空list没有iterrows方法，需要判断类型
                 search_results = []
-                for _, row in results.iterrows():
-                    search_results.append(VectorSearchResult(
-                        id=row["knowledge_id"],
-                        content=row["content"],
-                        score=row["_distance"],
-                        metadata={
-                            "category": row["category"],
-                            "domain": row["domain"],
-                            "title": row["title"],
-                            "keywords": row.get("keywords", []),
-                            **row.get("metadata", {})
-                        }
-                    ))
+                if isinstance(results, list) and len(results) == 0:
+                    # LanceDB降级返回空列表，直接返回空结果
+                    return search_results
+                elif hasattr(results, 'iterrows'):
+                    # 正常pandas DataFrame结果
+                    for _, row in results.iterrows():
+                        search_results.append(VectorSearchResult(
+                            id=row["knowledge_id"],
+                            content=row["content"],
+                            score=row["_distance"],
+                            metadata={
+                                "category": row["category"],
+                                "domain": row["domain"],
+                                "title": row["title"],
+                                "keywords": row.get("keywords", []),
+                                **row.get("metadata", {})
+                            }
+                        ))
+                elif isinstance(results, list):
+                    # LanceDB 0.30+某些API返回list of dict
+                    for row in results:
+                        if isinstance(row, dict):
+                            search_results.append(VectorSearchResult(
+                                id=row.get("knowledge_id", ""),
+                                content=row.get("content", ""),
+                                score=row.get("_distance", 1.0),
+                                metadata={
+                                    "category": row.get("category", ""),
+                                    "domain": row.get("domain", ""),
+                                    "title": row.get("title", ""),
+                                    "keywords": row.get("keywords", []),
+                                }
+                            ))
                 
                 return search_results
             except Exception as e:
@@ -838,23 +885,37 @@ class NovelVectorStore:
                     return []
                 
                 table = self.db.open_table("styles")
+
+                # 向量检索（V2.1修复：先嵌入query再按向量搜，字符串会误走FTS路径）
+                query_vector = self.embed_func.embed(query)
+                results = table.search(query_vector).limit(top_k).to_pandas()
                 
-                # 向量检索
-                results = table.search(query).limit(top_k).to_pandas()
-                
-                # 转换为结果对象
+                # 转换为结果对象（V7.0修复：兼容list和DataFrame两种返回类型）
                 search_results = []
-                for _, row in results.iterrows():
-                    search_results.append(VectorSearchResult(
-                        id=row["style_id"],
-                        content=row["content"],
-                        score=row["_distance"],
-                        metadata={
-                            "author": row["author"],
-                            "style_features": row.get("style_features", {}),
-                            **row.get("metadata", {})
-                        }
-                    ))
+                if hasattr(results, 'iterrows'):
+                    for _, row in results.iterrows():
+                        search_results.append(VectorSearchResult(
+                            id=row["style_id"],
+                            content=row["content"],
+                            score=row["_distance"],
+                            metadata={
+                                "author": row["author"],
+                                "style_features": row.get("style_features", {}),
+                                **row.get("metadata", {})
+                            }
+                        ))
+                elif isinstance(results, list):
+                    for row in results:
+                        if isinstance(row, dict):
+                            search_results.append(VectorSearchResult(
+                                id=row.get("style_id", ""),
+                                content=row.get("content", ""),
+                                score=row.get("_distance", 1.0),
+                                metadata={
+                                    "author": row.get("author", ""),
+                                    "style_features": row.get("style_features", {}),
+                                }
+                            ))
                 
                 return search_results
             except Exception as e:

@@ -124,8 +124,13 @@ class BootstrapService:
                     event_bus=None  # EventBus在GUI层初始化
                 )
 
-                # 注册为名称"project_manager"供GUI使用
+                # 注册为名称"project_manager"供GUI使用（命名方式）
                 self._service_locator.register_service("project_manager", project_manager)
+                # 同时按类型注册，支持locator.get(ProjectManager)方式获取
+                self._service_locator.register(
+                    service_type=ProjectManager,
+                    instance=project_manager,
+                )
                 results["ProjectManager"] = True
                 logging.info("ProjectManager初始化并注册成功")
             except Exception as e:

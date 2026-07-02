@@ -30,8 +30,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from plugins.base_plugin import BasePlugin, PluginState, PluginContext
-from plugins.plugin_types import ToolPlugin
+from core.plugin_interface import BasePlugin, ToolPlugin, PluginState, PluginContext, PluginMetadata, PluginType
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +52,33 @@ class LocalServicePlugin(ToolPlugin):
     """
     
     def __init__(self):
-        super().__init__()
+        # V1.49.34修复：构造默认metadata并调用父类初始化
+        metadata = PluginMetadata(
+            id="local-service-v1",
+            name="本地服务管理",
+            version="1.0.0",
+            description="按需启动/停止本地大模型服务（Qwen/Ollama等）",
+            author="Agent Pro Team",
+            plugin_type=PluginType.TOOL,
+        )
+        super().__init__(metadata)
         self._service_processes: Dict[str, subprocess.Popen] = {}
         self._service_status: Dict[str, Dict[str, Any]] = {}
         self._health_check_thread: Optional[threading.Thread] = None
         self._shutdown_flag = threading.Event()
         self._lock = threading.RLock()
+        
+    @classmethod
+    def get_metadata(cls) -> "PluginMetadata":
+        """获取插件元数据（V1.49.34新增）"""
+        return PluginMetadata(
+            id="local-service-v1",
+            name="本地服务管理",
+            version="1.0.0",
+            description="按需启动/停止本地大模型服务（Qwen/Ollama等）",
+            author="Agent Pro Team",
+            plugin_type=PluginType.TOOL,
+        )
         
     @property
     def plugin_id(self) -> str:
@@ -71,6 +91,20 @@ class LocalServicePlugin(ToolPlugin):
     @property
     def version(self) -> str:
         return "1.0.0"
+    
+    def execute(self, action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """执行工具操作（V1.49.34新增 - 满足ToolPlugin抽象方法要求）"""
+        params = params or {}
+        if action == "start_service":
+            return self.start_service(params.get("service_name", "qwen"))
+        elif action == "stop_service":
+            return self.stop_service(params.get("service_name", ""))
+        elif action == "get_status":
+            return self.get_all_status()
+        elif action == "health_check":
+            return self.check_health()
+        else:
+            raise ValueError(f"Unknown action: {action}")
     
     def initialize(self, context: PluginContext) -> bool:
         """

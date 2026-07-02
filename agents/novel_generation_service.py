@@ -273,6 +273,7 @@ class NovelGenerationService:
         worldview: Dict[str, Any] = None,
         previous_chapter_text: str = "",
         max_iterations: int = 5,
+        quality_threshold: float = 0.8,  # P0修复：新增参数
         on_progress: Callable[[GenerationProgress], None] = None,
         on_chunk: Callable[[str], None] = None,
         knowledge_categories: List[str] = None,
@@ -300,6 +301,7 @@ class NovelGenerationService:
             worldview: 世界观设定
             previous_chapter_text: 上一章内容
             max_iterations: 最大迭代次数
+            quality_threshold: 质量阈值（P0修复：专家配置参数）
             on_progress: 进度回调
             on_chunk: 流式输出回调（逐字显示）
             knowledge_categories: 选中的知识库分类
@@ -322,6 +324,7 @@ class NovelGenerationService:
             characters=characters or [],
             worldview=worldview or {},
             max_iterations=max_iterations,
+            validation_threshold=quality_threshold,  # P0修复：映射参数
             previous_chapter_text=previous_chapter_text,
             knowledge_categories=knowledge_categories or [],
             knowledge_domains=knowledge_domains or [],
@@ -497,3 +500,259 @@ def get_generation_service(
             _service_instance.set_llm_client(llm_client)
         
         return _service_instance
+
+
+class GenerationDataService:
+    """
+    生成数据服务 - 数据加工逻辑的唯一入口
+    
+    设计原则（V3.0修订 - 数据引用传递模式）：
+    - GUI传入原始数据引用（GUI是数据持有者，这由用户交互架构决定）
+    - 服务层负责数据加工（格式化、降级、前文回退等业务逻辑）
+    - GUI不持有任何业务逻辑方法
+    
+    解决技术债务：P0-V3（7个数据获取）+ P1-V1（前文获取）
+    
+    架构约束：
+    outline-parser-v3/style-learner-v5/character-manager-v1/worldview-parser-v1
+    等插件的analyze()是无状态的，不缓存结果。
+    数据唯一缓存在MainWindow实例属性中。
+    因此GenerationDataService不能"从插件拉取数据"，
+    而必须接收GUI传入的原始数据引用。
+    """
+    
+    def __init__(self):
+        pass  # 无状态，不需要plugin_registry/service_locator
+    
+    def build_generation_context(
+        self,
+        chapter_number: int,
+        target_words: int,
+        raw_data: dict,
+        selected_knowledge_bases: List[str] = None,
+        selected_writing_techniques: List[str] = None,
+        expert_config: dict = None,
+    ) -> Dict[str, Any]:
+        """
+        构建生成上下文 - 对原始数据执行业务逻辑加工
+        
+        Args:
+            chapter_number: 章节号（用户选择）
+            target_words: 目标字数（用户选择）
+            raw_data: GUI传入的原始数据引用，格式：
+                {
+                    'outline_chapters_data': list,
+                    'outline_content': str,
+                    'chapter_outlines': dict,
+                    'style_profile': dict,
+                    'character_data': list,
+                    'worldview': dict,
+                    'reverse_chapters': dict,
+                    'generated_content': list,
+                    'project_data': dict,
+                }
+            selected_knowledge_bases: 勾选的知识库分类
+            selected_writing_techniques: 勾选的写作技巧
+            expert_config: 专家配置
+            
+        Returns:
+            dict: 包含全部生成所需数据的上下文字典
+        """
+        context = {
+            'chapter_number': chapter_number,
+            'target_words': target_words,
+            'knowledge_categories': selected_knowledge_bases or [],
+            'writing_techniques': selected_writing_techniques or [],
+            'expert_config': expert_config,
+        }
+        
+        # 1. 大纲内容（业务逻辑：格式化章节列表为文本 + 后备策略）
+        context['outline_content'] = self._format_outline(raw_data)
+        context['chapter_outline'] = self._format_chapter_outline(
+            raw_data, chapter_number
+        )
+        
+        # 2. 风格档案（业务逻辑：8维度→生成器格式 转换 + 模板格式处理）
+        context['style_profile'] = self._format_style_profile(raw_data)
+        
+        # 3. 人物设定（业务逻辑：列表→字典 转换）
+        context['characters'] = self._format_characters(raw_data)
+        
+        # 4. 世界观（直接传递，无业务逻辑）
+        context['worldview'] = raw_data.get('worldview', {})
+        
+        # 5. 前文内容（业务逻辑：3级回退策略，P1-V1技术债务解决）
+        context['previous_chapter_text'] = self._get_previous_chapters(
+            chapter_number, raw_data
+        )
+        
+        return context
+    
+    # ========== 数据加工方法（业务逻辑，从GUI层迁移）==========
+    
+    def _format_outline(self, raw_data: dict) -> str:
+        """格式化大纲文本（原GUI._get_outline_content逻辑）
+        
+        策略：优先从outline_chapters_data格式化，后备从outline_content获取
+        """
+        chapters_data = raw_data.get('outline_chapters_data')
+        if chapters_data:
+            outline_text = ""
+            for i, chapter in enumerate(chapters_data, 1):
+                ch_num = chapter.get('chapter_number', i)
+                title = chapter.get('title', f'第{ch_num}章')
+                summary = chapter.get('summary', '')
+                outline_text += f"第{ch_num}章：{title}\n{summary}\n\n"
+            return outline_text.strip()
+        
+        # 后备：从用户输入的原始大纲获取
+        return raw_data.get('outline_content', '')
+    
+    def _format_chapter_outline(self, raw_data: dict, chapter_number: int) -> str:
+        """格式化章节大纲（原GUI._get_chapter_outline逻辑）
+        
+        策略：优先从outline_chapters_data格式化，后备从chapter_outlines获取
+        """
+        chapters_data = raw_data.get('outline_chapters_data')
+        if chapters_data:
+            for chapter in chapters_data:
+                if chapter.get('chapter_number') == chapter_number:
+                    title = chapter.get('title', '')
+                    summary = chapter.get('summary', '')
+                    key_content = chapter.get('key_content', '')
+                    plot_points = chapter.get('plot_points', [])
+                    characters = chapter.get('characters', [])
+                    outline = f"【章节标题】{title}\n"
+                    outline += f"【内容摘要】{summary}\n"
+                    if key_content:
+                        outline += f"【关键内容】{key_content}\n"
+                    if plot_points:
+                        outline += f"【情节要点】{'；'.join(plot_points)}\n"
+                    if characters:
+                        outline += f"【出场人物】{', '.join(characters)}\n"
+                    return outline.strip()
+        
+        # 后备：从用户手动输入的章节大纲获取
+        chapter_outlines = raw_data.get('chapter_outlines', {})
+        if isinstance(chapter_outlines, dict):
+            return chapter_outlines.get(chapter_number, "")
+        return ""
+    
+    def _format_style_profile(self, raw_data: dict) -> dict:
+        """格式化风格档案（原GUI._get_style_profile逻辑）
+        
+        业务逻辑：8维度分析结果→生成器格式 转换
+        两种格式：作者分析结果 / 模板格式
+        """
+        profile = raw_data.get('style_profile')
+        if not profile or not isinstance(profile, dict):
+            return {}
+        
+        # 格式1：插件8维度分析结果，转换为生成器可用的格式
+        if profile.get('author_name') or profile.get('style_tags'):
+            return {
+                "author_name": profile.get('author_name', ''),
+                "genre": profile.get('genre', ''),
+                "style_tags": profile.get('style_tags', []),
+                "writing_characteristics": profile.get('writing_characteristics', []),
+                "prompt_suggestions": profile.get('prompt_suggestions', []),
+                "register": profile.get('language_style', {}).get('register', '通用'),
+                "sentiment": profile.get('emotional_tone', {}).get('overall_sentiment', '中性'),
+                "similar_authors": profile.get('similar_authors', []),
+                "_full_profile": profile,
+            }
+        
+        # 格式2：模板格式
+        if profile.get('is_template'):
+            result = {
+                "author_name": profile.get('name', '自定义'),
+                "genre": profile.get('description', '')[:20],
+                "style_tags": profile.get('style_tags', []),
+                "dimensions": profile.get('dimensions', {}),
+            }
+            # 合并模板原始字段（等价于原GUI代码的**profile展开）
+            for k, v in profile.items():
+                if k not in result:
+                    result[k] = v
+            return result
+        
+        # 默认返回原始数据
+        return profile
+    
+    def _format_characters(self, raw_data: dict) -> dict:
+        """格式化人物设定（原GUI._get_characters逻辑）
+        
+        业务逻辑：列表→字典 转换（匹配GenerationRequest.character_profiles要求）
+        """
+        character_list = raw_data.get('character_data', [])
+        if not character_list:
+            return {}
+        
+        character_dict = {}
+        for char in character_list:
+            if isinstance(char, dict):
+                name = char.get('name', '未命名')
+                character_dict[name] = char
+        
+        return character_dict
+    
+    def _get_previous_chapters(
+        self, 
+        chapter_number: int, 
+        raw_data: dict
+    ) -> str:
+        """获取前5章文本内容（原GUI._get_previous_chapters_text逻辑）
+        
+        P1-V1技术债务解决：3级回退策略从GUI迁移到服务层
+        
+        策略优先级：
+        1. 从reverse_chapters获取（逆向反馈区的已导入章节）
+        2. 从generated_content获取（已生成的章节内容）
+        3. 从project_data获取（项目管理器数据）
+        
+        限制6000字符避免token溢出
+        """
+        previous_text = ""
+        
+        # 策略1：从逆向反馈区的已导入章节获取
+        reverse_chapters = raw_data.get('reverse_chapters')
+        if reverse_chapters:
+            for ch_id, ch_data in reverse_chapters.items():
+                if isinstance(ch_data, dict):
+                    ch_num = ch_data.get('chapter_number', 0)
+                    if ch_num == 0:
+                        try:
+                            ch_num = int(ch_id.replace('ch_', '').replace('chapter_', ''))
+                        except (ValueError, AttributeError):
+                            continue
+                    if 0 < ch_num < chapter_number:
+                        content = ch_data.get('content', '')
+                        if content:
+                            previous_text += f"--- 第{ch_num}章 ---\n{content}\n\n"
+        
+        # 策略2：从已生成的章节内容获取
+        if not previous_text:
+            generated_content = raw_data.get('generated_content')
+            if generated_content:
+                max_prev = min(chapter_number - 1, 5)
+                start_idx = max(0, len(generated_content) - max_prev)
+                for i, content in enumerate(generated_content[start_idx:], start_idx + 1):
+                    if content and isinstance(content, str):
+                        previous_text += f"--- 第{i}章 ---\n{content}\n\n"
+        
+        # 策略3：从项目管理器获取
+        if not previous_text:
+            project_data = raw_data.get('project_data')
+            if project_data:
+                try:
+                    completed = project_data.get('completed_chapters', [])
+                    for ch in completed:
+                        if isinstance(ch, dict):
+                            ch_num = ch.get('chapter_number', 0)
+                            content = ch.get('content', '')
+                            if 0 < ch_num < chapter_number and content:
+                                previous_text += f"--- 第{ch_num}章 ---\n{content}\n\n"
+                except Exception:
+                    pass
+        
+        return previous_text[-6000:] if previous_text else ""

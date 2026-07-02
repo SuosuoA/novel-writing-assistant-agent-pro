@@ -51,6 +51,9 @@ echo.
 echo [START] Launching GUI...
 echo.
 
+REM 设置开发模式（允许非官方插件加载）
+set DEV_MODE=1
+
 REM 启动主程序
 python gui_main.py
 

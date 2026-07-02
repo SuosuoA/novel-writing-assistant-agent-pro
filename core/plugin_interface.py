@@ -146,6 +146,7 @@ class PluginContext:
     config_manager: "ConfigManager"
     plugin_registry: "PluginRegistry"
     logger: Optional[Any] = None  # StructuredLogger
+    config: Dict[str, Any] = field(default_factory=dict)  # V1.49.34新增：插件自定义配置
 
     # V5核心模块保护引用
     v5_modules: Dict[str, Any] = field(default_factory=dict)

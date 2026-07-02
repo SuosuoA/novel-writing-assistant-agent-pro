@@ -20,12 +20,15 @@ V1.3新增：
 - V5保护模块运行时检查
 """
 
+import logging
 import threading
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from .models import PluginMetadata as PydanticPluginMetadata, PluginInfo
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # V5核心模块保护机制
@@ -476,6 +479,16 @@ class PluginRegistry:
                 if info.state == PluginState.ACTIVE.value
             ]
 
+    def get_all_plugins(self) -> Dict[str, PluginInfo]:
+        """
+        获取所有插件信息（V1.49.22新增）
+
+        Returns:
+            插件信息字典 {plugin_id: PluginInfo}
+        """
+        with self._lock:
+            return dict(self._plugins)
+
     def bind_slot(self, slot_id: str, plugin_id: str) -> bool:
         """
         绑定插件到插槽
@@ -633,6 +646,16 @@ class PluginRegistry:
         from .plugin_loader import get_plugin_loader
 
         _loader = loader or get_plugin_loader()
+        
+        # V1.49.25修复：如果插件未被发现，先尝试发现
+        discovered = _loader.get_discovered_plugins()
+        if plugin_id not in discovered:
+            logger.info(f"[load_plugin_runtime] 插件 {plugin_id} 未发现，尝试重新扫描...")
+            _loader.discover_plugins()
+            discovered = _loader.get_discovered_plugins()
+            if plugin_id not in discovered:
+                return False, f"Plugin {plugin_id} not found after discovery"
+        
         result = _loader.load_plugin(plugin_id)
 
         if result.success:

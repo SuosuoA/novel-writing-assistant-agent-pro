@@ -452,8 +452,8 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             stats['feedback_history'].append(iteration_result.feedback)
 
             # === 步骤5: 判断是否满足停止条件 ===
-            # 检查字数偏差（超过50%强制继续迭代）
-            word_count_score = dimension_scores.get('字数')
+            # 检查字数偏差（超过50%强制继续迭代）— V6.1: 使用英文key 'word_count'
+            word_count_score = dimension_scores.get('word_count') or dimension_scores.get('字数')
             word_count_deviation = 0
             if word_count_score and isinstance(word_count_score, DimensionScore):
                 word_count_deviation = 1 - word_count_score.score  # 评分越低，偏差越大
@@ -499,6 +499,25 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
 
         # 输出保存
         final_content = best_result.content if best_result else ""
+        
+        # V7.0关键修复：【本章完】强制保障
+        # 如果迭代结束仍无【本章完】标记，自动补充（与专家模式一致的保障策略）
+        if final_content and '【本章完】' not in final_content and '本章完' not in final_content:
+            logger.warning("[V2][SAVE] 最终内容缺少【本章完】标记，强制自动补充")
+            # 智能补充：找最后一个句号/引号位置追加
+            import re
+            last_punct = max(
+                final_content.rfind('。'),
+                final_content.rfind('」'),
+                final_content.rfind('"'),
+                final_content.rfind('！'),
+                final_content.rfind('？'),
+            )
+            if last_punct > len(final_content) * 0.8:  # 在后20%范围内
+                final_content = final_content[:last_punct+1] + '\n\n【本章完】' + final_content[last_punct+1:]
+            else:
+                final_content = final_content.rstrip() + '\n\n【本章完】'
+        
         logger.info(f"[V2][SAVE] 最终内容长度: {len(final_content)} 字符")
         logger.info(f"[V2][SAVE] 最终内容包含【本章完】: {'是' if '【本章完】' in final_content else '否'}")
 
@@ -526,7 +545,9 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             # 强制附加【本章完】要求（如果没有的话）
             if "【本章完】" not in prompt:
                 prompt += "\n\n重要要求：章节结束时必须在末尾添加【本章完】标记！"
-
+            # V6.1修复：首轮必须包含字数约束（±10%范围）
+            if "目标字数" not in prompt and "字数" not in prompt:
+                prompt += f"\n\n【字数要求】本文目标{self.target_word_count}字（允许误差±10%），请严格控制篇幅。"
             logger.debug(f"[V2][PROMPT] 第一轮提示词（前200字符）: {prompt[:200]}...")
             return prompt
 
@@ -584,16 +605,21 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
 
         支持本地模型和在线API
         """
+        # V2.1修复：此处旧门卫要求 _api_client，但实际调用（下方）走 AIServiceManager
+        # 统一入口（V2.23设计），并不使用 _api_client。若服务定位器未注册 ai_service，
+        # 生成会死在这个根本不需要的检查上。改为仅提示，不再阻断。
         if not self._api_client:
-            raise RuntimeError("API客户端未设置，请调用set_api_client()或通过服务定位器获取")
-        
-        # 计算max_tokens - V5.7修复：确保AI有足够token生成完整章节
+            logger.debug("[V2] _api_client 未设置（不影响生成，实际走 AIServiceManager 统一入口）")
+
+
+        # 计算max_tokens - V6.0修复：确保AI有足够token生成完整章节+【本章完】
         # 中文约1.5字符/token，目标字数对应约 target/1.5 tokens
-        # V5.7修复：给AI留出足够空间写【本章完】（至少+20%空间）
-        base_tokens = int(self.target_word_count / 1.5)  # 基础token数
-        max_tokens = int(base_tokens * 1.5)  # 允许50%浮动，确保有空间写【本章完】
-        max_tokens = max(max_tokens, 1000)  # 最小1000 tokens（V5.7提高下限）
-        max_tokens = min(max_tokens, 4096)  # 最大4096 tokens
+        # V6.0关键修复：max_tokens必须显著大于基础token数，否则API输出会被截断导致【本章完】无法写入
+        # 公式：base = target/1.5(内容tokens), max = base*2.0(留100%余量给结束标记和溢出)
+        base_tokens = int(self.target_word_count / 1.5)  # 基础内容token数
+        max_tokens = int(base_tokens * 2.0)  # 留出100%空间确保能写完【本章完】
+        max_tokens = max(max_tokens, 1000)  # 最小1000 tokens
+        max_tokens = min(max_tokens, 4096)  # 最大4096 tokens（DeepSeek限制）
 
         # 根据策略设置温度
         temperature_map = {
@@ -700,18 +726,19 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         """
         # 如果没有验证函数，返回默认评分
         if validation_fn is None:
+            # V6.0修复：统一使用英文key与quality-validator一致
             default_scores = {
-                '世界观': DimensionScore('世界观', 0.5, '无验证函数', []),
-                '大纲': DimensionScore('大纲', 0.5, '无验证函数', []),
-                '风格': DimensionScore('风格', 0.5, '无验证函数', []),
-                '人设': DimensionScore('人设', 0.5, '无验证函数', []),
-                'AI感': DimensionScore('AI感', 0.5, '无验证函数', []),
-                '字数': DimensionScore('字数', self._score_word_count(content), f'目标:{self.target_word_count} 实际:{len(content)}', []),
-                '上下文契合度': DimensionScore('上下文契合度', 0.5, '无验证函数', [])
+                'worldview': DimensionScore('worldview', 0.5, '无验证函数', []),
+                'outline': DimensionScore('outline', 0.5, '无验证函数', []),
+                'style': DimensionScore('style', 0.5, '无验证函数', []),
+                'character': DimensionScore('character', 0.5, '无验证函数', []),
+                'ai_feeling': DimensionScore('ai_feeling', 0.5, '无验证函数', []),
+                'word_count': DimensionScore('word_count', self._score_word_count(content), f'目标:{self.target_word_count} 实际:{len(content)}', []),
+                'context_coherence': DimensionScore('context_coherence', 0.5, '无验证函数', [])
             }
             # V2.1新增：知识库一致性评分
             knowledge_score = self._evaluate_knowledge_consistency(content)
-            default_scores['知识库一致性'] = knowledge_score
+            default_scores['knowledge'] = knowledge_score
             
             return 0.5, default_scores, ['请提供验证函数以获得准确评分']
         
@@ -733,7 +760,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             # 创建DimensionScore对象
             dimension_scores = {}
             for dim_name, dim_data in detailed_scores.items():
-                logger.debug(f"[V2] 处理维度: {dim_name}, 类型: {type(dim_data)}, 值: {dim_data}")
+                logger.debug(f"[V2] 处理维度: {dim_name}, 类型: {type(dim_data).__name__}")
                 
                 # 检查是否已经是DimensionScore对象
                 if isinstance(dim_data, DimensionScore):
@@ -752,13 +779,21 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                         details='',
                         issues=[]
                     )
+                elif hasattr(dim_data, 'score'):
+                    # 兼容NaturalnessScore等dataclass对象 - V6.0新增
+                    dimension_scores[dim_name] = DimensionScore(
+                        dimension_name=dim_name,
+                        score=float(getattr(dim_data, 'score', 0.5)),
+                        details=f'{type(dim_data).__name__}对象',
+                        issues=getattr(dim_data, 'issues_found', []) or getattr(dim_data, 'issues', [])
+                    )
                 else:
-                    # 未知类型，使用默认值
-                    logger.warning(f"[V2][WARNING] 未知维度数据类型: {type(dim_data)}")
+                    # 未知类型，使用默认值并记录详细日志
+                    logger.warning(f"[V2][WARNING] 未知维度数据类型: {type(dim_data).__name__}, 维度名: {dim_name}, 值预览: {str(dim_data)[:100]}")
                     dimension_scores[dim_name] = DimensionScore(
                         dimension_name=dim_name,
                         score=0.5,
-                        details=f'数据类型错误: {type(dim_data)}',
+                        details=f'数据类型错误: {type(dim_data).__name__}',
                         issues=[]
                     )
 
@@ -777,20 +812,20 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         except Exception as e:
             logger.error(f"[V2][ERROR] 评分过程出错: {e}")
 
-            # 返回默认评分
+            # 返回默认评分（V6.0修复：统一英文key）
             default_scores = {
-                '世界观': DimensionScore('世界观', 0.5, f'评分失败: {str(e)}', []),
-                '大纲': DimensionScore('大纲', 0.5, '评分失败', []),
-                '风格': DimensionScore('风格', 0.5, '评分失败', []),
-                '人设': DimensionScore('人设', 0.5, '评分失败', []),
-                'AI感': DimensionScore('AI感', 0.5, '评分失败', []),
-                '字数': DimensionScore('字数', 0.5, '评分失败', []),
-                '上下文契合度': DimensionScore('上下文契合度', 0.5, '评分失败', [])
+                'worldview': DimensionScore('worldview', 0.5, f'评分失败: {str(e)}', []),
+                'outline': DimensionScore('outline', 0.5, '评分失败', []),
+                'style': DimensionScore('style', 0.5, '评分失败', []),
+                'character': DimensionScore('character', 0.5, '评分失败', []),
+                'ai_feeling': DimensionScore('ai_feeling', 0.5, '评分失败', []),
+                'word_count': DimensionScore('word_count', 0.5, '评分失败', []),
+                'context_coherence': DimensionScore('context_coherence', 0.5, '评分失败', [])
             }
             
             # V2.1新增：知识库一致性评分
             knowledge_score = self._evaluate_knowledge_consistency(content)
-            default_scores['知识库一致性'] = knowledge_score
+            default_scores['knowledge'] = knowledge_score
 
             return 0.5, default_scores, [f'评分过程出错: {str(e)}']
     
@@ -892,42 +927,74 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         dimension_scores: Dict[str, DimensionScore]
     ) -> float:
         """
-        V2.1新增：计算包含知识库一致性的总分
+        V2.1→V7.0修复：计算包含知识库一致性的总分
         
-        权重分配（V2.1版本）：
-        - 字数: 10%
-        - 大纲: 15%
-        - 风格: 25%
-        - 人设: 25%
-        - 世界观: 20%
-        - 自然度: 5%
-        - 知识库一致性: 10%
+        V7.0关键修复：
+        - 支持中英文双语key匹配（英文key来自quality-validator-v1/内联评分，
+          中文key来自V2.1自身添加的'知识库一致性'维度）
+        - 权重与九维度评分体系对齐（word_count=0.08, knowledge=0.08等）
+        - 废弃旧的中文key权重表（只匹配到知识库一致性导致总分永远0.9的bug）
         
-        注意：总权重110%，需归一化
-        
-        Args:
-            dimension_scores: 各维度评分
-            
-        Returns:
-            归一化后的总分
+        权重分配（V7.0 - 与九维度对齐）：
+        - word_count/字数: 8%
+        - outline/大纲: 13%
+        - style/风格: 19%
+        - character/人设: 19%
+        - worldview/世界观: 12%
+        - knowledge/知识库: 8%
+        - writing_technique/写作技巧: 8%
+        - context_coherence/上下文衔接: 8%
+        - ai_feeling/AI感: 5%
+        - 知识库一致性: 8% (V2.1独立维度，与knowledge维度互补)
+        - naturalness/自然度: 5% (兼容旧版)
+        - chapter_end/本章完: 5% (兼容旧版)
         """
-        weights = {
-            '字数': 0.10,
-            '大纲': 0.15,
-            '风格': 0.25,
-            '人设': 0.25,
-            '世界观': 0.20,
-            '自然度': 0.05,
-            'AI感': 0.05,  # 兼容旧版本
-            '上下文契合度': 0.05,  # 兼容旧版本
-            '知识库一致性': 0.10
+        # 英文key → 权重（与quality-validator-v1九维度权重一致）
+        en_weights = {
+            'word_count': 0.08,
+            'outline': 0.13,
+            'style': 0.19,
+            'character': 0.19,
+            'worldview': 0.12,
+            'knowledge': 0.08,
+            'writing_technique': 0.08,
+            'context_coherence': 0.08,
+            'ai_feeling': 0.05,
+            'naturalness': 0.05,
+            'chapter_end': 0.05,
         }
+        # 中文key → 英文key映射
+        cn_to_en = {
+            '字数': 'word_count',
+            '大纲': 'outline',
+            '风格': 'style',
+            '人设': 'character',
+            '世界观': 'worldview',
+            '知识库': 'knowledge',
+            '写作技巧': 'writing_technique',
+            '上下文契合度': 'context_coherence',
+            '上下文衔接': 'context_coherence',
+            'AI感': 'ai_feeling',
+            '自然度': 'naturalness',
+            '本章完': 'chapter_end',
+        }
+        # 知识库一致性是V2.1独立维度，与knowledge互补
+        knowledge_consistency_weight = 0.08
         
         raw_score = 0.0
         total_weight = 0.0
         
         for dim_name, dim_score in dimension_scores.items():
-            weight = weights.get(dim_name, 0.0)
+            # 先尝试英文key直接匹配
+            weight = en_weights.get(dim_name, 0.0)
+            # 如果英文不匹配，尝试中文映射
+            if weight == 0.0 and dim_name in cn_to_en:
+                en_key = cn_to_en[dim_name]
+                weight = en_weights.get(en_key, 0.0)
+            # 特殊处理：知识库一致性维度
+            if weight == 0.0 and '知识库' in dim_name:
+                weight = knowledge_consistency_weight
+            
             if weight > 0:
                 raw_score += dim_score.score * weight
                 total_weight += weight
@@ -971,7 +1038,8 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         ]
 
         # 🔴 优先级0: 检查知识库冲突（V2.1新增）
-        knowledge_dim = dimension_scores.get('知识库一致性')
+        # V6.1修复：使用英文key与quality-validator feedback统一
+        knowledge_dim = dimension_scores.get('knowledge') or dimension_scores.get('知识库一致性')
         knowledge_issues = []
         
         if knowledge_dim and knowledge_dim.knowledge_conflicts:
@@ -1003,8 +1071,8 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                 feedback_parts.append("  ✅ 确保物理/化学/生物/历史等知识点准确")
                 feedback_parts.append("")
 
-        # 🔴 优先级1:检查设定偏离(人设、世界观、风格)
-        priority_dims = ['人设', '世界观', '风格']
+        # 🔴 优先级1:检查设定偏离(人设、世界观、风格) — V6.1修复：使用英文key
+        priority_dims = ['character', 'worldview', 'style']
         setting_issues = []
 
         for dim_name in priority_dims:
@@ -1059,12 +1127,12 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                     if issue and len(issue.strip()) > 10 and not issue.strip().startswith('**'):
                         feedback_parts.append(f"     - {issue}")
             
-            # 记录字数问题
-            if dim_name == '字数' and dim_score.score < 0.3:
+            # 记录字数问题（V6.1修复：使用英文key 'word_count'）
+            if dim_name == 'word_count' and dim_score.score < 0.3:
                 word_count_issue = dim_score
             
-            # 记录大纲问题
-            if dim_name == '大纲' and dim_score.score < 0.7:
+            # 记录大纲问题（V6.1修复：使用英文key 'outline'）
+            if dim_name == 'outline' and dim_score.score < 0.7:
                 outline_issue = dim_score
 
         # 【本章完】检查

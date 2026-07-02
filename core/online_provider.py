@@ -50,8 +50,12 @@ logger = logging.getLogger(__name__)
 PROVIDER_CONFIGS = {
     "DeepSeek": {
         "base_url": "https://api.deepseek.com/v1",
-        "default_model": "deepseek-chat",
+        "default_model": "deepseek-v4-pro",
         "models": {
+            # DeepSeek V4（最新，2026）：v4-pro=思考模式，v4-flash=非思考模式。
+            # 旧名 deepseek-chat/deepseek-reasoner 将于 2026/07/24 弃用（指向 v4-flash）。
+            "deepseek-v4-pro": {"max_tokens": 64000, "supports_streaming": True, "supports_vision": False},
+            "deepseek-v4-flash": {"max_tokens": 64000, "supports_streaming": True, "supports_vision": False},
             "deepseek-chat": {"max_tokens": 64000, "supports_streaming": True, "supports_vision": False},
             "deepseek-coder": {"max_tokens": 16000, "supports_streaming": True, "supports_vision": False},
             "deepseek-reasoner": {"max_tokens": 64000, "supports_streaming": True, "supports_vision": False},

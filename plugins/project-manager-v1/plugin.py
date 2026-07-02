@@ -45,7 +45,10 @@ class ProjectManagerPlugin(BasePlugin):
     4. 提供项目管理器服务给其他插件
     """
     
-    def __init__(self, metadata: PluginMetadata):
+    def __init__(self, metadata: Optional[PluginMetadata] = None):
+        # V1.49.34修复：metadata参数改为可选，兼容PluginLoader无参实例化
+        if metadata is None:
+            metadata = ProjectPluginMetadata()
         super().__init__(metadata)
         self._project_manager: Optional[ProjectManager] = None
     

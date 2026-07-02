@@ -77,22 +77,30 @@ class PluginInfo(BaseModel):
 
 
 class ValidationScores(BaseModel):
-    """验证评分（V1.7版本 - 8维度评分体系）
+    """验证评分（V2.0版本 - 9维度评分体系）
 
-    权重分配（V1.7版本）：
-    - 字数: 8%
-    - 知识点引用: 8%
+    权重分配（V2.0版本）：
+    - 世界观: 12%
+    - 人设: 19%
     - 大纲: 13%
     - 风格: 19%
-    - 人设: 19%
-    - 世界观: 12%
-    - 逆向反馈: 11%
-    - 自然度: 10%
+    - 知识库: 8%
+    - 写作技巧: 8% - V2.0新增
+    - 字数: 8%
+    - 上下文衔接: 8% - V2.0新增
+    - AI感: 5% - V2.0新增
     总计: 100%
 
-    新增维度说明：
-    - knowledge_reference_score: 知识点引用评分（从知识库召回知识点并在生成中引用）
-    - reverse_feedback_score: 逆向反馈评分（章节与已设定内容的一致性检查）
+    维度说明：
+    - worldview_score: 世界观一致性评分
+    - character_score: 人设一致性评分
+    - outline_score: 大纲符合性评分
+    - style_score: 风格一致性评分
+    - knowledge_reference_score: 知识库引用评分
+    - writing_technique_score: 写作技巧评分（V2.0新增）
+    - word_count_score: 字数符合性评分
+    - context_coherence_score: 上下文衔接评分（V2.0新增）
+    - ai_feeling_score: AI感检测评分（V2.0新增）
     """
 
     model_config = ConfigDict(frozen=False)
@@ -102,16 +110,25 @@ class ValidationScores(BaseModel):
     style_score: float = Field(0.0, ge=0, le=1, description="风格评分")
     character_score: float = Field(0.0, ge=0, le=1, description="人设评分")
     worldview_score: float = Field(0.0, ge=0, le=1, description="世界观评分")
-    naturalness_score: float = Field(0.0, ge=0, le=1, description="自然度评分")
+    naturalness_score: float = Field(0.0, ge=0, le=1, description="自然度评分（兼容旧字段，V2.0映射为AI感）")
 
-    # V1.7新增：知识点引用评分（知识库功能）
+    # V1.7字段（保留兼容）
     knowledge_reference_score: float = Field(
-        0.0, ge=0, le=1, description="知识点引用评分（V1.7新增，知识库召回和引用）"
+        0.0, ge=0, le=1, description="知识点引用评分（兼容旧字段，V2.0映射为知识库）"
+    )
+    reverse_feedback_score: float = Field(
+        0.0, ge=0, le=1, description="逆向反馈评分（兼容旧字段，V2.0映射为上下文衔接）"
     )
 
-    # V1.7新增：逆向反馈评分（上下文衔接一致性）
-    reverse_feedback_score: float = Field(
-        0.0, ge=0, le=1, description="逆向反馈评分（V1.7新增，章节与设定一致性）"
+    # V2.0新增维度
+    writing_technique_score: float = Field(
+        0.0, ge=0, le=1, description="写作技巧评分（V2.0新增）"
+    )
+    context_coherence_score: float = Field(
+        0.0, ge=0, le=1, description="上下文衔接评分（V2.0新增）"
+    )
+    ai_feeling_score: float = Field(
+        0.0, ge=0, le=1, description="AI感检测评分（V2.0新增，越高越自然）"
     )
 
     # 保留旧字段用于向后兼容（已弃用，映射到knowledge_reference_score）
@@ -121,6 +138,9 @@ class ValidationScores(BaseModel):
 
     total_score: float = Field(0.0, ge=0, le=1, description="总分")
     has_chapter_end: bool = Field(False, description="是否包含章节结束标记")
+    # V2.1新增（ADR-010：达标判断归属插件层）——由验证插件填充，
+    # 供 Agent/GUI 直接读取，不再各自用阈值重算
+    passed: bool = Field(False, description="是否达标（总分≥阈值且含结束标记，由插件层判定）")
 
     # 知识库验证详情
     knowledge_conflicts: Optional[List[Dict[str, Any]]] = Field(
@@ -130,52 +150,54 @@ class ValidationScores(BaseModel):
         None, description="召回的相关知识列表"
     )
 
-    # V1.7新增：逆向反馈详情
+    # V1.7新增：逆向反馈详情（V2.0映射为上下文衔接问题）
     reverse_feedback_issues: Optional[List[Dict[str, Any]]] = Field(
-        None, description="逆向反馈检测到的问题列表"
+        None, description="上下文衔接问题列表"
     )
 
     def calculate_total(self) -> float:
-        """计算总分（8维度加权）
+        """计算总分（V2.0版本 - 9维度加权）
 
-        权重分配（V1.7版本）：
-        - 字数: 8%
-        - 知识点引用: 8%
+        权重分配（V2.0版本）：
+        - 世界观: 12%
+        - 人设: 19%
         - 大纲: 13%
         - 风格: 19%
-        - 人设: 19%
-        - 世界观: 12%
-        - 逆向反馈: 11%
-        - 自然度: 10%
+        - 知识库: 8%
+        - 写作技巧: 8%
+        - 字数: 8%
+        - 上下文衔接: 8%
+        - AI感: 5%
 
         总权重: 100%
         """
         raw_score = (
-            self.word_count_score * 0.08
-            + self.knowledge_reference_score * 0.08
+            self.worldview_score * 0.12
+            + self.character_score * 0.19
             + self.outline_score * 0.13
             + self.style_score * 0.19
-            + self.character_score * 0.19
-            + self.worldview_score * 0.12
-            + self.reverse_feedback_score * 0.11
-            + self.naturalness_score * 0.10
+            + self.knowledge_reference_score * 0.08
+            + self.writing_technique_score * 0.08
+            + self.word_count_score * 0.08
+            + self.context_coherence_score * 0.08
+            + self.ai_feeling_score * 0.05
         )
 
         self.total_score = min(raw_score, 1.0)
         return self.total_score
 
     def get_score_breakdown(self) -> Dict[str, float]:
-        """获取评分明细（包含各维度得分和权重）"""
+        """获取评分明细（V2.0版本 - 9维度）"""
         return {
-            "字数": {
-                "score": self.word_count_score,
-                "weight": 0.08,
-                "weighted_score": self.word_count_score * 0.08,
+            "世界观": {
+                "score": self.worldview_score,
+                "weight": 0.12,
+                "weighted_score": self.worldview_score * 0.12,
             },
-            "知识点引用": {
-                "score": self.knowledge_reference_score,
-                "weight": 0.08,
-                "weighted_score": self.knowledge_reference_score * 0.08,
+            "人设": {
+                "score": self.character_score,
+                "weight": 0.19,
+                "weighted_score": self.character_score * 0.19,
             },
             "大纲": {
                 "score": self.outline_score,
@@ -187,34 +209,39 @@ class ValidationScores(BaseModel):
                 "weight": 0.19,
                 "weighted_score": self.style_score * 0.19,
             },
-            "人设": {
-                "score": self.character_score,
-                "weight": 0.19,
-                "weighted_score": self.character_score * 0.19,
+            "知识库": {
+                "score": self.knowledge_reference_score,
+                "weight": 0.08,
+                "weighted_score": self.knowledge_reference_score * 0.08,
             },
-            "世界观": {
-                "score": self.worldview_score,
-                "weight": 0.12,
-                "weighted_score": self.worldview_score * 0.12,
+            "写作技巧": {
+                "score": self.writing_technique_score,
+                "weight": 0.08,
+                "weighted_score": self.writing_technique_score * 0.08,
             },
-            "逆向反馈": {
-                "score": self.reverse_feedback_score,
-                "weight": 0.11,
-                "weighted_score": self.reverse_feedback_score * 0.11,
+            "字数": {
+                "score": self.word_count_score,
+                "weight": 0.08,
+                "weighted_score": self.word_count_score * 0.08,
             },
-            "自然度": {
-                "score": self.naturalness_score,
-                "weight": 0.10,
-                "weighted_score": self.naturalness_score * 0.10,
+            "上下文衔接": {
+                "score": self.context_coherence_score,
+                "weight": 0.08,
+                "weighted_score": self.context_coherence_score * 0.08,
+            },
+            "AI感": {
+                "score": self.ai_feeling_score,
+                "weight": 0.05,
+                "weighted_score": self.ai_feeling_score * 0.05,
             },
             "总分": {"score": self.total_score, "weight": 1.0, "weighted_score": self.total_score},
         }
 
 
 class GenerationRequest(BaseModel):
-    """生成请求"""
+    """生成请求（V1.49.19修复：允许动态添加字段）"""
 
-    model_config = ConfigDict(frozen=False)
+    model_config = ConfigDict(frozen=False, extra='allow')
 
     request_id: str = Field(..., description="请求ID")
     title: str = Field(..., description="章节标题")
@@ -239,6 +266,7 @@ class GenerationResult(BaseModel):
     validation_scores: Optional[ValidationScores] = Field(None, description="验证评分")
     error: Optional[str] = Field(None, description="错误信息")
     timestamp: datetime = Field(default_factory=datetime.now, description="时间戳")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="扩展元数据（专家模式评估、优化建议等）")
 
 
 class PluginEvent(BaseModel):

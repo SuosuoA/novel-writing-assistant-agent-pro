@@ -151,11 +151,13 @@ class HotRankingDataManager:
 
     def _is_cache_valid(self, cache_data: Dict) -> bool:
         """检查缓存是否有效"""
-        if not cache_data or 'datetime' not in cache_data:
+        # V1.1修复：兼容timestamp和datetime两种字段名
+        time_str = cache_data.get('datetime') or cache_data.get('timestamp')
+        if not time_str:
             return False
 
         try:
-            cache_time = datetime.strptime(cache_data['datetime'], '%Y-%m-%d %H:%M:%S')
+            cache_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
             is_valid = datetime.now() - cache_time < self.cache_duration
             return is_valid
         except Exception as e:
@@ -2223,8 +2225,44 @@ class HotRankingPlugin(ToolPlugin):
             except Exception as e:
                 self._logger.warning(f"发布错误事件失败: {e}")
 
+    def _start_background_crawl(self):
+        """V1.1新增：后台异步爬取热榜数据，不阻塞UI
+        
+        爬取完成后发布事件通知UI刷新
+        """
+        def _crawl_task():
+            try:
+                self._logger.info("[热榜] 后台爬取任务开始...")
+                ranking_data = self._spider.crawl_all_sources()
+                
+                if ranking_data and isinstance(ranking_data, dict) and len(ranking_data) > 0:
+                    # V1.1修复：保存原始爬虫数据（与_refresh_rankings保持一致）
+                    self._data_manager.save_ranking_data(ranking_data)
+                    self._last_update_time = time.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # 发布数据更新事件，通知UI刷新
+                    if self._event_bus:
+                        self._event_bus.publish(
+                            event_type="hot_ranking.data_updated",
+                            data={"status": "success", "update_time": self._last_update_time}
+                        )
+                    self._logger.info(f"[热榜] 后台爬取完成，数据已更新: {self._last_update_time}")
+                else:
+                    self._logger.warning("[热榜] 后台爬取未获取到有效数据")
+                    
+            except Exception as e:
+                self._logger.error(f"[热榜] 后台爬取失败: {e}")
+        
+        # 在后台线程执行爬取
+        import threading
+        thread = threading.Thread(target=_crawl_task, daemon=True, name="HotRankingCrawler")
+        thread.start()
+
     def _get_ranking_data(self, force_fresh: bool = True) -> Dict:
-        """获取排行榜数据（GUI专用接口）"""
+        """获取排行榜数据（GUI专用接口）
+        
+        V1.1修复：保持原有逻辑，缓存不存在时同步爬取确保数据真实
+        """
         try:
             if not force_fresh:
                 cached_data = self._data_manager.load_latest_data()

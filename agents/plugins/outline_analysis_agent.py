@@ -89,11 +89,45 @@ class OutlineAnalysisAgent(BaseAgent):
                 except Exception as e:
                     self._logger.warning(f"[{self.AGENT_TYPE}] 服务定位器获取插件失败: {e}")
             
-            # 如果没有获取到，尝试动态导入
+            # 如果没有获取到，尝试动态导入（插件目录含连字符，需用importlib）
             if not self._plugin:
                 try:
-                    from plugins.outline_parser_v3.plugin import OutlineParserPlugin
-                    self._plugin = OutlineParserPlugin()
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location(
+                        "outline_parser_plugin",
+                        project_root / "plugins" / "outline-parser-v3" / "plugin.py"
+                    )
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    self._plugin = module.OutlineParserPlugin()
+                    # 调用插件初始化方法（需要构建PluginContext）
+                    from core.plugin_interface import PluginContext
+                    from core.service_locator import get_service_locator
+                    
+                    # 从ServiceLocator获取必要的服务
+                    locator = get_service_locator()
+                    try:
+                        event_bus = locator.get_service("event_bus")
+                    except:
+                        event_bus = None
+                    try:
+                        config_manager = locator.get_service("config_manager")
+                    except:
+                        config_manager = None
+                    try:
+                        plugin_registry = locator.get_service("plugin_registry")
+                    except:
+                        plugin_registry = None
+                    
+                    plugin_context = PluginContext(
+                        event_bus=event_bus,
+                        service_locator=locator,
+                        config_manager=config_manager,
+                        plugin_registry=plugin_registry,
+                        logger=self._logger
+                    )
+                    if not self._plugin.initialize(plugin_context):
+                        raise RuntimeError("OutlineParserPlugin初始化失败")
                     self._logger.info(f"[{self.AGENT_TYPE}] 创建本地插件实例: {self.PLUGIN_ID}")
                 except ImportError as e:
                     self._logger.error(f"[{self.AGENT_TYPE}] 无法导入插件: {e}")

@@ -118,13 +118,24 @@ class NovelGenerationAgent(BaseAgent):
                 except Exception as e:
                     self._logger.warning(f"[{self.AGENT_TYPE}] 服务定位器获取插件失败: {e}")
             
-            # 如果没有获取到，尝试动态导入
+            # V2.1修复：优先从插件注册表获取；动态导入改用 importlib
+            # （插件目录名为连字符 novel-generator-v3，旧下划线写法永远 ImportError）
             if not self._plugin:
                 try:
-                    from plugins.novel_generator_v3.plugin import NovelGeneratorPlugin
-                    self._plugin = NovelGeneratorPlugin()
+                    from core.plugin_registry import get_plugin_registry
+                    self._plugin = get_plugin_registry().get_plugin("novel-generator-v3")
+                    if self._plugin:
+                        self._logger.info(f"[{self.AGENT_TYPE}] 从插件注册表获取插件成功")
+                except Exception:
+                    pass
+            if not self._plugin:
+                try:
+                    import importlib
+                    mod = importlib.import_module("plugins.novel-generator-v3.plugin")
+                    self._plugin = mod.NovelGeneratorPlugin()
+                    self._init_local_plugin(self._plugin)  # 裸实例必须初始化
                     self._logger.info(f"[{self.AGENT_TYPE}] 创建本地插件实例: {self.PLUGIN_ID}")
-                except ImportError as e:
+                except Exception as e:
                     self._logger.error(f"[{self.AGENT_TYPE}] 无法导入插件: {e}")
                     self._set_state(AgentState.ERROR)
                     self._set_error(f"插件导入失败: {e}")

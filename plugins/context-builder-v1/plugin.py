@@ -477,14 +477,34 @@ class ContextBuilderPlugin(GeneratorPlugin):
         if not characters:
             return []
 
+        # V2.1修复：兼容多种人物数据形状（普通模式管线曾因 dict 形状在此崩溃，
+        # 与专家模式 V6.3 同类问题）：
+        # - {name: profile} 字典（GenerationDataService._format_characters 输出）→ 转列表
+        # - 扁平 dict（name/role 在顶层）与 V5 嵌套 dict（basic_info.name）均支持
+        if isinstance(characters, dict):
+            char_list = []
+            for cname, prof in characters.items():
+                if isinstance(prof, dict):
+                    if not prof.get('name') and not (
+                            isinstance(prof.get('basic_info'), dict)
+                            and prof['basic_info'].get('name')):
+                        prof = dict(prof)
+                        prof['name'] = cname
+                    char_list.append(prof)
+                else:
+                    char_list.append({'name': cname})
+            characters = char_list
+
         # 1. 从大纲提取人物名
         mentioned_names = self._extract_character_names(chapter_outline)
 
         # 2. 筛选相关人物（提到的 + 最多3个主要人物）
         relevant_chars = []
         for char in characters:
-            basic_info = char.get('basic_info', {})
-            name = basic_info.get('name', '')
+            if not isinstance(char, dict):
+                continue
+            basic_info = char.get('basic_info') if isinstance(char.get('basic_info'), dict) else char
+            name = basic_info.get('name', '') or char.get('name', '')
             if not name:
                 continue
 
@@ -492,6 +512,7 @@ class ContextBuilderPlugin(GeneratorPlugin):
             is_relevant = (
                 name in mentioned_names or
                 basic_info.get('role', '') in ['主角', '主要角色', '核心人物'] or
+                char.get('role', '') in ['主角', '主要角色', '核心人物'] or
                 len(relevant_chars) < 3
             )
 

@@ -34,6 +34,7 @@ from .ai_provider import (
 )
 from .config_service import ConfigService, get_config_service
 from .event_bus import EventBus, get_event_bus
+from .api_key_encryption import APIKeyEncryption
 
 logger = logging.getLogger(__name__)
 
@@ -196,21 +197,64 @@ class AIServiceManager:
         # 从ConfigService获取配置
         config = self._config_service.get_all()
         
+        # 获取API Key（处理加密存储占位符情况）
+        raw_api_key = config.get("api_key", "")
+        
+        # V1.49.37修复：检测占位符，从加密存储加载真实key
+        if (not raw_api_key or 
+            raw_api_key == "ENCRYPTED_IN_SECRETS_FILE" or
+            raw_api_key.startswith("ENCRYPTED") or
+            not raw_api_key.startswith("sk-")):
+            try:
+                encryption = APIKeyEncryption()
+                provider_name = config.get("provider", "DeepSeek")
+                # 优先按provider名称查找
+                decrypted_key = encryption.get_api_key(provider_name)
+                if decrypted_key and str(decrypted_key).startswith("sk-"):
+                    logger.debug("[AIServiceManager] API Key从加密存储加载成功 (%s...%s)", 
+                                str(decrypted_key)[:6], str(decrypted_key)[-4:])
+                    raw_api_key = str(decrypted_key)
+                else:
+                    # fallback：遍历所有key
+                    all_keys = encryption.load_all_api_keys()
+                    if all_keys:
+                        for k, v in all_keys.items():
+                            key_str = v.get("key") if isinstance(v, dict) else str(v)
+                            if key_str and key_str.startswith("sk-"):
+                                raw_api_key = key_str
+                                break
+            except Exception as e:
+                logger.warning("[AIServiceManager] 从加密存储加载API Key失败: %s, 使用原始值", e)
+        
         # 构建AI配置
         ai_config = {
             "service_mode": config.get("service_mode", "remote"),
             "provider": config.get("provider", "DeepSeek"),
             "model": config.get("model", "deepseek-chat"),
-            "api_key": config.get("api_key", ""),
+            "api_key": raw_api_key,
             "temperature": config.get("temperature", 0.7),
         }
         
-        # 读取base_url（优先级：deepseek.base_url > base_url > local_url）
+        # 读取base_url
+        # V1.49.35修复：根据service_mode选择正确的base_url降级策略
+        # 之前错误地在remote模式下使用local_url(Ollama地址)作为fallback
+        service_mode = config.get("service_mode", "remote")
+
         if "deepseek" in config and isinstance(config["deepseek"], dict):
-            ai_config["base_url"] = config["deepseek"].get("base_url", "https://api.deepseek.com")
-        elif "base_url" in config:
+            ai_config["base_url"] = config["deepseek"].get("base_url", "https://api.deepseek.com/v1")
+        elif "base_url" in config and config["base_url"]:
             ai_config["base_url"] = config["base_url"]
+        elif service_mode == "remote" or service_mode == "online":
+            # 远程模式：使用provider默认URL（不使用local_url！）
+            provider_name = config.get("provider", "DeepSeek")
+            default_urls = {
+                "DeepSeek": "https://api.deepseek.com/v1",
+                "OpenAI": "https://api.openai.com/v1",
+                "Anthropic": "https://api.anthropic.com/v1",
+            }
+            ai_config["base_url"] = default_urls.get(provider_name, "https://api.deepseek.com/v1")
         else:
+            # 本地模式：使用local_url
             ai_config["base_url"] = config.get("local_url", "http://localhost:11434/v1")
         
         # 如果有嵌套的local配置，也读取

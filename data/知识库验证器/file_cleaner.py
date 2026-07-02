@@ -197,7 +197,7 @@ class FileCleaner:
         
         # 1. 读取文件
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, 'r', encoding='utf-8-sig') as f:
                 data = json.load(f)
         except Exception as e:
             logger.error(f"[FILE_CLEANER] 读取文件失败: {file_path}, {e}")
@@ -402,7 +402,7 @@ class FileCleaner:
                     timestamp = parts[1]
                     
                     # 读取备份文件获取知识条目数量
-                    with open(backup_file, 'r', encoding='utf-8') as f:
+                    with open(backup_file, 'r', encoding='utf-8-sig') as f:
                         data = json.load(f)
                         knowledge_count = len(data.get('knowledge_points', []))
                     
@@ -439,7 +439,7 @@ class FileCleaner:
         """
         try:
             # 读取备份文件
-            with open(backup_path, 'r', encoding='utf-8') as f:
+            with open(backup_path, 'r', encoding='utf-8-sig') as f:
                 backup_data = json.load(f)
             
             # 提取原始文件名
@@ -470,7 +470,7 @@ class FileCleaner:
             # 读取当前文件
             current_count = 0
             if original_path.exists():
-                with open(original_path, 'r', encoding='utf-8') as f:
+                with open(original_path, 'r', encoding='utf-8-sig') as f:
                     current_data = json.load(f)
                     current_count = len(current_data.get('knowledge_points', []))
             else:

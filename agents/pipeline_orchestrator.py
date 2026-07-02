@@ -292,10 +292,19 @@ class PipelineOrchestrator:
                 # 检查是否需要重试
                 if not should_retry:
                     # 验证通过，提取最终输出
+                    # V2.1修复：优先取含 content 的阶段数据（content_generation），
+                    # 否则"最后一个成功阶段"是 validation 的纯评分dict → GUI 显示
+                    # "生成完成"但正文为空（final_output.content 缺失）。
                     for stage_result in reversed(stage_results):
-                        if stage_result.success and stage_result.data:
+                        if (stage_result.success and isinstance(stage_result.data, dict)
+                                and stage_result.data.get("content")):
                             result.final_output = stage_result.data
                             break
+                    else:
+                        for stage_result in reversed(stage_results):
+                            if stage_result.success and stage_result.data:
+                                result.final_output = stage_result.data
+                                break
                     break
                 
                 # 检查取消请求
@@ -411,6 +420,30 @@ class PipelineOrchestrator:
             stage_name = stage_info["name"]
             agent_type = stage_info["agent_type"]
             timeout = stage_info.get("timeout_seconds", 60)
+            
+            # V2.0修订（P1-NEW-2）：validation阶段智能跳过
+            # 如果content_generation阶段已在内部完成验证（评分+迭代），
+            # 则跳过validation阶段，避免重复验证
+            if stage_name == "validation":
+                # V2.1修复：content_generation 返回 dict 时数据被 merge 进 payload
+                # （从不落到 previous_output）→ 智能跳过永不生效、每轮重复验证。
+                # 改为直接读 merge 后的 payload['stats']（保留旧 previous_output 兜底）。
+                prev_output = current_payload.get("previous_output")
+                if not isinstance(prev_output, dict):
+                    prev_output = current_payload
+                if isinstance(prev_output, dict):
+                    stats = prev_output.get("stats", {})
+                    if isinstance(stats, dict) and stats.get("final_score", 0) > 0:
+                        # content_generation已包含验证结果，跳过validation阶段
+                        logger.info(f"[Pipeline] validation阶段智能跳过：content_generation已包含验证（评分={stats.get('final_score', 0):.2f}）")
+                        # 发布跳过事件
+                        self._publish_event("pipeline.stage_skipped", {
+                            "pipeline_id": pipeline_id,
+                            "stage_name": stage_name,
+                            "reason": "content_generation已包含验证",
+                            "iteration": iteration,
+                        })
+                        continue
             
             # 更新进度（P2修复：添加迭代信息）
             self._notify_progress(

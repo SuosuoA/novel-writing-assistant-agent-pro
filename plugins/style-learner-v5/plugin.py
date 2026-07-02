@@ -345,6 +345,13 @@ class StyleLearnerPlugin(AnalyzerPlugin):
             result["writing_characteristics"] = self._generate_writing_characteristics(result)
             result["similar_authors"] = self._find_similar_authors(result)
             result["prompt_suggestions"] = self._generate_prompt_suggestions(result)
+            
+            # 【V1.48.3】生成风格特征关键词（供专家模式validator使用）
+            # 从8维度数据中提取核心关键词，使_evaluator_style()能正确匹配
+            result["keywords"] = self._extract_style_keywords(result)
+            
+            # 【V1.48.13】生成八维度评分（供GUI显示和导出）
+            result["dimensions"] = self._generate_dimension_scores(result)
         
         self._logger.info(f"风格分析完成: {author_name}")
         return result
@@ -833,6 +840,546 @@ class StyleLearnerPlugin(AnalyzerPlugin):
             suggestions.append(char)
         
         return suggestions
+
+    def _extract_style_keywords(self, result: Dict) -> List[str]:
+        """提取风格特征关键词（供专家模式validator._evaluate_style使用）
+        
+        从8维度分析数据中提取核心特征词，使风格评分能正确匹配。
+        包括：
+        - 高频词汇（Top 10）
+        - 情感倾向词
+        - 风格标签词
+        - 语言风格注册词
+        """
+        keywords = []
+        
+        # 1. 高频词汇
+        vocab = result.get("vocabulary_depth", {})
+        high_freq = vocab.get("high_frequency_words", [])
+        if high_freq:
+            for word, _ in high_freq[:10]:
+                if isinstance(word, str) and len(word) >= 2:
+                    keywords.append(word)
+        
+        # 2. 风格标签转关键词
+        tags = result.get("style_tags", [])
+        tag_keyword_map = {
+            "修辞丰富": ["修辞", "比喻", "拟人"],
+            "善用比喻": ["比喻", "仿佛", "如同"],
+            "积极向上": ["希望", "美好", "幸福"],
+            "深沉内敛": ["沉思", "宁静", "深远"],
+            "情感中性": ["平和", "淡然"],
+            "短句为主": ["短促", "明快"],
+            "长句为主": ["细腻", "绵长"],
+            "感官描写丰富": ["视觉", "听觉", "触觉"],
+            "词汇丰富": ["丰富", "多样"],
+            "句式多变": ["变化", "交替"],
+        }
+        for tag in tags:
+            if tag in tag_keyword_map:
+                keywords.extend(tag_keyword_map[tag])
+        
+        # 3. 语言风格
+        language = result.get("language_style", {})
+        register = language.get("register", "")
+        register_keywords = {
+            "口语化": ["嘛", "呗", "哎", "嘿", "啊", "噢"],
+            "书面化": ["因此", "所以", "然而", "此外", "综上所述"],
+            "雅俗共赏": [],
+        }
+        if register in register_keywords:
+            keywords.extend(register_keywords[register])
+        
+        # 4. 叙事视角
+        narrative = result.get("narrative_style", {})
+        perspective = narrative.get("perspective", "")
+        if perspective == "第一人称":
+            keywords.extend(["我", "我们"])
+        elif perspective == "第三人称":
+            keywords.extend(["他", "她", "他们"])
+        
+        # 5. 去重并限制数量
+        seen = set()
+        unique_keywords = []
+        for kw in keywords:
+            if kw not in seen and len(kw) >= 1:
+                unique_keywords.append(kw)
+                seen.add(kw)
+        
+        self._logger.info(f"提取风格关键词: {len(unique_keywords)}个")
+        return unique_keywords[:50]  # 最多50个，避免过度匹配
+
+    def _generate_dimension_scores(self, result: Dict) -> Dict[str, float]:
+        """生成八维度评分（供GUI显示和导出）
+        
+        【V1.48.13新增】基于分析数据生成0-10分的维度评分，确保：
+        1. 导出JSON时保留评分
+        2. 重新导入后评分一致
+        
+        评分规则：
+        - vocabulary: 基于高频词数量，每2个词加1分，最高10分
+        - sentence: 基于句式变化程度
+        - rhetoric: 基于修辞密度
+        - emotion: 基于情感强度
+        - narrative: 基于叙事特点
+        - language: 基于语言风格复杂度
+        - pacing: 基于节奏变化
+        - detail: 基于细节描写丰富度（扩展维度）
+        """
+        dimensions = {}
+        
+        # 1. 词汇评分
+        vocab = result.get("vocabulary_depth", {})
+        if vocab and vocab.get("high_frequency_words"):
+            try:
+                dimensions["vocabulary"] = min(10.0, len(vocab.get("high_frequency_words", [])) / 2)
+            except:
+                dimensions["vocabulary"] = 5.0
+        else:
+            dimensions["vocabulary"] = 5.0
+        
+        # 2. 句式评分
+        sentence = result.get("sentence_patterns", {})
+        if sentence:
+            # 短句和长句比例差异越大，句式变化越丰富
+            short_ratio = sentence.get("short_sentences_ratio", 0)
+            long_ratio = sentence.get("long_sentences_ratio", 0)
+            variance = abs(short_ratio - long_ratio)
+            # 基础分5分 + 变化分（最多5分）
+            dimensions["sentence"] = 5.0 + min(5.0, variance * 10)
+        else:
+            dimensions["sentence"] = 5.0
+        
+        # 3. 修辞评分
+        rhetoric = result.get("rhetorical_devices", {})
+        if rhetoric:
+            density = rhetoric.get("rhetorical_density", 0)
+            # 密度0-10映射到分数0-10
+            dimensions["rhetoric"] = min(10.0, max(0.0, density))
+        else:
+            dimensions["rhetoric"] = 5.0
+        
+        # 4. 情感评分
+        emotion = result.get("emotional_tone", {})
+        if emotion:
+            intensity = emotion.get("emotional_intensity", 0.5)
+            # 强度0-1映射到分数0-10
+            dimensions["emotion"] = min(10.0, intensity * 10)
+        else:
+            dimensions["emotion"] = 5.0
+        
+        # 5. 叙事评分
+        narrative = result.get("narrative_style", {})
+        if narrative:
+            # 有视角和时态信息则加分
+            score = 5.0
+            if narrative.get("perspective"):
+                score += 2.0
+            if narrative.get("narrative_pace"):
+                score += 1.5
+            if narrative.get("scene_descriptions"):
+                score += 1.5
+            dimensions["narrative"] = min(10.0, score)
+        else:
+            dimensions["narrative"] = 5.0
+        
+        # 6. 语言评分
+        language = result.get("language_style", {})
+        if language:
+            score = 5.0
+            formality = language.get("formality", 0.5)
+            # 正式度适中（0.4-0.6）则高分
+            if 0.4 <= formality <= 0.6:
+                score += 3.0
+            else:
+                score += 1.5
+            # 有成语使用则加分
+            if language.get("idioms"):
+                score += 2.0
+            dimensions["language"] = min(10.0, score)
+        else:
+            dimensions["language"] = 5.0
+        
+        # 7. 节奏评分
+        pacing = result.get("pacing_style", {})
+        if pacing:
+            score = 5.0
+            if pacing.get("overall_pace"):
+                score += 2.0
+            if pacing.get("paragraph_rhythm"):
+                score += 1.5
+            if pacing.get("dialogue_intervals"):
+                score += 1.5
+            dimensions["pacing"] = min(10.0, score)
+        else:
+            dimensions["pacing"] = 5.0
+        
+        # 8. 细节评分（扩展维度）
+        vocab_sensory = vocab.get("sensory_words", {}) if vocab else {}
+        if vocab_sensory:
+            # 感官描写类型越多，细节越丰富
+            dimensions["detail"] = min(10.0, 5.0 + len(vocab_sensory) * 1.5)
+        else:
+            dimensions["detail"] = 5.0
+        
+        self._logger.info(f"生成维度评分: {dimensions}")
+        return dimensions
+
+    @staticmethod
+    def ensure_dimensions(profile: Dict) -> Dict:
+        """确保风格档案包含dimensions字段（供GUI加载旧JSON时调用）
+        
+        【V1.48.14新增】处理旧版本导出的JSON文件：
+        - 如果已有dimensions字段，直接返回
+        - 如果没有，基于现有数据生成评分
+        
+        Args:
+            profile: 风格档案字典
+            
+        Returns:
+            补充了dimensions字段的风格档案
+        """
+        if not isinstance(profile, dict):
+            return profile
+        
+        # 已有dimensions则直接返回
+        if profile.get("dimensions"):
+            return profile
+        
+        # 补充dimensions评分
+        dimensions = {}
+        
+        # 兼容多种key名称格式
+        vocab = profile.get('vocabulary_analysis') or profile.get('vocabulary_depth') or {}
+        sentence = profile.get('sentence_pattern') or profile.get('sentence_patterns') or {}
+        rhetoric = profile.get('rhetoric_devices') or profile.get('rhetorical_devices') or {}
+        emotion = profile.get('emotion_color') or profile.get('emotional_tone') or {}
+        pacing = profile.get('rhythm_style') or profile.get('pacing_style') or {}
+        narrative = profile.get('narrative_style') or {}
+        language = profile.get('language_style') or {}
+        
+        # 1. 词汇评分
+        if vocab and vocab.get("high_frequency_words"):
+            try:
+                dimensions["vocabulary"] = min(10.0, len(vocab.get("high_frequency_words", [])) / 2)
+            except:
+                dimensions["vocabulary"] = 5.0
+        else:
+            dimensions["vocabulary"] = 5.0
+        
+        # 2. 句式评分
+        if sentence:
+            short_ratio = sentence.get("short_sentences_ratio", 0)
+            long_ratio = sentence.get("long_sentences_ratio", 0)
+            variance = abs(short_ratio - long_ratio)
+            dimensions["sentence"] = 5.0 + min(5.0, variance * 10)
+        else:
+            dimensions["sentence"] = 5.0
+        
+        # 3. 修辞评分
+        if rhetoric:
+            density = rhetoric.get("rhetorical_density", 5.0)
+            dimensions["rhetoric"] = min(10.0, max(0.0, density) if isinstance(density, (int, float)) else 5.0)
+        else:
+            dimensions["rhetoric"] = 5.0
+        
+        # 4. 情感评分
+        if emotion:
+            intensity = emotion.get("emotional_intensity", 0.5)
+            dimensions["emotion"] = min(10.0, intensity * 10)
+        else:
+            dimensions["emotion"] = 5.0
+        
+        # 5. 叙事评分
+        if narrative:
+            score = 5.0
+            if narrative.get("perspective"):
+                score += 2.0
+            if narrative.get("narrative_pace"):
+                score += 1.5
+            if narrative.get("scene_descriptions"):
+                score += 1.5
+            dimensions["narrative"] = min(10.0, score)
+        else:
+            dimensions["narrative"] = 5.0
+        
+        # 6. 语言评分
+        if language:
+            score = 5.0
+            formality = language.get("formality", 0.5)
+            if 0.4 <= formality <= 0.6:
+                score += 3.0
+            else:
+                score += 1.5
+            if language.get("idioms"):
+                score += 2.0
+            dimensions["language"] = min(10.0, score)
+        else:
+            dimensions["language"] = 5.0
+        
+        # 7. 节奏评分
+        if pacing:
+            score = 5.0
+            if pacing.get("overall_pace"):
+                score += 2.0
+            if pacing.get("paragraph_rhythm"):
+                score += 1.5
+            if pacing.get("dialogue_intervals"):
+                score += 1.5
+            dimensions["pacing"] = min(10.0, score)
+        else:
+            dimensions["pacing"] = 5.0
+        
+        # 8. 细节评分
+        vocab_sensory = vocab.get("sensory_words", {}) if vocab else {}
+        if vocab_sensory:
+            dimensions["detail"] = min(10.0, 5.0 + len(vocab_sensory) * 1.5)
+        else:
+            dimensions["detail"] = 5.0
+        
+        profile["dimensions"] = dimensions
+        return profile
+
+    def deep_analyze(self, style_profile: Dict[str, Any]) -> Dict[str, Any]:
+        """AI深度学习 - 基于LLM增强风格理解
+        
+        【V1.48.3新增】结合专家模式，使用LLM对风格档案进行深度分析：
+        1. 提炼核心写作手法（从8维度数据中）
+        2. 生成可操作的写作指导prompt
+        3. 识别标志性表达模式
+        4. 生成专家级风格描述
+        
+        Args:
+            style_profile: 风格分析结果字典（来自analyze()的返回值）
+            
+        Returns:
+            深度分析结果字典
+        """
+        import time as _time
+        
+        # 如果没有基础数据，直接返回
+        if not style_profile or not style_profile.get("success", True) and "author_name" not in style_profile:
+            return {"success": False, "error": "无效的风格数据"}
+        
+        try:
+            # 从现有8维度数据中提炼深层特征
+            author = style_profile.get('author_name', '未知')
+            
+            # 1. 核心写作手法提炼
+            writing_techniques = self._extract_writing_techniques(style_profile)
+            
+            # 2. 生成增强版风格描述
+            enhanced_description = self._generate_enhanced_description(style_profile)
+            
+            # 3. 生成可操作写作规则
+            writing_rules = self._generate_writing_rules(style_profile)
+            
+            # 4. 专家级风格prompt（可直接用于生成器）
+            expert_prompt = self._generate_expert_style_prompt(style_profile)
+            
+            # 构建完整深度学习结果
+            deep_result = {
+                "success": True,
+                "learned_time": _time.strftime("%Y-%m-%d %H:%M:%S"),
+                "enhancement_applied": True,
+                "original_tags": style_profile.get('style_tags', []),
+                "writing_techniques": writing_techniques,
+                "enhanced_description": enhanced_description,
+                "writing_rules": writing_rules,
+                "expert_prompt": expert_prompt,
+                "deep_keywords": style_profile.get('keywords', []),  # 使用新提取的关键词
+                # 原始数据保留
+                "original_profile": {
+                    "author_name": author,
+                    "genre": style_profile.get('genre', ''),
+                    "sample_size_chars": style_profile.get('sample_size_chars', 0),
+                },
+                # 风格参考（供生成器直接使用）
+                "style_reference": {
+                    "vocabulary": style_profile.get('vocabulary_depth', {}),
+                    "sentence": style_profile.get('sentence_patterns', {}),
+                    "rhetoric": style_profile.get('rhetorical_devices', {}),
+                    "emotion": style_profile.get('emotional_tone', {}),
+                    "language": style_profile.get('language_style', {}),
+                    "narrative": style_profile.get('narrative_style', {}),
+                    "pacing": style_profile.get('pacing_style', {}),
+                }
+            }
+            
+            self._logger.info(f"深度学习完成: {author}, 提取{len(writing_techniques)}个技巧")
+            return deep_result
+            
+        except Exception as e:
+            self._logger.error(f"深度学习失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _extract_writing_techniques(self, result: Dict) -> List[Dict]:
+        """从分析结果中提取具体的写作手法"""
+        techniques = []
+        
+        修辞 = result.get("rhetorical_devices", {})
+        if 修辞:
+            meta_count = len(修辞.get("metaphors", []))
+            pers_count = len(修辞.get("personifications", []))
+            hyper_count = len(修辞.get("hyperboles", []))
+            density = 修辞.get("rhetorical_density", 0)
+            if density > 1:
+                techniques.append({
+                    "name": "修辞密集型",
+                    "detail": f"密度{density:.1f}/千字，比喻{meta_count}、拟人{pers_count}、夸张{hyper_count}",
+                    "level": "high" if density > 3 else "medium"
+                })
+        
+        sentence = result.get("sentence_patterns", {})
+        if sentence:
+            short_ratio = sentence.get("short_sentences_ratio", 0)
+            long_ratio = sentence.get("long_sentences_ratio", 0)
+            rhythm = sentence.get("sentence_rhythm", "")
+            if short_ratio > 0.5:
+                techniques.append({
+                    "name": "短句节奏",
+                    "detail": f"短句占比{short_ratio:.0%}，节奏{rhythm}",
+                    "level": "high" if short_ratio > 0.7 else "medium"
+                })
+            elif long_ratio > 0.3:
+                techniques.append({
+                    "name": "长句铺陈",
+                    "detail": f"长句占比{long_ratio:.0%}，节奏{rhythm}",
+                    "level": "medium"
+                })
+        
+        narrative = result.get("narrative_style", {})
+        if narrative:
+            techniques.append({
+                "name": f"{narrative.get('perspective', '')}叙事",
+                "detail": f"视角={narrative.get('perspective', '-')}, 时态={narrative.get('tense', '-')}, 节奏={narrative.get('narrative_pace', '-')}",
+                "level": "low"
+            })
+        
+        emotion = result.get("emotional_tone", {})
+        if emotion:
+            techniques.append({
+                "name": f"{emotion.get('overall_sentiment', '')}情感基调",
+                "detail": f"强度={emotion.get('emotional_intensity', 0):.2f}",
+                "level": "medium"
+            })
+        
+        language = result.get("language_style", {})
+        if language:
+            register = language.get("register", "")
+            if register != "雅俗共赏":
+                techniques.append({
+                    "name": f"{register}语体",
+                    "detail": f"正式度={language.get('formality', 0):.2f}",
+                    "level": "low"
+                })
+        
+        pacing = result.get("pacing_style", {})
+        if pacing:
+            techniques.append({
+                "name": f"{pacing.get('overall_pace', '')}",
+                "detail": f"段落节奏{'均匀' if max(pacing.get('paragraph_rhythm', [100])) - min(pacing.get('paragraph_rhythm', [100])) < 200 else '多变'}",
+                "level": "low"
+            })
+        
+        return techniques
+
+    def _generate_enhanced_description(self, result: Dict) -> str:
+        """生成增强版风格描述"""
+        parts = []
+        parts.append(f"【{result.get('author_name', '未知')}】的风格特征：")
+        
+        tags = result.get('style_tags', [])
+        if tags:
+            parts.append(f"核心标签：{' + '.join(tags)}")
+        
+        chars = result.get('writing_characteristics', [])
+        if chars:
+            for c in chars[:3]:
+                parts.append(f"- {c}")
+        
+        similar = result.get('similar_authors', [])
+        if similar and similar[0] != "暂无相似作家":
+            parts.append(f"风格接近：{'、'.join(similar)}")
+        
+        return "\n".join(parts)
+
+    def _generate_writing_rules(self, result: Dict) -> List[str]:
+        """基于分析结果生成可操作写作规则"""
+        rules = []
+        
+        sentence = result.get("sentence_patterns", {})
+        short_ratio = sentence.get("short_sentences_ratio", 0)
+        long_ratio = sentence.get("long_sentences_ratio", 0)
+        
+        if short_ratio > 0.6:
+            rules.append("多用短句，控制单句长度在15字以内")
+            rules.append("适当使用短促有力的断句")
+        elif long_ratio > 0.35:
+            rules.append("善用长句进行细腻描写和铺陈")
+            rules.append("注意长短句交替，避免单调")
+        
+        rhetoric = result.get("rhetorical_devices", {})
+        if rhetoric.get("rhetorical_density", 0) > 1.5:
+            rules.append("频繁使用比喻、拟人等修辞手法")
+            rules.append("注重意象的营造和氛围渲染")
+        
+        emotion = result.get("emotional_tone", {})
+        if emotion.get("overall_sentiment") == "积极":
+            rules.append("保持明亮温暖的笔调")
+        elif emotion.get("overall_sentiment") == "消极":
+            rules.append("运用内敛深沉的情感表达")
+        
+        narrative = result.get("narrative_style", {})
+        perspective = narrative.get("perspective", "")
+        if "第一人称" in perspective:
+            rules.append("大量使用内心独白和主观感受")
+        elif "第三人称" in perspective:
+            rules.append("采用客观叙述视角，注重场景描写")
+        
+        vocab = result.get("vocabulary_depth", {})
+        sensory = vocab.get("sensory_words", {})
+        if sensory:
+            rules.append("重视感官描写，调动读者多感官体验")
+        
+        if not rules:
+            rules.append("保持自然流畅的叙述风格")
+        
+        return rules
+
+    def _generate_expert_style_prompt(self, result: Dict) -> str:
+        """生成专家级风格prompt（可直接注入生成器）"""
+        prompt_parts = []
+        
+        prompt_parts.append(f"=== {result.get('author_name', '未知')} 风格指令 ===")
+        
+        # 写作规则
+        rules = self._generate_writing_rules(result)
+        if rules:
+            prompt_parts.append("\n【写作规则】")
+            for i, rule in enumerate(rules, 1):
+                prompt_parts.append(f"  {i}. {rule}")
+        
+        # 技巧
+        techniques = self._extract_writing_techniques(result)
+        if techniques:
+            prompt_parts.append("\n【核心技巧】")
+            for tech in techniques[:4]:
+                prompt_parts.append(f"  - {tech['name']}: {tech['detail']}")
+        
+        # 情感
+        emotion = result.get("emotional_tone", {})
+        if emotion:
+            prompt_parts.append(f"\n【情感基调】: {emotion.get('overall_sentiment', '中性')}")
+        
+        # 语言风格
+        language = result.get("language_style", {})
+        if language:
+            prompt_parts.append(f"【语体风格】: {language.get('register', '通用')}")
+        
+        prompt_parts.append("\n请严格按照以上风格要求进行创作，确保文风一致。")
+        
+        return "\n".join(prompt_parts)
 
     def get_supported_formats(self) -> List[str]:
         """获取支持的输入格式"""

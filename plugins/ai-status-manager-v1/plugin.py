@@ -11,6 +11,9 @@ AI状态管理插件 V1.0
 - 业务逻辑全部在插件层实现
 - GUI通过EventBus订阅状态事件
 - 不影响软件启动速度，按需初始化
+
+V1.49.34修复：移除本地BasePlugin定义，改用核心基类，
+解决"No BasePlugin subclass found"加载失败。
 """
 
 import logging
@@ -22,47 +25,17 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
 from enum import Enum
-from abc import ABC, abstractmethod
+
+# V1.49.34修复：从核心模块导入基类（不再定义本地副本）
+try:
+    from core.plugin_interface import BasePlugin, ToolPlugin, PluginContext, PluginState
+except ImportError:
+    # 降级方案
+    from core.plugin_loader import BasePlugin
+    class ToolPlugin(BasePlugin):
+        pass
 
 logger = logging.getLogger(__name__)
-
-
-# 插件基础类（简化版，避免循环导入）
-class PluginState(str, Enum):
-    """插件状态"""
-    LOADED = "loaded"
-    READY = "ready"
-    ERROR = "error"
-
-
-class PluginContext:
-    """插件上下文"""
-    def __init__(self, plugin_id: str, config: Dict[str, Any] = None):
-        self.plugin_id = plugin_id
-        self.config = config or {}
-
-
-class BasePlugin(ABC):
-    """插件基类"""
-    def __init__(self):
-        self._state = PluginState.LOADED
-        self._context = None
-
-    @property
-    def state(self) -> PluginState:
-        return self._state
-
-    def initialize(self, context: PluginContext) -> bool:
-        """初始化插件"""
-        self._context = context
-        # 默认实现，子类可以重写
-        self._state = PluginState.READY
-        return True
-
-
-class ToolPlugin(BasePlugin):
-    """工具插件基类"""
-    pass
 
 
 class AIConnectionState(str, Enum):
@@ -96,7 +69,17 @@ class AIStatusManagerPlugin(ToolPlugin):
     PLUGIN_VERSION = "1.0.0"
 
     def __init__(self):
-        super().__init__()
+        # V1.49.34修复：构造默认metadata并调用父类初始化
+        from core.plugin_interface import PluginMetadata, PluginType
+        metadata = PluginMetadata(
+            id=self.PLUGIN_ID,
+            name=self.PLUGIN_NAME,
+            version=self.PLUGIN_VERSION,
+            description="管理AI连接状态、本地服务启停、状态事件发布",
+            author="Agent Pro Team",
+            plugin_type=PluginType.TOOL,
+        )
+        super().__init__(metadata)
 
         # 状态管理
         self._connection_state = AIConnectionState.DISCONNECTED
@@ -121,6 +104,36 @@ class AIStatusManagerPlugin(ToolPlugin):
 
         # EventBus（延迟初始化）
         self._event_bus = None
+
+    @classmethod
+    def get_metadata(cls) -> "PluginMetadata":
+        """获取插件元数据（V1.49.34新增 - 满足BasePlugin抽象方法要求）"""
+        from core.plugin_interface import PluginMetadata, PluginType
+        return PluginMetadata(
+            id=cls.PLUGIN_ID,
+            name=cls.PLUGIN_NAME,
+            version=cls.PLUGIN_VERSION,
+            description="管理AI连接状态、本地服务启停、状态事件发布",
+            author="Agent Pro Team",
+            plugin_type=PluginType.TOOL,
+        )
+
+    def execute(self, action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """执行工具操作（V1.49.34新增 - 满足ToolPlugin抽象方法要求）"""
+        params = params or {}
+        if action == "get_status":
+            return self.get_status()
+        elif action == "test_connection":
+            return self.test_connection(
+                endpoint=params.get("endpoint", ""),
+                provider=params.get("provider", "DeepSeek"),
+            )
+        elif action == "start_local":
+            return self.start_local_service(params.get("service_name", "qwen"))
+        elif action == "stop_local":
+            return self.stop_local_service()
+        else:
+            raise ValueError(f"Unknown action: {action}")
 
     def initialize(self, context: PluginContext) -> bool:
         """

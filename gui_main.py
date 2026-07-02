@@ -24,9 +24,11 @@ import os
 os.environ["TRANSFORMERS_OFFLINE"] = "1"      # Transformers离线模式
 os.environ["HF_HUB_OFFLINE"] = "1"            # HuggingFace Hub离线模式
 os.environ["HF_DATASETS_OFFLINE"] = "1"       # Datasets离线模式
+os.environ["DEV_MODE"] = "1"                  # 开发模式（允许非官方插件加载）
 
 # ============== 其他导入 ==============
 import sys
+import re
 import json
 import yaml
 import tkinter as tk
@@ -42,9 +44,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from ctypes import c_int, byref, sizeof, windll
-import networkx as nx
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+# 启动性能修复：matplotlib/networkx 仅用于"人物关系图谱"（非启动功能），
+# 顶层急导入会拖慢启动约1秒。改为在用到图谱的函数内部局部导入。
+# （_show_character_relations / _highlight_node 等已各自局部 import）
 
 # 尝试导入sv_ttk
 try:
@@ -1485,6 +1487,13 @@ class MainWindow:
     
     def __init__(self):
         """初始化主窗口"""
+        # 性能关键：在创建任何控件之前，安装 emoji 文本拦截器。
+        # 根因（实测）：默认字体"楷体"无 emoji 字形，Tk 首次渲染 emoji 要做字体回退+加载系统
+        # emoji 字体，本机首次约7s、每个新 emoji 再~1s，导致含 emoji 的页面（热榜/设置等）
+        # 创建时卡顿。拦截器把"装饰性 emoji（emoji+文字）"中的 emoji 去掉、保留文字，
+        # 纯图标按钮则原样保留（避免变空白），从而消除页面创建时的 emoji 渲染。
+        self._install_emoji_text_patch()
+
         # 设置Windows任务栏图标（必须在创建窗口前设置）
         # 这样Windows会将程序识别为独立应用，而非Python解释器
         try:
@@ -1499,7 +1508,9 @@ class MainWindow:
         self.root = tk.Tk()
         self.root.title(self.TITLE)
         self.root.geometry("1400x900")
-        self.root.minsize(1000, 700)
+        # 【V1.48.8】固定窗口大小，禁止用户拖拽调整
+        self.root.resizable(False, False)
+        self.root.minsize(1400, 900)
         
         # 设置窗口背景
         self.root.configure(bg=GlassTheme.GLASS_BG)
@@ -1604,6 +1615,10 @@ class MainWindow:
         
         # V2.18: 后台预加载向量模型（5秒后开始，不阻塞UI）
         self.root.after(5000, self._preload_vector_store_async)
+
+        # 性能修复：启动后在后台慢慢预拉热榜数据（不阻塞、不作为默认页）。
+        # 延迟到 mainloop 稳定运行后再开始，避免与启动竞争、且渲染回调可正常工作。
+        self.root.after(8000, self._prefetch_hot_ranking_async)
         
         # V3.2.1: 启动时同步项目名称显示
         self.root.after(100, self._sync_project_name_on_startup)
@@ -1724,6 +1739,9 @@ class MainWindow:
             # 订阅生成事件
             self._subscribe_generation_events()
             
+            # 设置_plugin_registry属性（供专家模式使用）
+            self._plugin_registry = get_plugin_registry()
+            
             logger.info("Core services initialized")
         except Exception as e:
             logger.error(f"Failed to initialize core services: {e}")
@@ -1799,7 +1817,9 @@ class MainWindow:
         self._title_bar.pack(fill=tk.X)
         
         # 窗口调整大小的边框感知（完全无边框模式需要）
-        self._resize_grip = ResizeGrip(self.root)
+        # 【V1.48.8】禁用窗口拖拽调整大小（resizable(False,False) + 不创建 ResizeGrip）
+        # self._resize_grip = ResizeGrip(self.root)  # 已禁用，固定1400x900
+        self._resize_grip = None
         
         # 主容器
         main_container = ttk.Frame(self.root, style="TFrame")
@@ -1814,8 +1834,11 @@ class MainWindow:
         # 状态栏
         self._create_status_bar()
         
-        # 默认显示热榜页面
-        self._switch_to_page("hot_ranking")
+        # 默认显示工作台页面（轻量，纯Tk）
+        # 性能修复：原默认页是热榜，会在 __init__ 期触发热榜插件动态加载+网络拉取（约14秒），
+        # 且此时 mainloop 未启动导致渲染回调失败（main thread is not in main loop）。
+        # 改为默认开工作台，热榜数据由 _prefetch_hot_ranking_async 在启动后后台慢慢拉取。
+        self._switch_to_page("workbench")
     
     def _create_sidebar(self, parent: tk.Widget) -> None:
         """创建侧边栏"""
@@ -1953,6 +1976,9 @@ class MainWindow:
     def _init_ai_status_manager(self):
         """初始化AI状态管理插件（按需初始化，不影响启动速度）"""
         try:
+            # V1.49.34修复：PluginContext从核心模块导入（不再从插件本地导入）
+            from core.plugin_interface import PluginContext
+
             import sys
             from pathlib import Path
             plugin_path = Path(__file__).parent / "plugins" / "ai-status-manager-v1"
@@ -1960,12 +1986,26 @@ class MainWindow:
             if str(plugin_path) not in sys.path:
                 sys.path.insert(0, str(plugin_path))
 
-            # 导入插件类（插件内部已包含基础类定义）
-            from plugin import AIStatusManagerPlugin, PluginContext
+            from plugin import AIStatusManagerPlugin
 
             plugin = AIStatusManagerPlugin()
+
+            # 获取EventBus构建上下文
+            event_bus = None
+            try:
+                from core.service_locator import get_service_locator
+                from core.event_bus import EventBus
+                locator = get_service_locator()
+                if locator:
+                    event_bus = locator.get(EventBus)
+            except Exception:
+                pass
+
             context = PluginContext(
-                plugin_id="ai-status-manager-v1",
+                event_bus=event_bus,
+                service_locator=None,
+                config_manager=None,
+                plugin_registry=None,
                 config={
                     "auto_sync_interval": 30,
                     "retry_on_failure": True,
@@ -1989,19 +2029,7 @@ class MainWindow:
                         logger.info(f"[GUI] EventBus获取成功: {event_bus}")
                         event_bus.subscribe("ai.status.changed", self._on_ai_status_changed)
                         logger.info("[GUI] 已订阅AI状态变更事件")
-
-                        # 测试发布一个事件，验证订阅是否成功
-                        test_status = {
-                            "connection_state": "测试中",
-                            "service_type": "线上",
-                            "provider": "Test",
-                            "model": "test-model",
-                            "endpoint": "http://test",
-                            "error_message": ""
-                        }
-                        # V3.2修复：publish直接传递数据，不需要包装成Event对象
-                        event_bus.publish("ai.status.changed", test_status)
-                        logger.info("[GUI] 测试事件已发布")
+                        # 注意：不在此处发布测试事件，避免mainloop未启动时更新UI导致错误
                     else:
                         logger.error("[GUI] EventBus获取失败：返回None")
 
@@ -2190,6 +2218,22 @@ class MainWindow:
         for child in widget.winfo_children():
             self._update_canvas_width_recursive(child, depth + 1)
     
+    def _scroll_page_to_top(self, widget, depth=0):
+        """【V1.48.17新增】递归滚动所有Canvas到顶部"""
+        # 限制递归深度
+        if depth > 10:
+            return
+        
+        if widget.winfo_class() == 'Canvas':
+            try:
+                widget.yview_moveto(0.0)
+            except Exception:
+                pass
+        
+        # 递归处理子控件
+        for child in widget.winfo_children():
+            self._scroll_page_to_top(child, depth + 1)
+    
     def _create_page(self, page_id: str) -> tk.Frame:
         """创建页面"""
         page_creators = {
@@ -2204,7 +2248,16 @@ class MainWindow:
         
         creator = page_creators.get(page_id)
         if creator:
-            return creator()
+            # [PERF诊断] 统计每个页面同步创建耗时，定位卡顿页面
+            import time as _t_mod
+            _t0 = _t_mod.time()
+            frame = creator()
+            _dt = _t_mod.time() - _t0
+            if _dt > 0.3:
+                logger.warning(f"[PERF] 页面[{page_id}]同步创建耗时 {_dt:.2f}s（>0.3s，可能卡UI）")
+            else:
+                logger.info(f"[PERF] 页面[{page_id}]同步创建耗时 {_dt:.2f}s")
+            return frame
         else:
             # 默认空白页面
             frame = ttk.Frame(self._content_frame, style="TFrame")
@@ -2230,32 +2283,45 @@ class MainWindow:
         canvas = tk.Canvas(frame, bg=GlassTheme.GLASS_BG, highlightthickness=0, cursor="arrow")
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas, style="TFrame")
-        
+
+        # 性能修复：滚动区域更新防抖（参照插件页）。
+        # 原实现每次 <Configure> 都 canvas.bbox("all")(O(n))，填充上百控件时变成 O(n²)，
+        # 导致热榜页同步创建耗时高达15s。防抖把多次更新合并为一次，不改变外观与滚动行为。
+        self._hotrank_configure_id = None
+
+        def _update_scrollregion():
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.itemconfig(canvas_window, width=canvas.winfo_width())
+            except Exception:
+                pass
+
         def on_frame_configure(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(canvas_window, width=canvas.winfo_width())
-        
+            if self._hotrank_configure_id:
+                self.root.after_cancel(self._hotrank_configure_id)
+            self._hotrank_configure_id = self.root.after(50, _update_scrollregion)
+
         scrollable_frame.bind("<Configure>", on_frame_configure)
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
-        
+
         # 鼠标滚轮绑定
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        
+
         def bind_mousewheel(event):
             canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
+
         def unbind_mousewheel(event):
             canvas.unbind_all("<MouseWheel>")
-        
+
         canvas.bind("<Enter>", bind_mousewheel)
         canvas.bind("<Leave>", unbind_mousewheel)
-        
+
         # Canvas和Scrollbar直接pack到frame中
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        
+
         # 标题栏
         title_frame = ttk.Frame(scrollable_frame, style="TFrame")
         title_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
@@ -2290,7 +2356,7 @@ class MainWindow:
             style="Accent.TButton"
         )
         self.update_hot_btn.pack(side=tk.RIGHT, padx=(5, 0))
-        
+
         # 进度条（P2-001修复：长任务进度提示）
         progress_frame = ttk.Frame(scrollable_frame, style="TFrame")
         progress_frame.pack(fill=tk.X, padx=20, pady=5)
@@ -2329,22 +2395,24 @@ class MainWindow:
         src_desc_frame = ttk.Frame(scrollable_frame, style="TFrame")
         src_desc_frame.pack(fill=tk.X, padx=22, pady=(0, 8))
         
+        # 性能修复：去掉徽章里的 emoji 图标（保留彩色底+名称）。
+        # emoji 渲染在本机首次约8~13秒（楷体无emoji字形→字体回退），是热榜页卡15秒的根因。
         site_badge_info = [
-            ('🍅', '番茄', GlassTheme.ACCENT_RED),
-            ('🚀', '起点', GlassTheme.INFO),
-            ('🔷', '晋江', GlassTheme.ACCENT_PURPLE),
+            ('番茄', GlassTheme.ACCENT_RED),
+            ('起点', GlassTheme.INFO),
+            ('晋江', GlassTheme.ACCENT_PURPLE),
         ]
-        for icon, name, color in site_badge_info:
+        for name, color in site_badge_info:
             badge = tk.Label(
                 src_desc_frame,
-                text=f" {icon} {name} ",
+                text=f" {name} ",
                 font=(GlassTheme.FONT_FAMILY, 9),
                 fg='white', bg=color,
-                padx=4, pady=2,
+                padx=8, pady=2,
                 relief='flat'
             )
             badge.pack(side=tk.LEFT, padx=(0, 6))
-        
+
         # 网站榜单容器（V5原版：使用pack布局，三列并排）
         # V2.18: 保存引用以便异步更新
         self._hot_sites_frame = ttk.Frame(scrollable_frame, style="TFrame")
@@ -2353,7 +2421,7 @@ class MainWindow:
         # ===== V2.18 热榜异步化改造 =====
         # 1. 先显示默认数据（立即响应，不阻塞UI）
         hot_data = self._get_default_hot_ranking_data()
-        
+
         # 2. 显示进度提示
         self._hot_ranking_progress_frame.pack(fill=tk.X, padx=20, pady=5)
         self._hot_ranking_progress_var.set("正在后台加载热榜数据...")
@@ -2363,7 +2431,11 @@ class MainWindow:
         self._render_hot_ranking_sites(hot_data.get('sites', []))
         
         # 4. 异步加载真实数据（缓存优先）
-        self._async_fetch_hot_ranking(scrollable_frame)
+        # 性能修复：延迟到本次建页同步代码全部跑完后再提交后台拉取。
+        # 原先在建控件中途就提交，后台线程 exec_module 动态加载热榜插件(约13s)
+        # 会与主线程继续建控件抢 GIL，导致热榜页同步创建耗时达15s。
+        # 用 root.after 推迟，保证建控件先无争用完成（页面秒开），数据随后填充。
+        self.root.after(200, lambda: self._async_fetch_hot_ranking(scrollable_frame))
         
         # ===== 题材榜、类型榜、作家榜（使用默认数据，异步加载完成后刷新）=====
         ttk.Separator(scrollable_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=20, pady=20)
@@ -2407,7 +2479,7 @@ class MainWindow:
         self._render_hot_ranking_genres(hot_data.get('genres', {}))
         self._render_hot_ranking_types(hot_data.get('types', {}))
         self._render_hot_ranking_authors(hot_data.get('authors', []))
-        
+
         # 数据来源说明
         ttk.Label(
             scrollable_frame,
@@ -2415,9 +2487,9 @@ class MainWindow:
             font=(GlassTheme.FONT_FAMILY, 9),
             foreground=GlassTheme.TEXT_SECONDARY
         ).pack(pady=(5, 15), anchor='w', padx=20)
-        
+
         return frame
-    
+
     def _create_workbench_page(self) -> tk.Frame:
         """创建工作台页面（上半部分按钮 + 下半部分内容区）"""
         frame = ttk.Frame(self._content_frame, style="TFrame")
@@ -2754,11 +2826,6 @@ class MainWindow:
         """创建人物设定内容页面"""
         frame = ttk.Frame(self._workbench_content_frame, style="TFrame")
 
-        # 【修复】检查是否有已加载的人物数据（类似世界观延迟创建机制）
-        if hasattr(self, '_character_data') and self._character_data:
-            # 使用after确保UI完全创建后再更新
-            self.root.after(100, lambda: self._update_character_tree())
-        
         # 上部：人物导入区
         file_frame = ttk.LabelFrame(frame, text="人物档案导入", padding=10)
         file_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -2809,6 +2876,19 @@ class MainWindow:
             self._character_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
         
         self._character_tree.bind("<MouseWheel>", _on_character_mousewheel)
+        
+        # 【V1.49.13修复】强化延迟更新机制，确保人物树创建后立即更新
+        if hasattr(self, '_pending_character_data') and self._pending_character_data:
+            pending_data = self._pending_character_data
+            self._character_entries = pending_data
+            self._character_data = pending_data
+            logger.info(f"[人物恢复] 延迟更新准备: {len(pending_data)}个人物")
+            delattr(self, '_pending_character_data')
+            
+            # 立即更新（不使用after，直接在树创建后更新）
+            logger.info(f"[人物恢复] 立即更新人物树")
+            self._update_character_tree()
+            logger.info("[人物恢复] 人物树更新完成")
         
         # 列表操作按钮
         list_btn_frame = ttk.Frame(list_frame, style="TFrame")
@@ -2891,24 +2971,56 @@ class MainWindow:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self._outline_tree.configure(yscrollcommand=scrollbar.set)
         
+        # 绑定选择事件 - 选中章节后显示详情
+        self._outline_tree.bind("<<TreeviewSelect>>", self._on_outline_chapter_select)
+        
+        # 【V3.3】绑定拖拽排序事件
+        # 注意：ttk.Treeview使用bind()方法，不是tag_bind()
+        self._outline_tree.bind("<ButtonPress-1>", self._on_outline_drag_start)
+        self._outline_tree.bind("<B1-Motion>", self._on_outline_drag_motion)
+        self._outline_tree.bind("<ButtonRelease-1>", self._on_outline_drag_end)
+        
+        # 拖拽状态变量（用于跟踪拖曳操作）
+        self._outline_drag_data = {
+            'dragging': False,
+            'drag_item': None,
+            'drag_index': None,
+            'drop_indicator': None,
+            'start_y': 0,
+            'min_drag_distance': 3  # 降低最小拖曳距离阈值
+        }
+        
+        # 存储章节数据（用于详情显示）
+        self._outline_chapters_data = []
+        
+        # 【修复V3】检查是否有延迟更新的大纲数据
+        if hasattr(self, '_pending_outline_chapters') and self._pending_outline_chapters:
+            self._outline_chapters_data = self._pending_outline_chapters
+            self._update_outline_tree_from_chapters(self._pending_outline_chapters)
+            delattr(self, '_pending_outline_chapters')
+            logger.info("[大纲恢复] 延迟更新完成")
+        
         # 树形结构操作按钮
         tree_btn_frame = ttk.Frame(tree_frame, style="TFrame")
         tree_btn_frame.pack(fill=tk.X, pady=5, side=tk.BOTTOM)
         
-        # 使用Grid布局，4列，确保按钮均匀分布
+        # 使用Grid布局，6列，确保按钮均匀分布
+        # 【修复V3.3】新增删除卷、移入卷按钮，支持完整卷管理
         tree_buttons = [
             ("添加卷", self._on_outline_add_volume),
+            ("删除卷", self._on_outline_delete_volume),
             ("添加章节", self._on_outline_add_chapter),
             ("编辑章节", self._on_outline_edit_chapter),
+            ("移入卷", self._on_outline_move_to_volume),
             ("删除", self._on_outline_delete),
         ]
         
         for i, (text, command) in enumerate(tree_buttons):
             btn = ttk.Button(tree_btn_frame, text=text, command=command)
-            btn.grid(row=0, column=i, padx=5, pady=2, sticky="ew")
+            btn.grid(row=0, column=i, padx=3, pady=2, sticky="ew")
         
         # 配置列权重，确保按钮均匀分布
-        for i in range(4):
+        for i in range(6):
             tree_btn_frame.grid_columnconfigure(i, weight=1)
         
         # 下部：章节编辑器
@@ -2925,12 +3037,12 @@ class MainWindow:
         self._chapter_words_var = tk.StringVar(value="2000")
         ttk.Spinbox(info_row, from_=500, to=5000, increment=100, width=10, textvariable=self._chapter_words_var).pack(side=tk.LEFT, padx=5)
         
-        # 章节摘要
+        # 章节摘要（调大显示区域）
         ttk.Label(editor_frame, text="内容摘要：").pack(anchor=tk.W, pady=5)
-        self._chapter_summary = tk.Text(editor_frame, wrap=tk.WORD, height=3,
+        self._chapter_summary = tk.Text(editor_frame, wrap=tk.WORD, height=12,
                                        font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_NORMAL),
                                        bg=GlassTheme.GLASS_SURFACE, fg=GlassTheme.TEXT_PRIMARY)
-        self._chapter_summary.pack(fill=tk.X)
+        self._chapter_summary.pack(fill=tk.BOTH, expand=True)
         
         # 进度条
         progress_frame = ttk.Frame(frame, style="TFrame")
@@ -2971,33 +3083,63 @@ class MainWindow:
         path_frame = ttk.Frame(file_frame, style="TFrame")
         path_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Label(path_frame, text="当前风格：").pack(side=tk.LEFT)
+        # 【V1.48.3】第一行：标签 + 路径
+        row1 = ttk.Frame(path_frame, style="TFrame")
+        row1.pack(fill=tk.X, pady=(0, 3))
+        
+        ttk.Label(row1, text="当前风格：").pack(side=tk.LEFT)
         self._style_path_var = tk.StringVar(value="未导入")
-        ttk.Label(path_frame, textvariable=self._style_path_var,
+        ttk.Label(row1, textvariable=self._style_path_var,
                  foreground=GlassTheme.TEXT_LINK).pack(side=tk.LEFT, padx=10)
-        ttk.Button(path_frame, text="上传范文", command=self._on_style_browse).pack(side=tk.LEFT, padx=5)
-        ttk.Button(path_frame, text="删除范文", command=self._on_style_delete).pack(side=tk.LEFT, padx=5)
-        ttk.Button(path_frame, text="解析风格", command=self._on_style_analyze).pack(side=tk.LEFT, padx=5)
-        ttk.Button(path_frame, text="保存项目", command=self._on_save_project).pack(side=tk.LEFT, padx=5)
-        ttk.Button(path_frame, text="导出风格", command=self._on_style_export).pack(side=tk.RIGHT, padx=5)
         
-        # 中部左：风格档案库
+        # 【V1.48.3】第二行：操作按钮（2x3 Grid响应式布局）
+        btn_row = ttk.Frame(path_frame, style="TFrame")
+        btn_row.pack(fill=tk.X)
+        
+        # 【V1.48.9】9个按钮 3x3 Grid 按用户指定顺序布局
+        all_buttons = [
+            ("上传范文",     self._on_style_browse),       # Row0 Col0
+            ("深度学习",     self._on_style_learn),        # Row0 Col1
+            ("保存项目",     self._on_save_project),       # Row0 Col2
+            ("应用到生成器", self._on_style_apply),        # Row1 Col0
+            ("删除范文",     self._on_style_delete),       # Row1 Col1
+            ("导出风格",     self._on_style_export),       # Row1 Col2
+            ("创建模板",     self._on_style_create),       # Row2 Col0
+            ("选择文件",     self._on_style_load_profile), # Row2 Col1
+            ("清除风格",     self._on_style_clear),        # Row2 Col2
+        ]
+        
+        for i, (text, command) in enumerate(all_buttons):
+            r, c = divmod(i, 3)
+            btn = ttk.Button(btn_row, text=text, command=command)
+            btn.grid(row=r, column=c, padx=4, pady=3, sticky="nsew")
+        
+        # 配置3列均匀分布
+        for col in range(3):
+            btn_row.grid_columnconfigure(col, weight=1)
+        
+        # 配置3行等高
+        for row in range(3):
+            btn_row.grid_rowconfigure(row, weight=1)
+        
+        # 【V1.48.8】中部：上下布局（上=风格档案库，下=风格分析结果）
+        # 上部：风格档案库
         library_frame = ttk.LabelFrame(frame, text="风格档案库", padding=10)
-        library_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5, side=tk.LEFT)
+        library_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=(5, 2))
         
-        columns = ("name", "vocabulary", "sentence", "rhetoric", "emotion", "rhythm", "structure", "detail")
-        self._style_tree = ttk.Treeview(library_frame, columns=columns, show="headings", height=8)
+        columns = ("name", "vocabulary", "sentence", "rhetoric", "emotion", "narrative", "language", "pacing")
+        self._style_tree = ttk.Treeview(library_frame, columns=columns, show="headings", height=6)
         self._style_tree.heading("name", text="风格名称")
         self._style_tree.heading("vocabulary", text="词汇")
         self._style_tree.heading("sentence", text="句式")
         self._style_tree.heading("rhetoric", text="修辞")
         self._style_tree.heading("emotion", text="情感")
-        self._style_tree.heading("rhythm", text="节奏")
-        self._style_tree.heading("structure", text="结构")
-        self._style_tree.heading("detail", text="细节")
-        self._style_tree.column("name", width=100)
+        self._style_tree.heading("narrative", text="叙事")
+        self._style_tree.heading("language", text="语言")
+        self._style_tree.heading("pacing", text="节奏")
+        self._style_tree.column("name", width=120)
         for col in columns[1:]:
-            self._style_tree.column(col, width=50)
+            self._style_tree.column(col, width=55)
         self._style_tree.pack(fill=tk.BOTH, expand=True)
         
         # 档案库按钮
@@ -3019,34 +3161,21 @@ class MainWindow:
         for i in range(3):
             lib_btn_frame.grid_columnconfigure(i, weight=1)
 
-        # 中部右：风格分析器结果
-        analyzer_frame = ttk.LabelFrame(frame, text="风格分析器（七维度评分）", padding=10)
-        analyzer_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5, side=tk.RIGHT)
+        # 下部：风格分析结果（AI深度学习输出）
+        analyzer_frame = ttk.LabelFrame(frame, text="风格分析结果", padding=10)
+        analyzer_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=(2, 5))
 
-        self._style_info = tk.Text(analyzer_frame, wrap=tk.WORD, height=10,
+        self._style_info = tk.Text(analyzer_frame, wrap=tk.WORD, height=12,
                                   font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_NORMAL),
                                   bg=GlassTheme.GLASS_SURFACE, fg=GlassTheme.TEXT_PRIMARY)
         self._style_info.pack(fill=tk.BOTH, expand=True)
 
-        # 底部：创建风格按钮
-        create_frame = ttk.Frame(frame, style="TFrame")
-        create_frame.pack(fill=tk.X, padx=5, pady=5)
-
-        # 使用Grid布局，4列，确保按钮均匀分布
-        create_buttons = [
-            ("深度学习", self._on_style_learn),
-            ("创建风格模板", self._on_style_create),
-            ("应用到生成器", self._on_style_apply),
-            ("清除风格", self._on_style_clear),
-        ]
-        
-        for i, (text, command) in enumerate(create_buttons):
-            btn = ttk.Button(create_frame, text=text, command=command)
-            btn.grid(row=0, column=i, padx=5, pady=2, sticky="ew")
-        
-        # 配置列权重，确保按钮均匀分布
-        for i in range(4):
-            create_frame.grid_columnconfigure(i, weight=1)
+        # 【V1.48.6修复】项目打开后恢复已加载的风格数据
+        # 问题：标签页延迟创建，项目打开时_style_info等控件还未创建，导致数据无法恢复
+        # 解决：标签页创建后，检查是否有已加载的风格数据，如果有则恢复显示
+        # （与世界观第2735-2737行、大纲第2905-2908行使用相同的延迟恢复模式）
+        if hasattr(self, '_style_profile') and self._style_profile:
+            self.root.after(100, self._do_pending_style_restore)
 
         return frame
     
@@ -3081,10 +3210,17 @@ class MainWindow:
         row1.pack(fill=tk.X, pady=5)
         ttk.Label(row1, text="起始章节：").pack(side=tk.LEFT)
         self._start_chapter_var = tk.StringVar(value="1")
-        ttk.Spinbox(row1, from_=1, to=100, width=8, textvariable=self._start_chapter_var).pack(side=tk.LEFT, padx=5)
+        start_chapter_spin = ttk.Spinbox(row1, from_=1, to=100, width=8, textvariable=self._start_chapter_var)
+        start_chapter_spin.pack(side=tk.LEFT, padx=5)
+        start_chapter_spin.bind("<<Increment>>", self._on_chapter_range_changed)
+        start_chapter_spin.bind("<<Decrement>>", self._on_chapter_range_changed)
+        start_chapter_spin.bind("<FocusOut>", self._on_chapter_range_changed)
+        
         ttk.Label(row1, text="结束章节：").pack(side=tk.LEFT, padx=(20, 0))
         self._end_chapter_var = tk.StringVar(value="1")
-        ttk.Spinbox(row1, from_=1, to=100, width=8, textvariable=self._end_chapter_var).pack(side=tk.LEFT, padx=5)
+        end_chapter_spin = ttk.Spinbox(row1, from_=1, to=100, width=8, textvariable=self._end_chapter_var)
+        end_chapter_spin.pack(side=tk.LEFT, padx=5)
+        
         ttk.Label(row1, text="（风格/大纲/人设/世界观跟随项目文件）", 
                  font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_SMALL),
                  foreground=GlassTheme.TEXT_SECONDARY).pack(side=tk.LEFT, padx=(20, 0))
@@ -3137,7 +3273,7 @@ class MainWindow:
         self._init_knowledge_options()
         
         # 刷新按钮
-        ttk.Button(row2, text="🔄", width=3, command=self._refresh_knowledge_options).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(row2, text="↻", width=3, command=self._refresh_knowledge_options).pack(side=tk.RIGHT, padx=5)
         
         # ==================== 第三行：写作技巧选择（双下拉框 + 已选展示区）====================
         # 写作技巧分区框架
@@ -3161,53 +3297,55 @@ class MainWindow:
         # 从知识库文件加载写作技巧列表
         self._writing_techniques = self._load_writing_techniques_from_knowledge_base()
         
-        # ========== 主布局：左侧双下拉框 + 右侧已选展示区 ==========
-        tech_main_row = ttk.Frame(tech_section_frame, style="TFrame")
-        tech_main_row.pack(fill=tk.X, pady=5)
-        
-        # 左侧：双下拉框（技巧类型 + 具体技巧）
-        left_frame = ttk.Frame(tech_main_row, style="TFrame")
-        left_frame.pack(side=tk.LEFT, fill=tk.X, expand=False)
+        # ========== 主布局：上方双下拉框 + 下方已选展示区 ==========
+        # 第一行：双下拉框（技巧类型 + 具体技巧）
+        tech_select_row = ttk.Frame(tech_section_frame, style="TFrame")
+        tech_select_row.pack(fill=tk.X, pady=5)
         
         # 技巧类型下拉框
-        ttk.Label(left_frame, text="技巧类型：").pack(side=tk.LEFT)
+        ttk.Label(tech_select_row, text="技巧类型：").pack(side=tk.LEFT)
         self._tech_type_var = tk.StringVar()
-        self._tech_type_combo = ttk.Combobox(left_frame, textvariable=self._tech_type_var,
+        self._tech_type_combo = ttk.Combobox(tech_select_row, textvariable=self._tech_type_var,
                                               values=list(self._tech_domain_names.values()),
-                                              state="readonly", width=12)
+                                              state="readonly", width=15)
         self._tech_type_combo.pack(side=tk.LEFT, padx=5)
         self._tech_type_combo.bind("<<ComboboxSelected>>", lambda e: self._on_tech_type_changed())
         
         # 具体技巧下拉框（根据类型动态更新）
-        ttk.Label(left_frame, text="具体技巧：").pack(side=tk.LEFT, padx=(15, 0))
+        ttk.Label(tech_select_row, text="具体技巧：").pack(side=tk.LEFT, padx=(15, 0))
         self._tech_name_var = tk.StringVar()
-        self._tech_combo = ttk.Combobox(left_frame, textvariable=self._tech_name_var,
-                                        values=[], state="readonly", width=18)
+        self._tech_combo = ttk.Combobox(tech_select_row, textvariable=self._tech_name_var,
+                                        values=[], state="readonly", width=25)
         self._tech_combo.pack(side=tk.LEFT, padx=5)
         
         # 添加按钮
-        ttk.Button(left_frame, text="添加", width=6, 
-                   command=self._on_add_writing_tech).pack(side=tk.LEFT, padx=10)
+        ttk.Button(tech_select_row, text="添加", width=8, 
+                   command=self._on_add_writing_tech).pack(side=tk.LEFT, padx=15)
         
-        # 右侧：已选技巧展示区
-        right_frame = ttk.Frame(tech_main_row, style="TFrame")
-        right_frame.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(20, 0))
+        # 清除按钮
+        ttk.Button(tech_select_row, text="清除全部", width=10,
+                   command=self._clear_all_writing_tech).pack(side=tk.RIGHT, padx=5)
         
-        ttk.Label(right_frame, text="已选技巧：").pack(side=tk.LEFT)
+        # 第二行：已选技巧展示区（上下布局，高度3）
+        tech_display_row = ttk.Frame(tech_section_frame, style="TFrame")
+        tech_display_row.pack(fill=tk.X, pady=(5, 0))
         
-        # 已选技巧展示框（带滚动，增加宽度）
-        tech_display_frame = ttk.Frame(right_frame, style="TFrame")
-        tech_display_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(tech_display_row, text="已选技巧：").pack(anchor=tk.W)
         
-        self._selected_tech_display = tk.Text(tech_display_frame, height=2, width=80,
+        # 已选技巧展示框（带滚动，高度3，宽度自适应）
+        tech_display_frame = ttk.Frame(tech_display_row, style="TFrame")
+        tech_display_frame.pack(fill=tk.X, expand=True, pady=2)
+        
+        self._selected_tech_display = tk.Text(tech_display_frame, height=3, width=80,
                                                font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_SMALL),
                                                bg=GlassTheme.GLASS_SURFACE, fg=GlassTheme.TEXT_PRIMARY,
                                                wrap=tk.WORD, state=tk.DISABLED)
         self._selected_tech_display.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
-        # 清除按钮
-        ttk.Button(right_frame, text="清除", width=6,
-                   command=self._clear_all_writing_tech).pack(side=tk.RIGHT, padx=5)
+        # 滚动条
+        tech_scroll = ttk.Scrollbar(tech_display_frame, orient=tk.VERTICAL, command=self._selected_tech_display.yview)
+        tech_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._selected_tech_display.configure(yscrollcommand=tech_scroll.set)
         
         # 第四行：字数、温度和生成模式
         row4 = ttk.Frame(config_frame, style="TFrame")
@@ -3227,14 +3365,39 @@ class MainWindow:
         ttk.Radiobutton(row4, text="自动迭代", variable=self._gen_mode_var, value="auto").pack(side=tk.LEFT, padx=10)
         ttk.Radiobutton(row4, text="手动迭代", variable=self._gen_mode_var, value="manual").pack(side=tk.LEFT, padx=10)
         
-        # 第五行：出场人物（可选）
+        # 第五行：出场人物（从大纲自动加载 + 手动添加）
         row5 = ttk.Frame(config_frame, style="TFrame")
         row5.pack(fill=tk.X, pady=5)
-        ttk.Label(row5, text="出场人物：").pack(side=tk.LEFT)
-        self._gen_characters_var = tk.StringVar(value="自动设置")
-        ttk.Entry(row5, textvariable=self._gen_characters_var, width=40).pack(side=tk.LEFT, padx=5)
-        ttk.Label(row5, text="(可手动输入添加)", font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_SMALL),
-                 foreground=GlassTheme.TEXT_SECONDARY).pack(side=tk.LEFT)
+        
+        # 出场人物标签
+        ttk.Label(row5, text="出场人物：").pack(anchor=tk.W)
+        
+        # 人物列表容器（Listbox + 滚动条）
+        chars_list_frame = ttk.Frame(row5, style="TFrame")
+        chars_list_frame.pack(fill=tk.X, pady=2)
+        
+        self._gen_characters_listbox = tk.Listbox(
+            chars_list_frame,
+            height=2,
+            selectmode=tk.EXTENDED,
+            font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_SMALL),
+            bg=GlassTheme.GLASS_SURFACE,
+            fg=GlassTheme.TEXT_PRIMARY
+        )
+        self._gen_characters_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        chars_scroll = ttk.Scrollbar(chars_list_frame, orient=tk.VERTICAL, command=self._gen_characters_listbox.yview)
+        chars_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._gen_characters_listbox.configure(yscrollcommand=chars_scroll.set)
+        
+        # 按钮区域（放在条框下方）
+        chars_btn_frame = ttk.Frame(row5, style="TFrame")
+        chars_btn_frame.pack(fill=tk.X, pady=(2, 0))
+        
+        ttk.Button(chars_btn_frame, text="添加人物", width=10, 
+                   command=self._on_add_character_to_list).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(chars_btn_frame, text="移除选中", width=10,
+                   command=self._on_remove_character_from_list).pack(side=tk.LEFT)
         
         # 中部：左右分栏（生成过程 + 生成结果）
         middle_split_frame = ttk.Frame(frame, style="TFrame")
@@ -3265,9 +3428,9 @@ class MainWindow:
         
         ttk.Label(agent_frame, text="Agent状态：", font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_SMALL)).pack(anchor=tk.W)
         
-        # Agent状态树形视图
+        # Agent状态树形视图（宽度与下方日志框对齐）
         agent_list_frame = ttk.Frame(agent_frame, style="TFrame")
-        agent_list_frame.pack(fill=tk.X, pady=2)
+        agent_list_frame.pack(fill=tk.BOTH, expand=True, pady=2)
         
         self._gen_agent_tree = ttk.Treeview(
             agent_list_frame,
@@ -3277,9 +3440,9 @@ class MainWindow:
         )
         self._gen_agent_tree.heading("status", text="状态")
         self._gen_agent_tree.heading("info", text="信息")
-        self._gen_agent_tree.column("status", width=80)
-        self._gen_agent_tree.column("info", width=300)
-        self._gen_agent_tree.pack(fill=tk.X, side=tk.LEFT)
+        self._gen_agent_tree.column("status", width=100, minwidth=80)
+        self._gen_agent_tree.column("info", width=500, minwidth=300)
+        self._gen_agent_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
         
         # Agent状态滚动条
         agent_scroll = ttk.Scrollbar(agent_list_frame, orient=tk.VERTICAL, command=self._gen_agent_tree.yview)
@@ -3329,6 +3492,15 @@ class MainWindow:
         # 配置列权重，确保按钮均匀分布
         for i in range(5):
             btn_frame.grid_columnconfigure(i, weight=1)
+
+        # 【V1.49.14修复】初始化出场人物列表
+        # 如果已有大纲数据，自动加载第一章的出场人物
+        if hasattr(self, '_outline_chapters_data') and self._outline_chapters_data:
+            self._update_characters_from_outline(1)
+        else:
+            # 显示提示信息
+            self._gen_characters_listbox.delete(0, tk.END)
+            self._gen_characters_listbox.insert(tk.END, "(请先解析大纲)")
 
         return frame
 
@@ -3448,7 +3620,7 @@ class MainWindow:
             display_name = self._tech_domain_names.get(domain_key, domain_key)
             
             try:
-                with open(domain_file, 'r', encoding='utf-8') as f:
+                with open(domain_file, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
                 
                 # 提取知识点标题
@@ -3524,7 +3696,7 @@ class MainWindow:
             # 如果文件存在，统计知识点数量
             if domain_file.exists():
                 try:
-                    with open(domain_file, 'r', encoding='utf-8') as f:
+                    with open(domain_file, 'r', encoding='utf-8-sig') as f:
                         data = json.load(f)
                     
                     # 统计知识点数量
@@ -3840,11 +4012,92 @@ class MainWindow:
     
     def get_selected_writing_techniques(self) -> List[str]:
         """获取选中的写作技巧列表（跨分类）"""
+        # V1.49.19修复：检查字典是否已初始化
+        if not hasattr(self, '_all_writing_tech_vars') or self._all_writing_tech_vars is None:
+            return []
+        
         selected = []
         for tech, var in self._all_writing_tech_vars.items():
             if var.get():
                 selected.append(tech)
         return selected
+    
+    def _on_chapter_range_changed(self, event=None):
+        """章节范围变化时自动更新出场人物列表"""
+        try:
+            chapter_num = int(self._start_chapter_var.get())
+            self._update_characters_from_outline(chapter_num)
+        except (ValueError, AttributeError):
+            pass
+    
+    def _update_characters_from_outline(self, chapter_number: int):
+        """从大纲中获取指定章节的出场人物
+        
+        Args:
+            chapter_number: 章节序号（1-based）
+        """
+        try:
+            # 清空现有列表
+            self._gen_characters_listbox.delete(0, tk.END)
+            
+            # 检查是否有大纲数据
+            if not hasattr(self, '_outline_chapters_data') or not self._outline_chapters_data:
+                self._gen_characters_listbox.insert(tk.END, "(请先解析大纲)")
+                return
+            
+            # 获取指定章节（章节序号是1-based，列表索引是0-based）
+            chapter_idx = chapter_number - 1
+            if chapter_idx < 0 or chapter_idx >= len(self._outline_chapters_data):
+                self._gen_characters_listbox.insert(tk.END, "(章节不存在)")
+                return
+            
+            chapter = self._outline_chapters_data[chapter_idx]
+            characters = chapter.get('characters', [])
+            
+            if characters:
+                for char in characters:
+                    self._gen_characters_listbox.insert(tk.END, char)
+            else:
+                self._gen_characters_listbox.insert(tk.END, "(该章节暂无人物设定)")
+                
+        except Exception as e:
+            logging.warning(f"更新出场人物失败: {e}")
+            self._gen_characters_listbox.delete(0, tk.END)
+            self._gen_characters_listbox.insert(tk.END, f"(获取失败: {e})")
+    
+    def _on_add_character_to_list(self):
+        """添加人物到场人物列表"""
+        from tkinter import simpledialog
+        
+        char_name = simpledialog.askstring("添加人物", "请输入人物名称：", parent=self.root)
+        if char_name and char_name.strip():
+            # 移除提示文本
+            if self._gen_characters_listbox.size() > 0:
+                first_item = self._gen_characters_listbox.get(0)
+                if first_item.startswith("("):
+                    self._gen_characters_listbox.delete(0)
+            
+            self._gen_characters_listbox.insert(tk.END, char_name.strip())
+    
+    def _on_remove_character_from_list(self):
+        """从出场人物列表中移除选中的人物"""
+        selection = self._gen_characters_listbox.curselection()
+        for index in reversed(selection):  # 从后往前删除，避免索引变化
+            self._gen_characters_listbox.delete(index)
+    
+    def _get_selected_characters(self) -> list:
+        """获取当前选中的出场人物列表
+        
+        Returns:
+            list: 人物名称列表
+        """
+        characters = []
+        for i in range(self._gen_characters_listbox.size()):
+            char = self._gen_characters_listbox.get(i)
+            # 过滤提示文本
+            if not char.startswith("("):
+                characters.append(char)
+        return characters
     
     def _on_gen_save_result(self):
         """保存生成结果"""
@@ -8075,6 +8328,7 @@ data/知识库验证器/backups/
     
     def _highlight_node(self, ax, fig, canvas, G, pos, node_colors_map, node_name):
         """高亮选中的节点"""
+        import networkx as nx  # 惰性导入：matplotlib/networkx 仅用于人物关系图谱，不在启动时加载
         ax.clear()
         
         # 重新绘制边（全部变淡）
@@ -8190,6 +8444,9 @@ data/知识库验证器/backups/
             filetypes=[("文本文件", "*.txt"), ("Word文档", "*.docx"), ("所有文件", "*.*")]
         )
         if path:
+            # 保存完整路径（用于后续解析）
+            self._outline_file_path = path
+            # 显示文件名（UI展示）
             self._outline_path_var.set(os.path.basename(path))
             self._set_status(f"已选择: {os.path.basename(path)}")
     
@@ -8269,28 +8526,808 @@ data/知识库验证器/backups/
         self._set_status("导出大纲功能开发中...")
     
     def _on_outline_add_volume(self):
-        """添加卷"""
-        self._set_status("添加卷功能开发中...")
+        """添加卷 - 支持选择已有章节组成卷"""
+        # 检查是否有大纲数据（可能是字典或字符串）
+        if not hasattr(self, '_outline_content') or not self._outline_content:
+            messagebox.showwarning("提示", "请先解析大纲")
+            return
+        
+        # 如果是字典但缺少chapters，也提示
+        if isinstance(self._outline_content, dict) and not self._outline_content.get('chapters'):
+            messagebox.showwarning("提示", "大纲数据不完整，请重新解析")
+            return
+        
+        chapters = self._outline_content.get('chapters', [])
+        if not chapters:
+            messagebox.showwarning("提示", "暂无章节，请先添加章节")
+            return
+        
+        # 创建对话框
+        dialog = tk.Toplevel(self.root)
+        dialog.title("添加卷")
+        dialog.geometry("600x500")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # 卷名称
+        ttk.Label(dialog, text="卷名称：").pack(anchor=tk.W, padx=10, pady=5)
+        volume_name_var = tk.StringVar(value=f"第{len(self._outline_content.get('volumes', [])) + 1}卷")
+        ttk.Entry(dialog, textvariable=volume_name_var, width=50).pack(padx=10, pady=5)
+        
+        # 卷描述
+        ttk.Label(dialog, text="卷描述：").pack(anchor=tk.W, padx=10, pady=5)
+        volume_desc_text = tk.Text(dialog, height=3, width=50)
+        volume_desc_text.pack(padx=10, pady=5)
+        
+        # 选择章节
+        ttk.Label(dialog, text="选择章节（可多选）：").pack(anchor=tk.W, padx=10, pady=5)
+        
+        # 创建章节列表框架
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
+        
+        # 左侧：可用章节列表
+        ttk.Label(list_frame, text="可用章节：").grid(row=0, column=0, sticky=tk.W)
+        available_frame = ttk.Frame(list_frame)
+        available_frame.grid(row=1, column=0, padx=5, pady=5, sticky=tk.NSEW)
+        
+        available_scroll = ttk.Scrollbar(available_frame)
+        available_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        available_listbox = tk.Listbox(
+            available_frame, 
+            selectmode=tk.MULTIPLE,
+            yscrollcommand=available_scroll.set,
+            height=10
+        )
+        available_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        available_scroll.config(command=available_listbox.yview)
+        
+        # 填充可用章节
+        for i, chapter in enumerate(chapters):
+            chapter_title = chapter.get('title', f'第{i+1}章')
+            available_listbox.insert(tk.END, f"第{i+1}章：{chapter_title}")
+        
+        # 配置grid权重
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(1, weight=1)
+        
+        # 提示信息
+        ttk.Label(dialog, text="提示：按住Ctrl键可多选章节", foreground='gray').pack(anchor=tk.W, padx=10, pady=5)
+        
+        def on_confirm():
+            volume_name = volume_name_var.get().strip()
+            volume_desc = volume_desc_text.get("1.0", tk.END).strip()
+            
+            if not volume_name:
+                messagebox.showwarning("提示", "请输入卷名称")
+                return
+            
+            # 获取选中的章节索引
+            selected_indices = available_listbox.curselection()
+            if not selected_indices:
+                messagebox.showwarning("提示", "请至少选择一个章节")
+                return
+            
+            selected_chapters = [idx for idx in selected_indices]
+            
+            # 调用插件添加卷
+            try:
+                from agents.plugins.outline_analysis_agent import OutlineAnalysisAgent
+                agent = OutlineAnalysisAgent()
+                if not agent.initialize():
+                    messagebox.showerror("错误", "Agent初始化失败")
+                    return
+                result = agent._plugin.add_volume(
+                    self._outline_content, volume_name, volume_desc, selected_chapters
+                )
+                
+                if result.get('success'):
+                    self._outline_content = result['outline_data']
+                    self._outline_chapters_data = self._outline_content.get('chapters', [])
+                    # 更新树形结构
+                    self._update_outline_tree_from_chapters(self._outline_chapters_data)
+                    # 自动保存项目
+                    self._auto_save_outline_changes()
+                    self._set_status(f"添加卷成功：{volume_name}（包含{len(selected_chapters)}章）")
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("错误", f"添加卷失败：{result.get('error')}")
+            except Exception as e:
+                messagebox.showerror("错误", f"添加卷失败：{e}")
+        
+        # 按钮
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="确定", command=on_confirm, width=12).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy, width=12).pack(side=tk.LEFT, padx=5)
+    
+    def _on_outline_delete_volume(self):
+        """删除卷【V3.3】遵循架构：业务逻辑在插件层"""
+        if not hasattr(self, '_outline_content') or not self._outline_content:
+            messagebox.showwarning("提示", "请先解析大纲")
+            return
+        
+        volumes = self._outline_content.get('volumes', [])
+        if not volumes:
+            messagebox.showwarning("提示", "当前没有卷，请先添加卷")
+            return
+        
+        # 创建选择对话框
+        dialog = tk.Toplevel(self.root)
+        dialog.title("删除卷")
+        dialog.geometry("400x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # 卷选择列表
+        ttk.Label(dialog, text="选择要删除的卷：").pack(pady=5)
+        
+        vol_var = tk.StringVar()
+        vol_combo = ttk.Combobox(dialog, textvariable=vol_var, state="readonly")
+        vol_combo['values'] = [f"{i+1}. {v.get('volume_name', f'第{i+1}卷')}" for i, v in enumerate(volumes)]
+        vol_combo.current(0)
+        vol_combo.pack(pady=5, fill=tk.X, padx=20)
+        
+        # 是否保留章节选项
+        keep_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(dialog, text="保留章节（删除卷后章节变为未分类）", variable=keep_var).pack(pady=5)
+        
+        def on_confirm():
+            vol_index = vol_combo.current()
+            if vol_index < 0:
+                messagebox.showwarning("提示", "请选择要删除的卷")
+                return
+            
+            vol_name = volumes[vol_index].get('volume_name', f'第{vol_index+1}卷')
+            if not messagebox.askyesno("确认删除", f"确定要删除卷「{vol_name}」吗？"):
+                return
+            
+            try:
+                from agents.plugins.outline_analysis_agent import OutlineAnalysisAgent
+                agent = OutlineAnalysisAgent()
+                if not agent.initialize():
+                    messagebox.showerror("错误", "Agent初始化失败")
+                    return
+                
+                result = agent._plugin.delete_volume(
+                    self._outline_content, 
+                    vol_index, 
+                    keep_chapters=keep_var.get()
+                )
+                
+                if result.get('success'):
+                    self._outline_content = result['outline_data']
+                    self._outline_chapters_data = self._outline_content.get('chapters', [])
+                    self._update_outline_tree_from_chapters(self._outline_chapters_data)
+                    self._auto_save_outline_changes()
+                    self._set_status(f"卷「{vol_name}」删除成功")
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("错误", f"删除卷失败：{result.get('error')}")
+            except Exception as e:
+                messagebox.showerror("错误", f"删除卷失败：{e}")
+        
+        # 按钮
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="确定", command=on_confirm, width=12).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy, width=12).pack(side=tk.LEFT, padx=5)
+    
+    def _on_outline_move_to_volume(self):
+        """将章节移入卷【V3.3】遵循架构：业务逻辑在插件层"""
+        if not hasattr(self, '_outline_content') or not self._outline_content:
+            messagebox.showwarning("提示", "请先解析大纲")
+            return
+        
+        volumes = self._outline_content.get('volumes', [])
+        chapters = self._outline_content.get('chapters', [])
+        
+        if not chapters:
+            messagebox.showwarning("提示", "没有章节可移动")
+            return
+        
+        # 创建选择对话框
+        dialog = tk.Toplevel(self.root)
+        dialog.title("移动章节到卷")
+        dialog.geometry("450x250")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # 章节选择
+        ttk.Label(dialog, text="选择章节：").pack(pady=5)
+        chapter_var = tk.StringVar()
+        chapter_combo = ttk.Combobox(dialog, textvariable=chapter_var, state="readonly")
+        chapter_combo['values'] = [f"{i+1}. {ch.get('title', f'第{i+1}章')}" for i, ch in enumerate(chapters)]
+        chapter_combo.current(0)
+        chapter_combo.pack(pady=5, fill=tk.X, padx=20)
+        
+        # 目标卷选择
+        ttk.Label(dialog, text="目标卷：").pack(pady=5)
+        vol_var = tk.StringVar()
+        vol_combo = ttk.Combobox(dialog, textvariable=vol_var, state="readonly")
+        # -1 表示移出所有卷（未分类）
+        vol_options = ["移出所有卷（未分类）"] + [f"{i+1}. {v.get('volume_name', f'第{i+1}卷')}" for i, v in enumerate(volumes)]
+        vol_combo['values'] = vol_options
+        vol_combo.current(0)
+        vol_combo.pack(pady=5, fill=tk.X, padx=20)
+        
+        def on_confirm():
+            chapter_index = chapter_combo.current()
+            vol_selection = vol_combo.current()
+            # vol_selection=0 表示"移出所有卷"，对应volume_index=-1
+            # vol_selection>0 表示移入第(vol_selection-1)卷
+            target_vol_index = -1 if vol_selection == 0 else vol_selection - 1
+            
+            chapter_title = chapters[chapter_index].get('title', f'第{chapter_index+1}章')
+            
+            try:
+                from agents.plugins.outline_analysis_agent import OutlineAnalysisAgent
+                agent = OutlineAnalysisAgent()
+                if not agent.initialize():
+                    messagebox.showerror("错误", "Agent初始化失败")
+                    return
+                
+                result = agent._plugin.move_chapter_to_volume(
+                    self._outline_content,
+                    chapter_index,
+                    target_vol_index
+                )
+                
+                if result.get('success'):
+                    self._outline_content = result['outline_data']
+                    self._outline_chapters_data = self._outline_content.get('chapters', [])
+                    self._update_outline_tree_from_chapters(self._outline_chapters_data)
+                    self._auto_save_outline_changes()
+                    self._set_status(result.get('message', '章节移动成功'))
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("错误", f"移动章节失败：{result.get('error')}")
+            except Exception as e:
+                messagebox.showerror("错误", f"移动章节失败：{e}")
+        
+        # 按钮
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="确定", command=on_confirm, width=12).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy, width=12).pack(side=tk.LEFT, padx=5)
     
     def _on_outline_add_chapter(self):
         """添加章节"""
-        self._set_status("添加章节功能开发中...")
+        # 检查是否有大纲数据（可能是字典或字符串）
+        if not hasattr(self, '_outline_content') or not self._outline_content:
+            messagebox.showwarning("提示", "请先解析大纲")
+            return
+        
+        # 如果是字典但缺少chapters，也提示
+        if isinstance(self._outline_content, dict) and not self._outline_content.get('chapters'):
+            messagebox.showwarning("提示", "大纲数据不完整，请重新解析")
+            return
+        
+        # 创建对话框
+        dialog = tk.Toplevel(self.root)
+        dialog.title("添加章节")
+        dialog.geometry("550x650")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # 按钮框架（固定在底部，先创建）
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(side=tk.BOTTOM, pady=10, fill=tk.X)
+        
+        # 章节序号（自动计算）
+        existing_chapters = self._outline_content.get('chapters', [])
+        chapter_number = len(existing_chapters) + 1
+        
+        # 使用Frame包裹滚动内容
+        content_frame = ttk.Frame(dialog)
+        content_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 使用Canvas实现滚动
+        canvas = tk.Canvas(content_frame)
+        scrollbar = ttk.Scrollbar(content_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # 布局滚动组件
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        ttk.Label(scrollable_frame, text=f"章节序号：第{chapter_number}章（自动编号）", 
+                 font=('', 10, 'bold')).pack(anchor=tk.W, padx=10, pady=8)
+        chapter_num_var = tk.StringVar(value=str(chapter_number))
+        
+        # 章节标题
+        ttk.Label(scrollable_frame, text="章节标题：").pack(anchor=tk.W, padx=10, pady=5)
+        title_var = tk.StringVar()
+        ttk.Entry(scrollable_frame, textvariable=title_var, width=50).pack(padx=10, pady=5)
+        
+        # 预期字数
+        ttk.Label(scrollable_frame, text="预期字数：").pack(anchor=tk.W, padx=10, pady=5)
+        words_var = tk.StringVar(value="2000")
+        ttk.Entry(scrollable_frame, textvariable=words_var, width=20).pack(padx=10, pady=5)
+        
+        # 故事梗概
+        ttk.Label(scrollable_frame, text="故事梗概：").pack(anchor=tk.W, padx=10, pady=5)
+        summary_text = tk.Text(scrollable_frame, height=3, width=50)
+        summary_text.pack(padx=10, pady=5)
+        
+        # 出场人物（主要人物名单）
+        ttk.Label(scrollable_frame, text="出场人物（主要人物，逗号分隔）：").pack(anchor=tk.W, padx=10, pady=5)
+        characters_var = tk.StringVar()
+        ttk.Entry(scrollable_frame, textvariable=characters_var, width=50).pack(padx=10, pady=5)
+        
+        # 配角人数
+        ttk.Label(scrollable_frame, text="配角人数：").pack(anchor=tk.W, padx=10, pady=5)
+        supporting_var = tk.StringVar(value="0")
+        supporting_frame = ttk.Frame(scrollable_frame)
+        supporting_frame.pack(padx=10, pady=5, fill=tk.X)
+        ttk.Entry(supporting_frame, textvariable=supporting_var, width=10).pack(side=tk.LEFT)
+        ttk.Label(supporting_frame, text="人（非主要出场人物）", foreground='gray').pack(side=tk.LEFT, padx=5)
+        
+        # 关键内容/核心情节
+        ttk.Label(scrollable_frame, text="关键内容（核心情节，每行一个）：").pack(anchor=tk.W, padx=10, pady=5)
+        plot_text = tk.Text(scrollable_frame, height=4, width=50)
+        plot_text.pack(padx=10, pady=5)
+        
+        def on_confirm():
+            title = title_var.get().strip()
+            if not title:
+                messagebox.showwarning("提示", "请输入章节标题")
+                return
+            
+            try:
+                estimated_words = int(words_var.get())
+                supporting_characters = int(supporting_var.get())
+            except ValueError:
+                estimated_words = 2000
+                supporting_characters = 0
+            
+            summary = summary_text.get("1.0", tk.END).strip()
+            characters_str = characters_var.get().strip()
+            characters = [c.strip() for c in characters_str.split('，') if c.strip()]
+            characters = characters or [c.strip() for c in characters_str.split(',') if c.strip()]
+            
+            plot_str = plot_text.get("1.0", tk.END).strip()
+            plot_points = [p.strip() for p in plot_str.split('\n') if p.strip()]
+            
+            # 构建完整章节数据（符合OutlineChapter结构）
+            chapter_data = {
+                "title": title,
+                "chapter_number": chapter_number,
+                "level": 3,
+                "estimated_words": estimated_words,
+                "summary": summary,
+                "characters": characters,
+                "supporting_characters": supporting_characters,
+                "plot_points": plot_points,
+                "key_content": "；".join(plot_points),  # 核心内容
+                "keywords": [],
+                "content": ""
+            }
+            
+            # 调用插件添加章节
+            try:
+                from agents.plugins.outline_analysis_agent import OutlineAnalysisAgent
+                agent = OutlineAnalysisAgent()
+                if not agent.initialize():
+                    messagebox.showerror("错误", "Agent初始化失败")
+                    return
+                result = agent._plugin.add_chapter(self._outline_content, chapter_data)
+                
+                if result.get('success'):
+                    self._outline_content = result['outline_data']
+                    self._outline_chapters_data = self._outline_content.get('chapters', [])
+                    # 更新树形结构
+                    self._update_outline_tree_from_chapters(self._outline_chapters_data)
+                    # 自动保存项目
+                    self._auto_save_outline_changes()
+                    self._set_status(f"添加章节成功：{title}")
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("错误", f"添加章节失败：{result.get('error')}")
+            except Exception as e:
+                messagebox.showerror("错误", f"添加章节失败：{e}")
+        
+        # 按钮放置在框架中
+        ttk.Button(btn_frame, text="确定", command=on_confirm, width=12).pack(side=tk.LEFT, padx=20)
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy, width=12).pack(side=tk.LEFT, padx=5)
     
     def _on_outline_edit_chapter(self):
-        """编辑章节"""
-        self._set_status("编辑章节功能开发中...")
+        """编辑章节 - 完整字段版本"""
+        if not hasattr(self, '_outline_chapters_data') or not self._outline_chapters_data:
+            messagebox.showwarning("提示", "请先解析大纲")
+            return
+        
+        # 获取选中的章节
+        selection = self._outline_tree.selection()
+        if not selection:
+            messagebox.showwarning("提示", "请先选择要编辑的章节")
+            return
+        
+        # 获取章节索引
+        item = selection[0]
+        values = self._outline_tree.item(item, 'values')
+        if not values:
+            messagebox.showwarning("提示", "请选择章节节点（非子节点）")
+            return
+        
+        chapter_idx = int(values[0])
+        if chapter_idx >= len(self._outline_chapters_data):
+            return
+        
+        chapter = self._outline_chapters_data[chapter_idx]
+        
+        # 创建编辑对话框（使用滚动框架）
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"编辑章节 - 第{chapter_idx + 1}章")
+        dialog.geometry("550x700")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # 使用Canvas实现滚动
+        canvas = tk.Canvas(dialog)
+        scrollbar = ttk.Scrollbar(dialog, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # 章节序号（显示，不可编辑）
+        ttk.Label(scrollable_frame, text=f"章节序号：第{chapter_idx + 1}章", 
+                  font=('', 10, 'bold')).pack(anchor=tk.W, padx=10, pady=5)
+        
+        # 章节标题
+        ttk.Label(scrollable_frame, text="章节标题：").pack(anchor=tk.W, padx=10, pady=5)
+        title_var = tk.StringVar(value=chapter.get('title', ''))
+        ttk.Entry(scrollable_frame, textvariable=title_var, width=50).pack(padx=10, pady=5)
+        
+        # 预期字数
+        ttk.Label(scrollable_frame, text="预期字数：").pack(anchor=tk.W, padx=10, pady=5)
+        words_var = tk.StringVar(value=str(chapter.get('estimated_words', 2000)))
+        ttk.Entry(scrollable_frame, textvariable=words_var, width=20).pack(padx=10, pady=5)
+        
+        # 故事梗概
+        ttk.Label(scrollable_frame, text="故事梗概：").pack(anchor=tk.W, padx=10, pady=5)
+        summary_text = tk.Text(scrollable_frame, height=4, width=50)
+        summary_text.pack(padx=10, pady=5)
+        summary_text.insert("1.0", chapter.get('summary', ''))
+        
+        # 出场人物（主要人物）
+        ttk.Label(scrollable_frame, text="出场人物（主要人物，逗号分隔）：").pack(anchor=tk.W, padx=10, pady=5)
+        characters_var = tk.StringVar(value=', '.join(chapter.get('characters', [])))
+        ttk.Entry(scrollable_frame, textvariable=characters_var, width=50).pack(padx=10, pady=5)
+        
+        # 配角人数
+        ttk.Label(scrollable_frame, text="配角人数：").pack(anchor=tk.W, padx=10, pady=5)
+        supporting_var = tk.StringVar(value=str(chapter.get('supporting_characters', 0)))
+        supporting_frame = ttk.Frame(scrollable_frame)
+        supporting_frame.pack(padx=10, pady=5, fill=tk.X)
+        ttk.Entry(supporting_frame, textvariable=supporting_var, width=10).pack(side=tk.LEFT)
+        ttk.Label(supporting_frame, text="人（非主要出场人物）", foreground='gray').pack(side=tk.LEFT, padx=5)
+        
+        # 关键情节
+        ttk.Label(scrollable_frame, text="关键情节（每行一个）：").pack(anchor=tk.W, padx=10, pady=5)
+        plot_text = tk.Text(scrollable_frame, height=4, width=50)
+        plot_text.pack(padx=10, pady=5)
+        plot_points = chapter.get('plot_points', [])
+        plot_text.insert("1.0", '\n'.join(plot_points))
+        
+        # 核心内容
+        ttk.Label(scrollable_frame, text="核心内容/核心情节：").pack(anchor=tk.W, padx=10, pady=5)
+        key_content_text = tk.Text(scrollable_frame, height=4, width=50)
+        key_content_text.pack(padx=10, pady=5)
+        key_content_text.insert("1.0", chapter.get('key_content', ''))
+        
+        def on_confirm():
+            title = title_var.get().strip()
+            if not title:
+                messagebox.showwarning("提示", "请输入章节标题")
+                return
+            
+            try:
+                estimated_words = int(words_var.get())
+            except ValueError:
+                estimated_words = 2000
+            
+            try:
+                supporting_characters = int(supporting_var.get())
+            except ValueError:
+                supporting_characters = 0
+            
+            summary = summary_text.get("1.0", tk.END).strip()
+            characters_str = characters_var.get().strip()
+            characters = [c.strip() for c in characters_str.split('，') if c.strip()]
+            characters = characters or [c.strip() for c in characters_str.split(',') if c.strip()]
+            
+            plot_str = plot_text.get("1.0", tk.END).strip()
+            plot_points = [p.strip() for p in plot_str.split('\n') if p.strip()]
+            
+            key_content = key_content_text.get("1.0", tk.END).strip()
+            
+            # 构建更新数据
+            update_data = {
+                "title": title,
+                "estimated_words": estimated_words,
+                "summary": summary,
+                "characters": characters,
+                "supporting_characters": supporting_characters,
+                "plot_points": plot_points,
+                "key_content": key_content
+            }
+            
+            # 调用插件更新章节
+            try:
+                from agents.plugins.outline_analysis_agent import OutlineAnalysisAgent
+                agent = OutlineAnalysisAgent()
+                if not agent.initialize():
+                    messagebox.showerror("错误", "Agent初始化失败")
+                    return
+                result = agent._plugin.update_chapter(
+                    self._outline_content, chapter_idx, update_data
+                )
+                
+                if result.get('success'):
+                    self._outline_content = result['outline_data']
+                    self._outline_chapters_data = self._outline_content.get('chapters', [])
+                    # 更新树形结构
+                    self._update_outline_tree_from_chapters(self._outline_chapters_data)
+                    # 更新详情显示
+                    self._on_outline_chapter_select(None)
+                    # 自动保存项目
+                    self._auto_save_outline_changes()
+                    self._set_status(f"编辑章节成功：{title}")
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("错误", f"编辑章节失败：{result.get('error')}")
+            except Exception as e:
+                messagebox.showerror("错误", f"编辑章节失败：{e}")
+        
+        # 按钮框架
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(side=tk.BOTTOM, pady=10, fill=tk.X)
+        ttk.Button(btn_frame, text="确定", command=on_confirm).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+        
+        # 打包滚动组件
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    def _auto_save_outline_changes(self):
+        """大纲变更后自动保存项目"""
+        try:
+            # 更新current_project中的大纲数据
+            if hasattr(self, '_outline_content') and self._outline_content:
+                self.current_project['outline'] = self._outline_content
+            
+            if hasattr(self, '_outline_chapters_data') and self._outline_chapters_data:
+                self.current_project['outline_chapters'] = self._outline_chapters_data
+            
+            # 调用项目保存
+            self._save_current_project()
+            logger.info("[大纲变更] 已自动保存项目")
+        except Exception as e:
+            logger.warning(f"[大纲变更] 自动保存失败: {e}")
     
     def _on_outline_delete(self):
-        """删除"""
-        self._set_status("删除功能开发中...")
+        """删除章节"""
+        if not hasattr(self, '_outline_chapters_data') or not self._outline_chapters_data:
+            messagebox.showwarning("提示", "请先解析大纲")
+            return
+        
+        # 获取选中的节点
+        selection = self._outline_tree.selection()
+        if not selection:
+            messagebox.showwarning("提示", "请先选择要删除的章节")
+            return
+        
+        # 获取章节索引
+        item = selection[0]
+        values = self._outline_tree.item(item, 'values')
+        if not values:
+            messagebox.showwarning("提示", "请选择章节节点（非子节点）")
+            return
+        
+        chapter_idx = int(values[0])
+        if chapter_idx >= len(self._outline_chapters_data):
+            return
+        
+        chapter = self._outline_chapters_data[chapter_idx]
+        chapter_title = chapter.get('title', f"第{chapter_idx + 1}章")
+        
+        # 确认删除
+        if not messagebox.askyesno("确认删除", f"确定要删除「{chapter_title}」吗？\n此操作不可撤销。"):
+            return
+        
+        # 调用插件删除章节
+        try:
+            from agents.plugins.outline_analysis_agent import OutlineAnalysisAgent
+            agent = OutlineAnalysisAgent()
+            if not agent.initialize():
+                messagebox.showerror("错误", "Agent初始化失败")
+                return
+            result = agent._plugin.delete_chapter(self._outline_content, chapter_idx)
+            
+            if result.get('success'):
+                self._outline_content = result['outline_data']
+                self._outline_chapters_data = self._outline_content.get('chapters', [])
+                # 更新树形结构
+                self._update_outline_tree_from_chapters(self._outline_chapters_data)
+                # 自动保存项目
+                self._auto_save_outline_changes()
+                self._set_status(f"删除章节成功：{chapter_title}")
+            else:
+                messagebox.showerror("错误", f"删除章节失败：{result.get('error')}")
+        except Exception as e:
+            messagebox.showerror("错误", f"删除章节失败：{e}")
+    
+    def _on_outline_drag_start(self, event):
+        """大纲树拖拽开始事件
+        
+        【V3.3】记录拖拽起始位置，只允许拖拽章节节点
+        """
+        # 检查是否点击在章节节点上
+        item = self._outline_tree.identify_row(event.y)
+        if not item:
+            return
+        
+        values = self._outline_tree.item(item, 'values')
+        if not values:
+            return
+        
+        # 只允许拖拽章节节点（values是元组，第一个元素是章节索引或类型标识）
+        try:
+            val = values[0]
+            # 如果是字符串，可能是'volume'或'unassigned'，不允许拖拽
+            if isinstance(val, str):
+                return
+            chapter_idx = int(val)
+        except (ValueError, TypeError):
+            return
+        
+        # 记录拖拽状态（包括起始Y坐标）
+        self._outline_drag_data = {
+            'dragging': False,  # 初始为False，需要移动足够距离才激活
+            'drag_item': item,
+            'drag_index': chapter_idx,
+            'drop_indicator': None,
+            'start_y': event.y,
+            'min_drag_distance': 5
+        }
+    
+    def _on_outline_drag_motion(self, event):
+        """大纲树拖拽移动事件
+        
+        【V3.3】显示拖拽指示器，确定放置位置
+        """
+        drag_data = self._outline_drag_data
+        
+        # 检查是否已点击章节节点
+        if drag_data.get('drag_item') is None:
+            return
+        
+        # 检查最小拖拽距离
+        start_y = drag_data.get('start_y', 0)
+        min_dist = drag_data.get('min_drag_distance', 5)
+        if abs(event.y - start_y) < min_dist:
+            return
+        
+        # 激活拖拽状态
+        if not drag_data.get('dragging'):
+            self._outline_drag_data['dragging'] = True
+        
+        # 获取当前鼠标位置的节点
+        item = self._outline_tree.identify_row(event.y)
+        if not item:
+            return
+        
+        # 确保不是拖拽到自身
+        if item == drag_data.get('drag_item'):
+            return
+        
+        values = self._outline_tree.item(item, 'values')
+        if not values:
+            return
+        
+        try:
+            val = values[0]
+            if isinstance(val, str):
+                return
+            target_idx = int(val)
+        except (ValueError, TypeError):
+            return
+        
+        # 更新放置指示
+        self._outline_drag_data['drop_indicator'] = target_idx
+        
+        # 可选：在这里添加视觉反馈（如改变节点背景色）
+    
+    def _on_outline_drag_end(self, event):
+        """大纲树拖拽结束事件
+        
+        【V3.3】执行章节排序，调用插件方法更新数据
+        """
+        drag_data = self._outline_drag_data
+        
+        # 重置拖拽状态
+        self._outline_drag_data = {
+            'dragging': False,
+            'drag_item': None,
+            'drag_index': None,
+            'drop_indicator': None,
+            'start_y': 0,
+            'min_drag_distance': 5
+        }
+        
+        # 检查是否有效拖拽（必须移动足够距离）
+        if not drag_data.get('dragging'):
+            return
+        
+        from_idx = drag_data.get('drag_index')
+        to_idx = drag_data.get('drop_indicator')
+        
+        if from_idx is None or to_idx is None:
+            return
+        
+        if from_idx == to_idx:
+            return
+        
+        # 确认移动
+        from_title = self._outline_chapters_data[from_idx].get('title', f'第{from_idx+1}章')
+        to_title = self._outline_chapters_data[to_idx].get('title', f'第{to_idx+1}章')
+        
+        if not messagebox.askyesno("确认移动", 
+            f"确定要将「{from_title}」移动到「{to_title}」的位置吗？\n章节序号将重新排列。"):
+            return
+        
+        # 调用插件重排序方法
+        try:
+            from agents.plugins.outline_analysis_agent import OutlineAnalysisAgent
+            agent = OutlineAnalysisAgent()
+            if not agent.initialize():
+                messagebox.showerror("错误", "Agent初始化失败")
+                return
+            result = agent._plugin.reorder_chapters(self._outline_content, from_idx, to_idx)
+            
+            if result.get('success'):
+                self._outline_content = result['outline_data']
+                self._outline_chapters_data = self._outline_content.get('chapters', [])
+                # 更新树形结构
+                self._update_outline_tree_from_chapters(self._outline_chapters_data)
+                # 自动保存项目
+                self._auto_save_outline_changes()
+                self._set_status(f"章节排序成功：位置{from_idx+1} → {to_idx+1}")
+            else:
+                messagebox.showerror("错误", f"章节排序失败：{result.get('error')}")
+        except Exception as e:
+            logger.error(f"章节排序失败: {e}")
+            messagebox.showerror("错误", f"章节排序失败：{e}")
     
     def _on_outline_parse(self):
         """解析大纲 - 调用OutlineAnalysisAgent"""
         try:
-            # 获取当前选中的大纲路径
-            outline_path = getattr(self, '_outline_path_var', tk.StringVar()).get()
-            if not outline_path or outline_path == "未导入":
+            # 获取完整大纲路径
+            outline_path = getattr(self, '_outline_file_path', None)
+            if not outline_path:
                 messagebox.showwarning("提示", "请先选择大纲文件")
+                return
+            
+            # 检查文件是否存在
+            from pathlib import Path
+            if not Path(outline_path).exists():
+                messagebox.showerror("错误", f"大纲文件不存在: {outline_path}")
                 return
             
             # 更新状态
@@ -8298,8 +9335,6 @@ data/知识库验证器/backups/
             
             # 导入Agent
             from agents.plugins.outline_analysis_agent import OutlineAnalysisAgent
-            from agents.core.base_agent import AgentContext
-            from pathlib import Path
             
             # 读取文件内容
             content = Path(outline_path).read_text(encoding='utf-8')
@@ -8309,19 +9344,17 @@ data/知识库验证器/backups/
             if not agent.initialize():
                 raise RuntimeError("OutlineAnalysisAgent初始化失败")
             
-            # 构建上下文
-            context = AgentContext(
-                task_id=f"outline_parse_{int(time.time())}",
-                input_data={
-                    "outline_content": content,
-                    "extract_chapters": True,
-                }
-            )
+            # 构建任务ID和载荷
+            task_id = f"outline_parse_{int(time.time())}"
+            payload = {
+                "content": content,
+                "options": {"extract_chapters": True}
+            }
             
             # 执行解析（异步，使用统一线程池）
             def run_parse():
                 try:
-                    result = agent.execute(context)
+                    result = agent.execute(task_id, payload)
                     self.root.after(0, lambda: self._on_outline_parse_complete(result))
                 except Exception as e:
                     self.root.after(0, lambda: self._on_outline_parse_error(str(e)))
@@ -8340,27 +9373,102 @@ data/知识库验证器/backups/
         """大纲解析完成回调"""
         try:
             if result.success:
-                # 存储大纲数据
-                self._outline_content = result.data.get("outline_content", "")
-                self._chapter_outlines = result.data.get("chapters", {})
-                
-                # 更新大纲树形结构
-                self._outline_tree.delete(*self._outline_tree.get_children())
+                # 【修复V3.3】整个result.data就是大纲数据对象
+                # 插件返回: {"success": True, "chapters": [...], "volumes": [...], ...}
+                self._outline_content = result.data
                 chapters = result.data.get("chapters", [])
-                for i, chapter in enumerate(chapters):
-                    chapter_id = self._outline_tree.insert("", tk.END, text=f"第{i+1}章: {chapter.get('title', '未命名')}")
-                    # 添加子节点
-                    for key, value in chapter.items():
-                        if key != "title":
-                            self._outline_tree.insert(chapter_id, tk.END, text=f"{key}: {str(value)[:30]}")
                 
+                # 存储完整章节数据（用于详情显示）
+                self._outline_chapters_data = chapters
+                self._chapter_outlines = chapters
+                
+                # 【修复V3.3】调用统一的树形结构更新方法（支持卷结构）
+                self._update_outline_tree_from_chapters(chapters)
+
+                # 【新增V1.49.0】同步人物出场章节信息
+                self._sync_character_chapters_from_outline(chapters)
+
+                # 【新增V1.49.14】大纲解析后更新【开始创作】界面的出场人物列表
+                if hasattr(self, '_gen_characters_listbox'):
+                    self._update_characters_from_outline(1)
+                    logger.info("[大纲解析] 出场人物列表已更新")
+
                 # 更新统计信息
-                total_words = result.data.get("estimated_words", 0)
-                self._set_status(f"大纲解析完成，预估{total_words}字")
+                total_words = result.data.get("total_estimated_words", 0)
+                total_chapters = len(chapters)
+                volumes = result.data.get("volumes", [])
+                vol_info = f"，{len(volumes)}卷" if volumes else ""
+                self._set_status(f"大纲解析完成：{total_chapters}章{vol_info}，预估{total_words}字")
             else:
                 self._set_status(f"大纲解析失败: {result.error}")
         except Exception as e:
             self._set_status(f"处理解析结果失败: {str(e)}")
+    
+    def _on_outline_chapter_select(self, event):
+        """大纲章节选择事件 - 在章节编辑器中显示详情"""
+        try:
+            selection = self._outline_tree.selection()
+            if not selection:
+                return
+            
+            # 获取选中节点
+            item = selection[0]
+            values = self._outline_tree.item(item, 'values')
+            
+            # 检查是否是章节节点（有 values）
+            if not values:
+                return
+            
+            chapter_idx = int(values[0])
+            if chapter_idx >= len(self._outline_chapters_data):
+                return
+            
+            # 获取章节数据
+            chapter = self._outline_chapters_data[chapter_idx]
+            
+            # 填充章节编辑器
+            chapter_title = chapter.get('title', '')
+            self._chapter_title_var.set(chapter_title)
+            estimated_words = chapter.get('estimated_words', 2000)
+            self._chapter_words_var.set(str(estimated_words))
+            
+            # 填充摘要（完整显示所有字段）
+            chapter_number = chapter.get('chapter_number', chapter_idx + 1)
+            summary = chapter.get('summary', '')
+            key_content = chapter.get('key_content', '')
+            characters = chapter.get('characters', [])
+            supporting_count = chapter.get('supporting_characters', 0)
+            plot_points = chapter.get('plot_points', [])
+            keywords = chapter.get('keywords', [])
+            
+            # 【完整字段显示】按用户要求顺序显示
+            detail_text = f"【章节序号】第{chapter_number}章\n\n"
+            detail_text += f"【章节标题】{chapter_title}\n\n"
+            detail_text += f"【预期字数】{estimated_words}字\n\n"
+            
+            if characters:
+                detail_text += f"【出场人物】\n主要人物：{', '.join(characters)}\n配角人数：{supporting_count}人\n\n"
+            else:
+                detail_text += f"【出场人物】\n主要人物：无\n配角人数：0人\n\n"
+            
+            if summary:
+                detail_text += f"【故事梗概】\n{summary}\n\n"
+            
+            # 关键内容（优先使用key_content，降级到plot_points）
+            if key_content:
+                detail_text += f"【关键内容】\n{key_content}\n\n"
+            elif plot_points:
+                detail_text += f"【关键内容】\n" + "\n".join(f"- {p}" for p in plot_points) + "\n\n"
+            
+            if keywords:
+                detail_text += f"【关键词】{', '.join(keywords)}\n"
+            
+            # 更新摘要文本框
+            self._chapter_summary.delete("1.0", tk.END)
+            self._chapter_summary.insert("1.0", detail_text.strip())
+            
+        except Exception as e:
+            logger.error(f"显示章节详情失败: {e}")
     
     def _on_outline_parse_error(self, error: str):
         """大纲解析错误回调"""
@@ -8368,71 +9476,159 @@ data/知识库验证器/backups/
         self._set_status(f"大纲解析失败: {error}")
     
     def _on_outline_clear(self):
-        """清除大纲"""
-        self._outline_path_var.set("未导入")
+        """清除大纲【V3.3】遵循架构：清除GUI显示和内存数据"""
+        # 确认对话框
+        if not messagebox.askyesno("确认清除", 
+            "确定要清除当前大纲吗？\n\n这将删除所有已解析的章节数据和卷结构。"):
+            return
+        
+        try:
+            # 1. 清除路径
+            self._outline_path_var.set("未导入")
+            if hasattr(self, '_outline_file_path'):
+                delattr(self, '_outline_file_path')
+            
+            # 2. 清除大纲数据
+            self._outline_content = None
+            self._outline_chapters_data = []
+            self._chapter_outlines = []
+            
+            # 3. 清除树形结构
+            if hasattr(self, '_outline_tree') and self._outline_tree:
+                self._outline_tree.delete(*self._outline_tree.get_children())
+            
+            # 4. 清除章节详情面板（如果存在）
+            if hasattr(self, '_chapter_title_var'):
+                self._chapter_title_var.set("")
+            if hasattr(self, '_chapter_words_var'):
+                self._chapter_words_var.set("")
+            if hasattr(self, '_chapter_detail_text') and self._chapter_detail_text:
+                self._chapter_detail_text.delete(1.0, tk.END)
+            
+            # 5. 重置拖拽状态
+            if hasattr(self, '_outline_drag_data'):
+                self._outline_drag_data = {
+                    'dragging': False,
+                    'drag_item': None,
+                    'drag_index': None,
+                    'drop_indicator': None,
+                    'start_y': 0,
+                    'min_drag_distance': 5
+                }
+            
+            self._set_status("大纲已清除")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"清除大纲失败：{e}")
     
     def _on_style_browse(self):
         """浏览风格文件"""
         path = filedialog.askopenfilename(
             title="选择风格文件",
-            filetypes=[("文本文件", "*.txt"), ("Word文档", "*.docx"), ("所有文件", "*.*")]
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
         )
         if path:
+            self._style_file_path = path  # 存储完整路径
             self._style_path_var.set(os.path.basename(path))
-            self._set_status(f"已选择: {os.path.basename(path)}")
+            self._set_status(f"已选择: {os.path.basename(path)} ({len(Path(path).read_text(encoding='utf-8', errors='ignore'))}字)")
     
     def _on_style_delete(self):
-        """删除范文"""
-        self._set_status("删除范文功能开发中...")
+        """删除范文 - 删除当前选择的原始范文文件"""
+        style_path = getattr(self, '_style_file_path', None)
+        if not style_path or not os.path.exists(style_path):
+            style_display = getattr(self, '_style_path_var', tk.StringVar()).get()
+            if not style_display or style_display == "未导入":
+                messagebox.showinfo("提示", "没有可删除的范文文件")
+                return
+            # 尝试从项目目录查找
+            project_dir = getattr(self, '_current_project_dir', None)
+            if project_dir:
+                candidate = os.path.join(project_dir, style_display)
+                if os.path.exists(candidate):
+                    style_path = candidate
+
+        if not style_path or not os.path.exists(style_path):
+            messagebox.showwarning("提示", "范文文件不存在，可能已被删除或移动")
+            return
+
+        filename = os.path.basename(style_path)
+        if messagebox.askyesno("确认删除", f"确定要删除范文文件吗？\n\n{filename}\n\n注意：此操作不可撤销，将永久删除该文件。"):
+            try:
+                os.remove(style_path)
+                # 清除相关状态
+                self._style_file_path = None
+                if hasattr(self, '_style_path_var'):
+                    self._style_path_var.set("未导入")
+                # 清空分析结果显示
+                if hasattr(self, '_style_info'):
+                    self._style_info.delete("1.0", tk.END)
+                    self._style_info.insert("1.0", "范文已删除，请重新上传")
+                # 清空档案库Treeview
+                if hasattr(self, '_style_tree'):
+                    self._style_tree.delete(*self._style_tree.get_children())
+                # 清除风格数据
+                self._style_profile = None
+                self._active_style_name = None
+                self._set_status(f"已删除范文: {filename}")
+                logging.info(f"用户删除风格范文文件: {style_path}")
+            except PermissionError:
+                messagebox.showerror("错误", f"无法删除文件 {filename}\n\n文件可能正在被其他程序使用。\n请关闭占用该文件的程序后重试。")
+            except Exception as e:
+                from core.user_friendly_errors import convert_exception
+                title, full_message = convert_exception(e, "删除范文")
+                messagebox.showerror(title, full_message)
     
     def _on_style_analyze(self):
-        """解析风格 - 调用StyleLearningAgent"""
+        """解析风格 - 直接调用style-learner-v5插件"""
         try:
-            # 获取当前选中的范文路径
-            style_path = getattr(self, '_style_path_var', tk.StringVar()).get()
-            if not style_path or style_path == "未导入":
-                messagebox.showwarning("提示", "请先上传范文文件")
-                return
+            # 获取完整文件路径
+            style_path = getattr(self, '_style_file_path', None)
+            if not style_path or not os.path.exists(style_path):
+                style_path_display = getattr(self, '_style_path_var', tk.StringVar()).get()
+                if not style_path_display or style_path_display == "未导入":
+                    messagebox.showwarning("提示", "请先上传范文文件")
+                    return
+                # 尝试在项目目录中查找
+                project_dir = getattr(self, '_current_project_dir', None)
+                if project_dir:
+                    candidate = os.path.join(project_dir, style_path_display)
+                    if os.path.exists(candidate):
+                        style_path = candidate
             
-            # 更新状态
+            if not style_path or not os.path.exists(style_path):
+                messagebox.showerror("错误", "风格分析指定的文件不存在。\n\n建议：\n1. 确认文件路径是否正确\n2. 确认文件是否已被删除或移动\n3. 使用【上传范文】重新选择文件")
+                return
+
             self._set_status("正在分析风格...")
             
-            # 导入Agent
-            from agents.plugins.style_learning_agent import StyleLearningAgent
-            from pathlib import Path
-            
-            # 读取文件内容
-            content = Path(style_path).read_text(encoding='utf-8')
-            
-            # 创建Agent实例
-            agent = StyleLearningAgent()
-            if not agent.initialize():
-                raise RuntimeError("StyleLearningAgent初始化失败")
-            
-            # 构建上下文
-            from agents.core.base_agent import AgentContext
-            context = AgentContext(
-                task_id=f"style_analyze_{int(time.time())}",
-                input_data={
-                    "text": content[:50000],  # 限制长度
-                    "extract_patterns": True,
-                }
-            )
-            
-            # 执行分析（异步）
             def run_analysis():
                 try:
-                    result = agent.execute(context)
-                    self.root.after(0, lambda: self._on_style_analyze_complete(result))
-                except Exception as e:
-                    self.root.after(0, lambda: self._on_style_analyze_error(str(e)))
-            
-            # 使用统一线程池（解决卡顿问题）
+                    # 【修复】使用动态导入（目录名含连字符style-learner-v5，不能直接import）
+                    import importlib.util
+                    plugin_path = os.path.join(os.path.dirname(__file__), 'plugins', 'style-learner-v5', 'plugin.py')
+                    spec = importlib.util.spec_from_file_location("style_learner_plugin", plugin_path)
+                    style_module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(style_module)
+                    StyleLearnerPlugin = style_module.StyleLearnerPlugin
+
+                    plugin = StyleLearnerPlugin()
+                    plugin.initialize(type('C', (object,), {'config_manager': None})())
+
+                    result = plugin.analyze(style_path, {"analysis_type": "full"})
+
+                    if result.get("success"):
+                        self.root.after(0, lambda r=result: self._on_style_analyze_complete(r))
+                    else:
+                        err_msg = result.get("error", "未知错误")
+                        self.root.after(0, lambda m=err_msg: self._on_style_analyze_error(m))
+                except Exception as exc:
+                    error_msg = str(exc)
+                    self.root.after(0, lambda m=error_msg: self._on_style_analyze_error(m))
+
             from core.thread_pool_manager import thread_pool_manager
             thread_pool_manager.submit_sync(run_analysis)
             
         except Exception as e:
-            # P2-003修复：用户友好错误提示
             from core.user_friendly_errors import convert_exception
             title, full_message = convert_exception(e, "风格分析")
             messagebox.showerror(title, full_message)
@@ -8441,20 +9637,138 @@ data/知识库验证器/backups/
     def _on_style_analyze_complete(self, result):
         """风格分析完成回调"""
         try:
-            if result.success:
-                # 存储风格档案
-                self._style_profile = result.data.get("style_profile", {})
+            # result 是 plugin.analyze() 返回的字典
+            if not isinstance(result, dict) or result.get("success"):
+                # 存储完整风格档案到实例变量（用于生成器调用）
+                self._style_profile = result
                 
-                # 更新UI
+                # 格式化显示8维度分析结果
+                info = []
+                info.append("=" * 50)
+                info.append(f"  风格分析完成")
+                info.append("=" * 50)
+                info.append(f"作者: {result.get('author_name', '未知')}")
+                info.append(f"类型: {result.get('genre', '未知')}")
+                info.append(f"样本: {result.get('sample_size_chars', 0)} 字符")
+                info.append(f"时间: {result.get('created_date', '')}")
+                info.append("")
+                
+                # 1. 词汇特征
+                vocab = result.get('vocabulary_depth', {})
+                if vocab:
+                    high_freq = vocab.get('high_frequency_words', [])[:10]
+                    info.append(f"【词汇特征】")
+                    if high_freq:
+                        info.append(f"高频词: {', '.join([w for w, c in high_freq])}")
+                    proper = vocab.get('proper_nouns', [])
+                    if proper:
+                        info.append(f"专有名词: {', '.join(proper[:10])}")
+                    emotion_w = vocab.get('emotion_words', {})
+                    if emotion_w:
+                        info.append(f"情感词: {json.dumps(emotion_w, ensure_ascii=False)}")
+                    sensory = vocab.get('sensory_words', {})
+                    if sensory:
+                        for stype, swords in sensory.items():
+                            info.append(f"{stype}描写: {', '.join(swords)}")
+                
+                # 2. 句式模式
+                sentence = result.get('sentence_patterns', {})
+                if sentence:
+                    info.append("")
+                    info.append(f"【句式模式】")
+                    info.append(f"短句占比: {sentence.get('short_sentences_ratio', 0)*100:.1f}%")
+                    info.append(f"长句占比: {sentence.get('long_sentences_ratio', 0)*100:.1f}%")
+                    info.append(f"句子节奏: {sentence.get('sentence_rhythm', '未知')}")
+                    rq_count = len(sentence.get('rhetorical_questions', []))
+                    cond_count = len(sentence.get('conditional_sentences', []))
+                    if rq_count or cond_count:
+                        info.append(f"设问句{rq_count}个 / 条件句{cond_count}个")
+
+                # 3. 修辞手法
+                rhetoric = result.get('rhetorical_devices', {})
+                if rhetoric:
+                    info.append("")
+                    info.append(f"【修辞手法】(密度: {rhetoric.get('rhetorical_density', 0):.2f}/千字)")
+                    meta_count = len(rhetoric.get('metaphors', []))
+                    pers_count = len(rhetoric.get('personifications', []))
+                    hyper_count = len(rhetoric.get('hyperboles', []))
+                    para_count = len(rhetoric.get('parallelisms', []))
+                    info.append(f"比喻{meta_count} / 拟人{pers_count} / 夸张{hyper_count} / 排比{para_count}")
+
+                # 4. 叙事风格
+                narrative = result.get('narrative_style', {})
+                if narrative:
+                    info.append("")
+                    info.append(f"【叙事风格】")
+                    info.append(f"视角: {narrative.get('perspective', '未知')} | 时态: {narrative.get('tense', '未知')}")
+                    info.append(f"节奏: {narrative.get('narrative_pace', '未知')}")
+
+                # 5. 情感色彩
+                emotion = result.get('emotional_tone', {})
+                if emotion:
+                    info.append("")
+                    info.append(f"【情感色彩】")
+                    info.append(f"整体倾向: {emotion.get('overall_sentiment', '中性')}")
+                    info.append(f"情感强度: {emotion.get('emotional_intensity', 0):.2f}")
+
+                # 6. 语言风格
+                language = result.get('language_style', {})
+                if language:
+                    info.append("")
+                    info.append(f"【语言风格】")
+                    info.append(f"语体: {language.get('register', '通用')} | 正式度: {language.get('formality', 0):.2f}")
+                    idioms = language.get('idioms', [])
+                    if idioms:
+                        info.append(f"成语: {', '.join(idioms[:15])}")
+
+                # 7. 节奏风格
+                pacing = result.get('pacing_style', {})
+                if pacing:
+                    info.append("")
+                    info.append(f"【节奏风格】")
+                    info.append(f"整体节奏: {pacing.get('overall_pace', '中等')}")
+
+                # 8. 风格标签 + 相似作家
+                tags = result.get('style_tags', [])
+                similar = result.get('similar_authors', [])
+                chars = result.get('writing_characteristics', [])
+                info.append("")
+                info.append(f"【风格标签】{', '.join(tags)}")
+                if similar:
+                    info.append(f"相似作家: {', '.join(similar)}")
+                if chars:
+                    info.append(f"写作特点:")
+                    for c in chars:
+                        info.append(f"  - {c}")
+                
+                # 更新UI显示
                 self._style_info.delete("1.0", tk.END)
-                self._style_info.insert("1.0", f"风格分析完成！\n\n")
-                self._style_info.insert(tk.END, f"词汇特征: {len(result.data.get('vocabulary_features', []))}个\n")
-                self._style_info.insert(tk.END, f"句式模式: {len(result.data.get('sentence_patterns', []))}个\n")
-                self._style_info.insert(tk.END, f"修辞手法: {len(result.data.get('rhetorical_devices', []))}个\n")
+                self._style_info.insert("1.0", "\n".join(info))
+
+                # 同时将分析结果添加到风格档案库Treeview
+                name = f"{result.get('author_name', '风格')}_{result.get('created_date', '')[:10]}"
+                # 检查是否已存在
+                existing = self._style_tree.get_children()
+                insert_name = name if name not in [self._style_tree.item(i)['values'][0] for i in existing] else f"{name}_新"
                 
-                self._set_status("风格分析完成")
+                # V1.48.13：从result.dimensions获取评分（由插件生成）
+                dims = result.get('dimensions', {})
+                
+                self._style_tree.insert("", tk.END, values=(
+                    insert_name,
+                    f"{dims.get('vocabulary', 5.0):.1f}",
+                    f"{dims.get('sentence', 5.0):.1f}",
+                    f"{dims.get('rhetoric', 5.0):.1f}",
+                    f"{dims.get('emotion', 5.0):.1f}",
+                    f"{dims.get('narrative', 5.0):.1f}",
+                    f"{dims.get('language', 5.0):.1f}",
+                    f"{dims.get('pacing', 5.0):.1f}",
+                ))
+                
+                self._set_status(f"风格分析完成 - {result.get('sample_size_chars', 0)}字符")
             else:
-                self._set_status(f"风格分析失败: {result.error}")
+                err_msg = result.get("error", "分析失败") if isinstance(result, dict) else "分析失败"
+                self._set_status(f"风格分析失败: {err_msg}")
         except Exception as e:
             self._set_status(f"处理分析结果失败: {str(e)}")
     
@@ -8464,83 +9778,622 @@ data/知识库验证器/backups/
         self._set_status(f"风格分析失败: {error}")
     
     def _on_style_export(self):
-        """导出风格"""
-        self._set_status("导出风格功能开发中...")
+        """导出风格档案为JSON"""
+        if not getattr(self, '_style_profile', None) or not isinstance(self._style_profile, dict):
+            messagebox.showwarning("提示", "没有可导出的风格数据，请先解析风格")
+            return
+        
+        save_path = filedialog.asksaveasfilename(
+            title="导出风格档案",
+            defaultextension=".json",
+            filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")],
+            initialfile=f"{self._style_profile.get('author_name', '风格')}_profile.json"
+        )
+        
+        if save_path:
+            try:
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    json.dump(self._style_profile, f, ensure_ascii=False, indent=2)
+                self._set_status(f"风格档案已导出到: {os.path.basename(save_path)}")
+                messagebox.showinfo("导出成功", f"风格档案已导出至:\n{save_path}")
+            except Exception as e:
+                messagebox.showerror("导出失败", str(e))
     
     def _on_style_switch(self):
-        """切换风格"""
-        self._set_status("切换风格功能开发中...")
+        """切换风格 - 从Treeview选择已分析的风格档案"""
+        selected = self._style_tree.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请在左侧【风格档案库】中选择一个风格")
+            return
+        
+        item_id = selected[0]
+        values = self._style_tree.item(item_id)['values']
+        style_name = values[0]
+        self._active_style_name = style_name
+        self._style_path_var.set(style_name)
+        self._set_status(f"已切换到风格: {style_name}")
     
     def _on_style_edit_weight(self):
-        """编辑权重"""
-        self._set_status("编辑权重功能开发中...")
+        """编辑权重 - 调整当前风格的八维度权重评分（对应插件8维度分析）
+        
+        V1.48.9更新：增加风格名称编辑功能
+        """
+        selected = self._style_tree.selection()
+        if not selected and not getattr(self, '_style_profile', None):
+            messagebox.showinfo("提示", "请先在档案库中选择一个风格，或先分析一个范文")
+            return
+        
+        # 获取当前风格名称
+        current_name = ""
+        selected_item_id = None
+        if selected:
+            selected_item_id = selected[0]
+            values = self._style_tree.item(selected_item_id)['values']
+            current_name = values[0] if values else ""
+        elif hasattr(self, '_style_profile') and self._style_profile:
+            current_name = self._style_profile.get('author_name', '未命名风格')
+        
+        dialog = tk.Toplevel(self.root)
+        dialog.title("编辑风格权重")
+        dialog.geometry("550x580")
+        # V1.48.12修复：移除手动背景设置，让sv_ttk主题自动处理
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 550) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 580) // 2
+        dialog.geometry(f"+{x}+{y}")
+        
+        # ====== V1.48.9新增：风格名称编辑区 ======
+        name_frame = ttk.Frame(dialog)
+        name_frame.pack(fill=tk.X, padx=15, pady=(12, 5))
+        ttk.Label(name_frame, text="风格名称:",
+                 font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_NORMAL)).pack(side=tk.LEFT)
+        name_var = tk.StringVar(value=current_name)
+        name_entry = ttk.Entry(name_frame, textvariable=name_var, width=30)
+        name_entry.pack(side=tk.LEFT, padx=8)
+        # ====== 名称编辑区结束 ======
+        
+        # 标题 + 说明
+        header_frame = ttk.Frame(dialog)
+        header_frame.pack(fill=tk.X, padx=15, pady=(5, 3))
+        ttk.Label(header_frame, text="调整八维度风格权重（0-10分）",
+                 font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_TITLE)).pack(anchor='w')
+        ttk.Label(header_frame, text="数值越高表示该维度在生成时越重要，影响评分和风格匹配度",
+                 font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_SMALL),
+                 foreground=GlassTheme.TEXT_SECONDARY).pack(anchor='w')
+        
+        # 八维度定义（与插件analyze()返回的8维度一一对应）
+        dimensions = [
+            ("词汇丰富度", "vocabulary", "高频词数量、词汇多样性、专有名词使用"),
+            ("句式复杂度", "sentence", "短/长句占比、句子节奏、排比/设问等句式"),
+            ("修辞密度", "rhetoric", "比喻/拟人/夸张/排比等修辞手法使用频率"),
+            ("情感色彩", "emotion", "情感倾向(积极/消极/中性)、情感强度"),
+            ("叙事视角", "narrative", "第一/第三人称、叙事时态、场景描写能力"),
+            ("语言风格", "language", "口语化 vs 书面化程度、正式度"),
+            ("节奏控制", "pacing", "整体节奏(快/中/慢)、段落长短变化"),
+            ("细节描写", "detail", "感官描写(视/听/触)、写作特点丰富度"),
+        ]
+        
+        dim_vars = {}
+        for label_text, key, hint_text in dimensions:
+            row = ttk.Frame(dialog)
+            row.pack(fill=tk.X, padx=15, pady=1)
+            
+            # 维度名称 + 提示
+            left_area = ttk.Frame(row)
+            left_area.pack(side=tk.LEFT, fill=tk.Y)
+            ttk.Label(left_area, text=label_text, width=10, anchor='e').pack(side=tk.LEFT)
+            ttk.Label(left_area, text=f"({hint_text[:8]}...)",
+                     font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_SMALL),
+                     foreground=GlassTheme.TEXT_SECONDARY).pack(side=tk.LEFT, padx=(2, 8))
+            
+            var = tk.DoubleVar(value=5.0)
+            dim_vars[key] = var
+            scale = ttk.Scale(row, from_=0.0, to=10.0, variable=var, orient=tk.HORIZONTAL, length=200)
+            scale.pack(side=tk.LEFT, padx=3)
+            ttk.Label(row, textvariable=var, width=4).pack(side=tk.LEFT)
+        
+        def apply_weight():
+            scores = {key: round(var.get(), 1) for key, var in dim_vars.items()}
+            new_name = name_var.get().strip()
+            
+            if not hasattr(self, '_style_config'):
+                self._style_config = {}
+            self._style_config['dimensions'] = scores
+            
+            # V1.48.9新增：更新风格名称
+            if new_name:
+                # 更新_style_profile中的author_name
+                if hasattr(self, '_style_profile') and self._style_profile:
+                    self._style_profile['author_name'] = new_name
+                # 更新_active_style_name
+                self._active_style_name = new_name
+                # 更新路径显示
+                if hasattr(self, '_style_path_var'):
+                    self._style_path_var.set(new_name)
+            
+            selected_items = self._style_tree.selection()
+            if selected_items:
+                item_id = selected_items[0]
+                current_values = list(self._style_tree.item(item_id)['values'])
+                if len(current_values) >= 8:
+                    # V1.48.9：同时更新名称（values[0]）
+                    if new_name:
+                        current_values[0] = new_name
+                    current_values[1] = f"{scores.get('vocabulary', 5):.1f}"
+                    current_values[2] = f"{scores.get('sentence', 5):.1f}"
+                    current_values[3] = f"{scores.get('rhetoric', 5):.1f}"
+                    current_values[4] = f"{scores.get('emotion', 5):.1f}"
+                    current_values[5] = f"{scores.get('narrative', 5):.1f}"   # 叙事视角（原rhythm）
+                    current_values[6] = f"{scores.get('language', 5):.1f}"    # 语言风格（原structure）
+                    current_values[7] = f"{scores.get('pacing', 5):.1f}"      # 节奏控制
+                    # detail不显示在tree中，但保留在配置中
+                    # 更新Treeview显示
+                    self._style_tree.item(item_id, values=current_values)
+            
+            self._set_status(f"风格已更新: {new_name}" if new_name else "权重已更新")
+            dialog.destroy()
+        
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=20, pady=15)
+        ttk.Button(btn_frame, text="应用", command=apply_weight).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+    
+    def _on_style_load_profile(self):
+        """加载风格档案 - 从文件选择已保存的风格档案JSON"""
+        load_path = filedialog.askopenfilename(
+            title="选择风格档案",
+            filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")],
+        )
+        
+        if not load_path:
+            return
+        
+        try:
+            with open(load_path, 'r', encoding='utf-8') as f:
+                profile = json.load(f)
+            
+            if not isinstance(profile, dict) or 'author_name' not in profile:
+                messagebox.showerror("格式错误", "选择的文件不是有效的风格档案")
+                return
+            
+            self._style_profile = profile
+            self._active_style_name = profile.get('author_name', os.path.basename(load_path))
+            
+            # 更新路径显示
+            self._style_path_var.set(load_path)
+            
+            # 添加到Treeview档案库
+            self._add_style_to_tree(profile)
+            
+            # 显示风格信息
+            self._display_style_result(profile)
+            
+            self._set_status(f"已加载风格档案: {os.path.basename(load_path)}")
+        except json.JSONDecodeError:
+            messagebox.showerror("格式错误", "无法解析JSON文件")
+        except Exception as e:
+            messagebox.showerror("加载失败", str(e))
+    
+    def _add_style_to_tree(self, profile):
+        """将风格档案数据添加到Treeview档案库
+        
+        V1.48.14修复：UI只负责显示，评分计算由插件完成
+        列顺序：name, vocabulary, sentence, rhetoric, emotion, narrative, language, pacing
+        """
+        # V1.48.14：调用插件补充dimensions（处理旧JSON缺失情况）
+        # 使用importlib动态导入带连字符的模块
+        import importlib.util
+        plugin_path = os.path.join(os.path.dirname(__file__), "plugins", "style-learner-v5", "plugin.py")
+        spec = importlib.util.spec_from_file_location("style_learner_plugin", plugin_path)
+        style_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(style_module)
+        profile = style_module.StyleLearnerPlugin.ensure_dimensions(profile)
+        
+        # 直接从dimensions读取评分（由插件生成），不做任何计算
+        dims = profile.get('dimensions', {})
+        
+        # 生成名称
+        name = f"{profile.get('author_name', '风格')}_{profile.get('created_date', '')[:10]}"
+        existing = self._style_tree.get_children()
+        insert_name = name if name not in [self._style_tree.item(i)['values'][0] for i in existing] else f"{name}_新"
+        
+        # 直接使用插件生成的评分，无计算逻辑
+        self._style_tree.insert("", tk.END, values=(
+            insert_name,
+            f"{dims.get('vocabulary', 5.0):.1f}",
+            f"{dims.get('sentence', 5.0):.1f}",
+            f"{dims.get('rhetoric', 5.0):.1f}",
+            f"{dims.get('emotion', 5.0):.1f}",
+            f"{dims.get('narrative', 5.0):.1f}",
+            f"{dims.get('language', 5.0):.1f}",
+            f"{dims.get('pacing', 5.0):.1f}",
+        ))
+    
+    def _display_style_result(self, result):
+        """将风格分析结果显示到右侧文本框
+        
+        V1.48.13修复：统一使用兼容性key查找，与_add_style_to_tree保持一致
+        """
+        info = []
+        
+        # 基础信息
+        info.append(f"作者: {result.get('author_name', '未知')}")
+        info.append(f"样本量: {result.get('sample_size_chars', 0)}字符")
+        info.append(f"分析时间: {result.get('created_date', '未知')}")
+        info.append("")
+        
+        # V1.48.13：各维度信息使用兼容性key查找
+        vocab = result.get('vocabulary_analysis') or result.get('vocabulary_depth') or {}
+        if vocab:
+            info.append(f"【词汇深度】丰富度: {vocab.get('lexical_richness', '-')}，高频词数: {len(vocab.get('high_frequency_words', []))}")
+        
+        sentence = result.get('sentence_pattern') or result.get('sentence_patterns') or {}
+        if sentence:
+            info.append(f"【句式模式】平均句长: {sentence.get('avg_sentence_length', '-')}，节奏: {sentence.get('sentence_rhythm', '-')}")
+        
+        rhetoric = result.get('rhetoric_devices') or result.get('rhetorical_devices') or {}
+        if rhetoric:
+            info.append(f"【修辞手法】密度: {rhetoric.get('rhetorical_density', '-')}，主要: {', '.join(rhetoric.get('dominant_devices', []))}")
+        
+        emotion = result.get('emotion_color') or result.get('emotional_tone') or {}
+        if emotion:
+            info.append(f"【情感色彩】{emotion.get('overall_sentiment', '-')}")
+        
+        pacing = result.get('rhythm_style') or result.get('pacing_style') or {}
+        if pacing:
+            info.append(f"【节奏风格】{pacing.get('overall_pace', '中等')}")
+        
+        tags = result.get('style_tags', [])
+        similar = result.get('similar_authors', [])
+        chars = result.get('writing_characteristics', [])
+        
+        info.append("")
+        info.append(f"【风格标签】{', '.join(tags) if tags else '无'}")
+        if similar:
+            info.append(f"相似作家: {', '.join(similar)}")
+        if chars:
+            info.append("写作特点:")
+            for c in chars:
+                info.append(f"  - {c}")
+        
+        self._style_info.delete("1.0", tk.END)
+        self._style_info.insert("1.0", "\n".join(info))
     
     def _on_style_delete_profile(self):
-        """删除风格档案"""
-        self._set_status("删除风格档案功能开发中...")
+        """删除风格档案 - 从Treeview中移除选中的风格记录"""
+        selected = self._style_tree.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请先在【风格档案库】中选择要删除的风格")
+            return
+        
+        item_id = selected[0]
+        values = self._style_tree.item(item_id)['values']
+        name = values[0]
+        
+        if messagebox.askyesno("确认删除", f"确定要删除风格档案吗？\n\n{name}"):
+            self._style_tree.delete(item_id)
+            self._set_status(f"已删除风格档案: {name}")
     
     def _on_style_learn(self):
-        """学习风格"""
-        self._set_status("风格学习功能开发中...")
+        """深度学习 - 合并流程：自动执行 解析风格 → 深度分析，一次性输出最优结果
+
+        【V1.48.7合并】原【解析风格】和【深度学习】两个步骤合并为一次操作：
+        1. 检查是否有范文文件
+        2. 调用 plugin.analyze() 进行8维度结构化解析
+        3. 调用 plugin.deep_analyze() 基于解析结果提炼写作技巧/规则/expert_prompt
+        4. 合并两步结果，UI显示最完善的风格档案，同时更新 _style_profile 供生成器使用
+        """
+        # 步骤1：获取范文文件路径
+        style_path = getattr(self, '_style_file_path', None)
+        if not style_path or not os.path.exists(style_path):
+            style_path_display = getattr(self, '_style_path_var', tk.StringVar()).get()
+            if not style_path_display or style_path_display == "未导入":
+                messagebox.showwarning("提示", "请先上传范文文件")
+                return
+            project_dir = getattr(self, '_current_project_dir', None)
+            if project_dir:
+                candidate = os.path.join(project_dir, style_path_display)
+                if os.path.exists(candidate):
+                    style_path = candidate
+
+        if not style_path or not os.path.exists(style_path):
+            messagebox.showerror("错误", "风格分析指定的文件不存在。\n\n建议：\n1. 确认文件路径是否正确\n2. 使用【上传范文】重新选择文件")
+            return
+
+        self._set_status("正在深度学习：解析风格文本 → AI增强分析...")
+
+        def run_unified_deep_learn():
+            try:
+                import importlib.util
+                plugin_path = os.path.join(os.path.dirname(__file__), 'plugins', 'style-learner-v5', 'plugin.py')
+                spec = importlib.util.spec_from_file_location("style_learner_plugin", plugin_path)
+                style_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(style_module)
+                StyleLearnerPlugin = style_module.StyleLearnerPlugin
+
+                plugin = StyleLearnerPlugin()
+                plugin.initialize(type('C', (object,), {'config_manager': None})())
+
+                # === 第一步：8维度结构化解析 ===
+                self.root.after(0, lambda: self._set_status("正在深度学习(1/2)：解析风格文本..."))
+                analyze_result = plugin.analyze(style_path, {"analysis_type": "full"})
+
+                if not analyze_result.get("success"):
+                    err_msg = analyze_result.get("error", "未知错误")
+                    self.root.after(0, lambda m=err_msg: messagebox.showerror("风格解析失败", m))
+                    return
+
+                # 存储基础解析结果到 _style_profile（供生成器使用）
+                self._style_profile = analyze_result
+
+                # === 第二步：AI深度增强分析 ===
+                self.root.after(0, lambda: self._set_status("正在深度学习(2/2)：AI增强分析..."))
+                deep_result = plugin.deep_analyze(analyze_result)
+
+                if not deep_result.get("success"):
+                    # 深度学习失败时仍使用基础解析结果，不丢弃
+                    self.root.after(0, lambda: self._on_style_unified_complete(analyze_result, None))
+                    return
+
+                # 将深度学习结果合并回 _style_profile
+                self._style_profile['_deep_learned'] = deep_result
+
+                # === 第三步：合并展示最优结果 ===
+                self.root.after(0, lambda a=analyze_result, d=deep_result: self._on_style_unified_complete(a, d))
+
+            except Exception as e:
+                error_msg = str(e)
+                self.root.after(0, lambda m=error_msg: messagebox.showerror("深度学习失败", m))
+
+        from core.thread_pool_manager import thread_pool_manager
+        thread_pool_manager.submit_sync(run_unified_deep_learn)
+    
+    def _on_style_unified_complete(self, analyze_result, deep_result):
+        """【V1.48.7】合并展示回调 - 一次性输出最完善的风格档案
+
+        合并 analyze(8维度结构化数据) + deep_analyze(AI增强结果) 的最优内容：
+        - UI显示：8维度基础数据 + 写作技巧 + 规则 + expert_prompt
+        - _style_profile：包含完整数据，供生成器和评分器使用
+        """
+        try:
+            info = []
+            info.append("=" * 50)
+            info.append("  风格深度学习完成")
+            info.append("=" * 50)
+            info.append(f"作者: {analyze_result.get('author_name', '未知')}")
+            info.append(f"类型: {analyze_result.get('genre', '未知')}")
+            info.append(f"样本: {analyze_result.get('sample_size_chars', 0)} 字符")
+            
+            learn_time = deep_result.get('learned_time', '') if deep_result else analyze_result.get('created_date', '')
+            info.append(f"分析时间: {learn_time}")
+            info.append("")
+
+            # ========== 第一部分：8维度基础解析结果 ==========
+            info.append("--- 基础解析 (8维度) ---")
+
+            # 1. 词汇特征
+            vocab = analyze_result.get('vocabulary_depth', {})
+            if vocab:
+                info.append("")
+                info.append("【词汇特征】")
+                high_freq = vocab.get('high_frequency_words', [])[:10]
+                if high_freq:
+                    info.append(f"高频词: {', '.join([w for w, c in high_freq])}")
+                proper = vocab.get('proper_nouns', [])
+                if proper:
+                    info.append(f"专有名词: {', '.join(proper[:10])}")
+                emotion_w = vocab.get('emotion_words', {})
+                if emotion_w:
+                    info.append(f"情感词: {json.dumps(emotion_w, ensure_ascii=False)}")
+                sensory = vocab.get('sensory_words', {})
+                if sensory:
+                    for stype, swords in sensory.items():
+                        info.append(f"{stype}描写: {', '.join(swords)}")
+
+            # 2. 句式模式
+            sentence = analyze_result.get('sentence_patterns', {})
+            if sentence:
+                info.append("")
+                info.append("【句式模式】")
+                info.append(f"短句占比: {sentence.get('short_sentences_ratio', 0)*100:.1f}% | 长句: {sentence.get('long_sentences_ratio', 0)*100:.1f}%")
+                info.append(f"句子节奏: {sentence.get('sentence_rhythm', '未知')}")
+
+            # 3. 修辞手法
+            rhetoric = analyze_result.get('rhetorical_devices', {})
+            if rhetoric:
+                info.append("")
+                info.append(f"【修辞手法】(密度: {rhetoric.get('rhetorical_density', 0):.2f}/千字)")
+                meta_count = len(rhetoric.get('metaphors', []))
+                pers_count = len(rhetoric.get('personifications', []))
+                hyper_count = len(rhetoric.get('hyperboles', []))
+                para_count = len(rhetoric.get('parallelisms', []))
+                info.append(f"比喻{meta_count} / 拟人{pers_count} / 夸张{hyper_count} / 排比{para_count}")
+
+            # 4-7. 叙事/情感/语言/节奏（精简显示）
+            narrative = analyze_result.get('narrative_style', {})
+            if narrative:
+                info.append(f"\n【叙事风格】视角: {narrative.get('perspective', '-')} | 节奏: {narrative.get('narrative_pace', '-')}")
+
+            emotion = analyze_result.get('emotional_tone', {})
+            if emotion:
+                info.append(f"【情感色彩】倾向: {emotion.get('overall_sentiment', '-')} | 强度: {emotion.get('emotional_intensity', 0):.2f}")
+
+            language = analyze_result.get('language_style', {})
+            if language:
+                info.append(f"【语言风格】语体: {language.get('register', '-')} | 正式度: {language.get('formality', 0):.2f}")
+
+            pacing = analyze_result.get('pacing_style', {})
+            if pacing:
+                info.append(f"【节奏风格】整体: {pacing.get('overall_pace', '-')}")
+
+            # 标签 + 相似作家
+            tags = analyze_result.get('style_tags', [])
+            similar = analyze_result.get('similar_authors', [])
+            chars = analyze_result.get('writing_characteristics', [])
+            if tags or similar or chars:
+                info.append(f"\n【风格标签】{', '.join(tags)}")
+                if similar:
+                    info.append(f"相似作家: {', '.join(similar)}")
+                if chars:
+                    info.append("写作特点:")
+                    for c in chars[:5]:
+                        info.append(f"  - {c}")
+
+            # ========== 第二部分：AI深度增强结果 ==========
+            if deep_result and deep_result.get('success'):
+                info.append("\n" + "=" * 50)
+                info.append("  AI深度增强分析")
+                info.append("=" * 50)
+
+                # 核心写作手法
+                techniques = deep_result.get('writing_techniques', [])
+                if techniques:
+                    info.append("\n【核心写作手法】")
+                    for tech in techniques:
+                        level_icon = "★" if tech.get('level') == 'high' else "☆"
+                        info.append(f"  {level_icon} {tech['name']}: {tech['detail']}")
+
+                # 增强描述
+                enhanced_desc = deep_result.get('enhanced_description', '')
+                if enhanced_desc:
+                    info.append(f"\n{enhanced_desc}")
+
+                # 可操作写作规则
+                writing_rules = deep_result.get('writing_rules', [])
+                if writing_rules:
+                    info.append("\n【可操作规则（生成器直接使用）】")
+                    for i, rule in enumerate(writing_rules, 1):
+                        info.append(f"  {i}. {rule}")
+
+                # 专家级风格prompt（核心输出，给生成器用）
+                expert_prompt = deep_result.get('expert_prompt', '')
+                if expert_prompt:
+                    info.append(f"\n{expert_prompt}")
+
+                info.append("\n✓ 深度学习结果已关联到当前风格档案，可【应用到生成器】")
+            else:
+                info.append("\n（AI增强分析跳过，使用基础解析结果）")
+
+            # 更新UI显示
+            if hasattr(self, '_style_info'):
+                self._style_info.delete("1.0", tk.END)
+                self._style_info.insert("1.0", "\n".join(info))
+
+            # 同步更新风格档案库Treeview（与原analyze_complete逻辑一致）
+            name = f"{analyze_result.get('author_name', '风格')}_{analyze_result.get('created_date', '')[:10]}"
+            existing = self._style_tree.get_children()
+            insert_name = name if name not in [self._style_tree.item(i)['values'][0] for i in existing] else f"{name}_新"
+
+            vocab_data = analyze_result.get('vocabulary_depth', {})
+            sentence_data = analyze_result.get('sentence_patterns', {})
+            rhetoric_data = analyze_result.get('rhetorical_devices', {})
+            emotion_data = analyze_result.get('emotional_tone', {})
+            pacing_data = analyze_result.get('pacing_style', {})
+            narrative_data = analyze_result.get('narrative_style', {})
+
+            self._style_tree.insert("", tk.END, values=(
+                insert_name,
+                "★" * min(5, int(vocab_data.get('high_frequency_words', [(0,)])[0][1] // 5)) if vocab_data else "-",
+                sentence_data.get('sentence_rhythm', '-')[:2] if sentence_data else "-",
+                str(rhetoric_data.get('rhetorical_density', 0))[:3] if rhetoric_data else "-",
+                emotion_data.get('overall_sentiment', '-')[:2] if emotion_data else "-",
+                pacing_data.get('overall_pace', '-')[:2] if pacing_data else "-",
+                narrative_data.get('perspective', '-')[:2] if narrative_data else "-",
+                str(len(chars)) if chars else "-"
+            ))
+
+            self._set_status(f"深度学习完成 - {analyze_result.get('sample_size_chars', 0)}字符, {'含AI增强' if deep_result else '基础解析'}")
+
+        except Exception as e:
+            self._set_status(f"处理学习结果失败: {str(e)}")
     
     def _on_style_create(self):
-        """创建风格模板（弹窗）"""
+        """创建风格模板（弹窗）
+        
+        V1.48.10更新：
+        - 改为八维度（与编辑权重一致）
+        - 增加更详细的风格描述提示
+        """
         dialog = tk.Toplevel(self.root)
         dialog.title("创建风格模板")
-        dialog.geometry("600x500")
-        dialog.configure(bg=GlassTheme.GLASS_BG)
+        dialog.geometry("600x620")
+        # V1.48.12修复：移除手动背景设置，让sv_ttk主题自动处理
         dialog.transient(self.root)
         dialog.grab_set()
         
         # 居中显示
         dialog.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() - 600) // 2
-        y = self.root.winfo_y() + (self.root.winfo_height() - 500) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 620) // 2
         dialog.geometry(f"+{x}+{y}")
         
         # 风格名称
-        name_frame = ttk.Frame(dialog, style="TFrame")
-        name_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
-        ttk.Label(name_frame, text="风格名称：").pack(side=tk.LEFT)
+        name_frame = ttk.Frame(dialog)
+        name_frame.pack(fill=tk.X, padx=20, pady=(15, 8))
+        ttk.Label(name_frame, text="风格名称：", font=(GlassTheme.FONT_FAMILY, GlassTheme.FONT_SIZE_NORMAL)).pack(side=tk.LEFT)
         name_var = tk.StringVar(value="自定义风格")
         ttk.Entry(name_frame, textvariable=name_var, width=30).pack(side=tk.LEFT, padx=10)
         
-        # 七维度评分
-        dimensions_frame = ttk.LabelFrame(dialog, text="七维度风格评分（0-10分）", padding=10)
-        dimensions_frame.pack(fill=tk.X, padx=20, pady=10)
+        # 八维度评分（与【编辑权重】一致）
+        dimensions_frame = ttk.LabelFrame(dialog, text="八维度风格评分（0-10分）", padding=10)
+        dimensions_frame.pack(fill=tk.X, padx=20, pady=8)
         
+        # V1.48.10：八维度定义（与编辑权重完全一致）
         dimensions = [
-            ("词汇丰富度", "vocabulary"),
-            ("句式复杂度", "sentence"),
-            ("修辞使用", "rhetoric"),
-            ("情感强度", "emotion"),
-            ("节奏感", "rhythm"),
-            ("结构完整性", "structure"),
-            ("细节描写", "detail")
+            ("词汇丰富度", "vocabulary", "高频词、词汇多样性"),
+            ("句式复杂度", "sentence", "长短句、句式变化"),
+            ("修辞密度", "rhetoric", "比喻拟人排比等"),
+            ("情感色彩", "emotion", "情感倾向与强度"),
+            ("叙事视角", "narrative", "人称、时态、场景"),
+            ("语言风格", "language", "口语vs书面化"),
+            ("节奏控制", "pacing", "快慢、段落变化"),
+            ("细节描写", "detail", "感官描写丰富度"),
         ]
         
         dim_vars = {}
-        for i, (label, key) in enumerate(dimensions):
-            row = ttk.Frame(dimensions_frame, style="TFrame")
-            row.pack(fill=tk.X, pady=3)
-            ttk.Label(row, text=f"{label}：", width=15, anchor='e').pack(side=tk.LEFT)
+        for label, key, hint in dimensions:
+            row = ttk.Frame(dimensions_frame)
+            row.pack(fill=tk.X, pady=2)
+            
+            # 维度名称 + 提示
+            left_area = ttk.Frame(row)
+            left_area.pack(side=tk.LEFT, fill=tk.Y)
+            ttk.Label(left_area, text=label, width=10, anchor='e').pack(side=tk.LEFT)
+            ttk.Label(left_area, text=f"({hint})",
+                     font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_SMALL),
+                     foreground=GlassTheme.TEXT_SECONDARY).pack(side=tk.LEFT, padx=(2, 8))
+            
             var = tk.DoubleVar(value=5.0)
             dim_vars[key] = var
             scale = ttk.Scale(row, from_=0.0, to=10.0, variable=var, orient=tk.HORIZONTAL, length=200)
-            scale.pack(side=tk.LEFT, padx=10)
-            ttk.Label(row, textvariable=var, width=5).pack(side=tk.LEFT)
+            scale.pack(side=tk.LEFT, padx=3)
+            ttk.Label(row, textvariable=var, width=4).pack(side=tk.LEFT)
         
-        # 风格描述
-        desc_frame = ttk.LabelFrame(dialog, text="风格描述（可选）", padding=10)
-        desc_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        desc_text = tk.Text(desc_frame, wrap=tk.WORD, height=5,
-                           font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_NORMAL),
-                           bg=GlassTheme.GLASS_SURFACE, fg=GlassTheme.TEXT_PRIMARY)
+        # 风格描述（更详细的提示）
+        desc_frame = ttk.LabelFrame(dialog, text="风格描述（可选，建议填写）", padding=10)
+        desc_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=8)
+        
+        # 描述提示文本
+        hint_text = """【建议填写内容】
+• 整体风格：如华丽、简洁、幽默、严肃、热血、治愈等
+• 语言特点：如古风现代混用、大量方言、书面化程度等
+• 叙事手法：如心理描写为主、对话驱动、场景切换快等
+• 适用场景：如都市言情、玄幻修仙、历史穿越等
+• 参考作家：如"类似金庸的武侠风格"、"接近村上春树的叙事节奏"
+
+示例：这是一个典型的都市轻喜剧风格，以大量对话和心理活动推动剧情，
+语言轻松幽默但不失深度，适合现代都市题材创作。"""
+
+        desc_text = tk.Text(desc_frame, wrap=tk.WORD, height=8,
+                           font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_NORMAL))
         desc_text.pack(fill=tk.BOTH, expand=True)
-        desc_text.insert("1.0", "描述这种风格的特点，如：华丽、简洁、幽默、严肃等...")
+        desc_text.insert("1.0", hint_text)
         
         # 按钮
-        btn_frame = ttk.Frame(dialog, style="TFrame")
+        btn_frame = ttk.Frame(dialog)
         btn_frame.pack(fill=tk.X, padx=20, pady=20)
         
         def create_style():
@@ -8549,35 +10402,86 @@ data/知识库验证器/backups/
                 messagebox.showwarning("警告", "请输入风格名称！")
                 return
             
-            # 获取评分
-            scores = {key: var.get() for key, var in dim_vars.items()}
+            # 获取八维度评分
+            scores = {key: round(var.get(), 1) for key, var in dim_vars.items()}
+            description = desc_text.get("1.0", tk.END).strip()
             
-            # 添加到风格档案库
+            # V1.48.10：生成风格标签（更新为八维度）
+            tags = []
+            if scores.get('vocabulary', 0) > 7:
+                tags.append("词汇丰富")
+            if scores.get('sentence', 0) > 7:
+                tags.append("句式多变")
+            if scores.get('rhetoric', 0) > 7:
+                tags.append("修辞优美")
+            if scores.get('emotion', 0) > 7:
+                tags.append("情感充沛")
+            if scores.get('narrative', 0) > 7:
+                tags.append("叙事精彩")
+            if scores.get('language', 0) > 7:
+                tags.append("语言独特")
+            if scores.get('pacing', 0) > 7:
+                tags.append("节奏明快")
+            if scores.get('detail', 0) > 7:
+                tags.append("细节生动")
+            if not tags:
+                tags.append("风格平实")
+            
+            # 构建持久化的风格模板数据
+            template_data = {
+                "id": f"style_{__import__('time').strftime('%Y%m%d%H%M%S')}",
+                "name": name,
+                "description": description,
+                "dimensions": scores,
+                "style_tags": tags,
+                "created_date": __import__('time').strftime("%Y-%m-%d %H:%M:%S"),
+                "is_template": True,
+            }
+            
+            # 持久化到实例变量（用于保存项目时同步）
+            if not hasattr(self, '_style_templates'):
+                self._style_templates = []
+            self._style_templates.append(template_data)
+            
+            # 同步更新 _style_profile 以便应用到生成器
+            self._style_profile = {
+                "author_name": name,
+                "genre": description[:20] if description else "自定义",
+                "style_tags": tags,
+                "writing_characteristics": [f"{name}风格：{description[:50]}"] if description else [f"自定义风格模板"],
+                **template_data
+            }
+            
+            # V1.48.10：添加到风格档案库Treeview（八维度：vocabulary, sentence, rhetoric, emotion, narrative, language, pacing）
             self._style_tree.insert("", tk.END, values=(
                 name,
                 f"{scores['vocabulary']:.1f}",
                 f"{scores['sentence']:.1f}",
                 f"{scores['rhetoric']:.1f}",
                 f"{scores['emotion']:.1f}",
-                f"{scores['rhythm']:.1f}",
-                f"{scores['structure']:.1f}",
-                f"{scores['detail']:.1f}"
+                f"{scores['narrative']:.1f}",
+                f"{scores['language']:.1f}",
+                f"{scores['pacing']:.1f}"
             ))
             
-            # 更新分析器显示
+            # 更新分析器显示（八维度）
             self._style_info.delete("1.0", tk.END)
-            self._style_info.insert("1.0", f"""【{name}】风格模板
-
-词汇：{"█" * int(scores['vocabulary'])}{"░" * (10 - int(scores['vocabulary']))} {scores['vocabulary']:.1f}
-句式：{"█" * int(scores['sentence'])}{"░" * (10 - int(scores['sentence']))} {scores['sentence']:.1f}
-修辞：{"█" * int(scores['rhetoric'])}{"░" * (10 - int(scores['rhetoric']))} {scores['rhetoric']:.1f}
-情感：{"█" * int(scores['emotion'])}{"░" * (10 - int(scores['emotion']))} {scores['emotion']:.1f}
-节奏：{"█" * int(scores['rhythm'])}{"░" * (10 - int(scores['rhythm']))} {scores['rhythm']:.1f}
-结构：{"█" * int(scores['structure'])}{"░" * (10 - int(scores['structure']))} {scores['structure']:.1f}
-细节：{"█" * int(scores['detail'])}{"░" * (10 - int(scores['detail']))} {scores['detail']:.1f}
-
-描述：{desc_text.get("1.0", tk.END).strip()}
-""")
+            display_lines = [
+                f"【{name}】风格模板",
+                "",
+                f"词汇丰富度：{'█' * int(scores['vocabulary'])}{'░' * (10 - int(scores['vocabulary']))} {scores['vocabulary']:.1f}",
+                f"句式复杂度：{'█' * int(scores['sentence'])}{'░' * (10 - int(scores['sentence']))} {scores['sentence']:.1f}",
+                f"修辞密度：{'█' * int(scores['rhetoric'])}{'░' * (10 - int(scores['rhetoric']))} {scores['rhetoric']:.1f}",
+                f"情感色彩：{'█' * int(scores['emotion'])}{'░' * (10 - int(scores['emotion']))} {scores['emotion']:.1f}",
+                f"叙事视角：{'█' * int(scores['narrative'])}{'░' * (10 - int(scores['narrative']))} {scores['narrative']:.1f}",
+                f"语言风格：{'█' * int(scores['language'])}{'░' * (10 - int(scores['language']))} {scores['language']:.1f}",
+                f"节奏控制：{'█' * int(scores['pacing'])}{'░' * (10 - int(scores['pacing']))} {scores['pacing']:.1f}",
+                f"细节描写：{'█' * int(scores['detail'])}{'░' * (10 - int(scores['detail']))} {scores['detail']:.1f}",
+                "",
+                f"标签：{', '.join(tags)}",
+                f"描述：{description}",
+            ]
+            self._style_info.insert("1.0", "\n".join(display_lines))
             
             self._set_status(f"已创建风格模板：{name}")
             dialog.destroy()
@@ -8586,13 +10490,69 @@ data/知识库验证器/backups/
         ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
     
     def _on_style_apply(self):
-        """应用到生成器"""
-        self._set_status("应用到生成器功能开发中...")
+        """应用到生成器 - 将风格档案关联到生成流水线"""
+        profile = getattr(self, '_style_profile', None)
+        
+        if not profile or not isinstance(profile, dict):
+            messagebox.showwarning("提示", "没有可应用的风格数据\n请先：1.上传范文  2.解析风格")
+            return
+        
+        # 构建可用的风格提示词
+        tags = profile.get('style_tags', [])
+        chars = profile.get('writing_characteristics', [])
+        prompts = profile.get('prompt_suggestions', [])
+        language = profile.get('language_style', {})
+        emotion = profile.get('emotional_tone', {})
+        
+        # 组装为生成器可用的格式
+        style_for_generator = {
+            "style_tags": tags,
+            "writing_characteristics": chars,
+            "prompt_suggestions": prompts,
+            "register": language.get('register', '通用'),
+            "sentiment": emotion.get('overall_sentiment', '中性'),
+            "author_name": profile.get('author_name', ''),
+            "genre": profile.get('genre', ''),
+            "applied_at": __import__('time').strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        
+        # 确认信息
+        msg = f"风格已应用到生成器：\n\n"
+        msg += f"作者: {profile.get('author_name', '-')}\n"
+        msg += f"类型: {profile.get('genre', '-')}\n"
+        msg += f"标签: {', '.join(tags) if tags else '-'}\n"
+        msg += f"语体: {language.get('register', '-')}\n"
+        msg += f"情感倾向: {emotion.get('overall_sentiment', '-')}\n"
+        msg += f"\n生成章节时将自动使用此风格设定"
+        
+        messagebox.showinfo("已应用", msg)
+        self._set_status(f"已将【{profile.get('author_name', '风格')}】风格应用到生成器")
     
     def _on_style_clear(self):
-        """清除风格"""
-        self._style_path_var.set("未导入")
-        self._style_info.delete("1.0", tk.END)
+        """清除风格 - 完整清除所有风格相关数据"""
+        if messagebox.askyesno("确认清除", "确定要清除所有风格数据吗？\n包括：范文文件、分析结果、档案库记录"):
+            # 清除完整路径
+            if hasattr(self, '_style_file_path'):
+                delattr(self, '_style_file_path')
+            
+            # 清除标签显示
+            self._style_path_var.set("未导入")
+            
+            # 清除右侧文本区域
+            self._style_info.delete("1.0", tk.END)
+            self._style_info.insert("1.0", "（暂无数据）\n请上传范文并解析风格")
+            
+            # 清除左侧档案库Treeview
+            self._style_tree.delete(*self._style_tree.get_children())
+            
+            # 清除内部数据
+            self._style_profile = {}
+            if hasattr(self, '_active_style_name'):
+                delattr(self, '_active_style_name')
+            if hasattr(self, '_style_config'):
+                delattr(self, '_style_config')
+            
+            self._set_status("已清除所有风格数据")
     
     def _on_start_generation(self):
         """开始生成 - 调用小说生成流水线（异步版本，解决卡顿问题）
@@ -8601,8 +10561,23 @@ data/知识库验证器/backups/
         - 使用GUIAsyncHelper实现真正的异步调用
         - UI线程不再阻塞，解决Windows弹窗问题
         - 支持实时进度反馈和取消操作
+        
+        V1.46.0版本更新（2026-04-05）：
+        - P0修复：专家模式独立调用路径
+        - 专家配置参数正确传递到插件
         """
         try:
+            # === P0修复：检查专家模式 ===
+            if self._is_expert_mode_enabled():
+                self._start_expert_generation()
+                return
+            
+            # === 以下是默认模式（原有逻辑）===
+            
+            # V2.0合规修复（P0-1）：不再在GUI层硬编码业务参数
+            # max_iterations/quality_threshold 由 NovelGenerationConfig 提供默认值（5/0.8）
+            # expert_config 在默认模式下无意义，不传递
+            
             # 导入生成服务
             from agents.novel_generation_service import get_generation_service
             from core.gui_async_helper import create_async_helper
@@ -8613,24 +10588,24 @@ data/知识库验证器/backups/
             target_words = int(self._target_words_var.get())
             temperature = self._gen_temp_var.get()
             
-            # 获取大纲内容（从大纲管理页面获取或使用默认值）
-            outline_content = self._get_outline_content()
-            chapter_outline = self._get_chapter_outline(chapter_number)
-            
-            # 获取风格档案（从风格学习页面获取）
-            style_profile = self._get_style_profile()
-            
-            # 获取人物设定
-            characters = self._get_characters()
-            
-            # 获取世界观设定
-            worldview = self._get_worldview()
-            
-            # 获取选中的知识库分类
+            # V3.0合规修订：业务数据由服务层加工，GUI只传原始数据引用
+            from agents.novel_generation_service import GenerationDataService
+            raw_data = self._collect_raw_data(chapter_number)
             selected_kb = self.get_selected_knowledge_bases()
-            
-            # 获取选中的写作技巧
             selected_techniques = self.get_selected_writing_techniques()
+            data_service = GenerationDataService()
+            ctx = data_service.build_generation_context(
+                chapter_number=chapter_number,
+                target_words=target_words,
+                raw_data=raw_data,
+                selected_knowledge_bases=selected_kb,
+                selected_writing_techniques=selected_techniques,
+            )
+            outline_content = ctx.get('outline_content', '')
+            chapter_outline = ctx.get('chapter_outline', '')
+            style_profile = ctx.get('style_profile', {})
+            characters = ctx.get('characters', {})
+            worldview = ctx.get('worldview', {})
             
             # 更新UI状态
             self._gen_status_var.set(f"正在生成第{chapter_number}章...")
@@ -8678,6 +10653,7 @@ data/知识库验证器/backups/
                 )
             
             # 提交异步生成任务（使用统一线程池）
+            # V2.0合规修复（P0-1）：不传业务参数，由服务层使用默认值
             task_id = service.submit_async_generation(
                 chapter_title=f"第{chapter_number}章",
                 chapter_number=chapter_number,
@@ -8687,8 +10663,7 @@ data/知识库验证器/backups/
                 style_profile=style_profile,
                 characters=characters,
                 worldview=worldview,
-                previous_chapter_text="",  # TODO: 从历史章节获取
-                max_iterations=5,
+                previous_chapter_text=ctx.get('previous_chapter_text', ''),
                 on_progress=on_progress,
                 on_complete=on_complete,
                 on_error=on_error,
@@ -8720,6 +10695,343 @@ data/知识库验证器/backups/
         messagebox.showerror(title, full_message)
         self._gen_status_var.set("生成失败")
         self._set_status(f"生成失败: {str(error)}")
+    
+    def _start_expert_generation(self):
+        """
+        启动专家模式生成（V1.46.0新增 - P0修复）
+        
+        设计原则（V1.49.0修订）：
+        - GUI只负责显示和调用
+        - 专家插件加载逻辑在ExpertSelector中
+        - 请求构建逻辑在ExpertPlugin中
+        """
+        try:
+            from tkinter import messagebox
+            from core.gui_async_helper import create_async_helper
+            
+            # 获取专家ID
+            expert_id = self._expert_selector.get_selected_expert()
+            if not expert_id:
+                messagebox.showerror("错误", "未选择专家，使用默认模式")
+                return
+            
+            # === 核心：通过ExpertSelector加载专家插件 ===
+            expert_plugin = self._expert_selector.load_expert_plugin(expert_id)
+            
+            if not expert_plugin:
+                messagebox.showerror("错误", f"专家插件 {expert_id} 加载失败，使用默认模式")
+                return
+            
+            # 获取生成配置
+            chapter_number = int(self._start_chapter_var.get())
+            target_words = int(self._target_words_var.get())
+            
+            # 更新UI状态
+            self._gen_status_var.set(f"专家模式生成中...")
+            self._gen_progress['value'] = 0
+            self._gen_log.delete("1.0", tk.END)
+            self._gen_log.insert(tk.END, f"开始专家模式生成第{chapter_number}章...\n")
+            self._gen_log.insert(tk.END, f"目标字数: {target_words}\n")
+            
+            # 获取专家配置
+            expert_config = self._get_expert_config()
+            self._gen_log.insert(tk.END, f"质量阈值: {expert_config.get('quality_threshold', 0.75)}\n")
+            self._gen_log.insert(tk.END, f"最大迭代: {expert_config.get('max_iterations', 5)}\n")
+            self._gen_log.insert(tk.END, "-" * 40 + "\n")
+            
+            # === 核心：构建请求并调用插件 ===
+            request = self._build_generation_request(chapter_number, target_words, expert_config)
+            
+            # 创建异步辅助器
+            if not hasattr(self, '_async_helper'):
+                self._async_helper = create_async_helper(self.root)
+            
+            # 提交异步任务
+            from core.thread_pool_manager import thread_pool_manager
+            
+            def expert_generate_task():
+                try:
+                    result = expert_plugin.generate(request)
+                    self._async_helper.call_on_main_thread(
+                        lambda: self._on_expert_generation_complete(result)
+                    )
+                except Exception as e:
+                    self._async_helper.call_on_main_thread(
+                        lambda: self._on_generation_error(e)
+                    )
+            
+            # V1.49.19修复：使用submit_sync替代submit
+            thread_pool_manager.submit_sync(expert_generate_task)
+            self._set_status(f"专家模式正在生成第{chapter_number}章...")
+            
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("错误", f"专家模式启动失败: {e}")
+            self._gen_status_var.set("生成失败")
+    
+    def _build_generation_request(self, chapter_number: int, target_words: int, expert_config: dict = None):
+        """
+        构建生成请求（V3.0合规修订 - 数据加工下沉到服务层）
+        
+        V3.0修订：GUI只收集原始数据引用 + 用户选择项，
+        业务逻辑（格式化、降级、前文回退）由GenerationDataService处理。
+        解决技术债务P0-V3（7个数据获取）+ P1-V1（前文获取）。
+        """
+        from agents.novel_generation_service import GenerationDataService
+        from core.models import GenerationRequest
+        import uuid
+        
+        # 收集原始数据引用（GUI只做收集，不做加工）
+        raw_data = self._collect_raw_data(chapter_number)
+        
+        # 由服务层完成所有数据加工逻辑
+        data_service = GenerationDataService()
+        ctx = data_service.build_generation_context(
+            chapter_number=chapter_number,
+            target_words=target_words,
+            raw_data=raw_data,
+            selected_knowledge_bases=self.get_selected_knowledge_bases(),
+            selected_writing_techniques=self.get_selected_writing_techniques(),
+            expert_config=expert_config,
+        )
+        
+        # 构建请求对象（包含用户意图 + 服务层加工后的业务数据）
+        request = GenerationRequest(
+            request_id=str(uuid.uuid4()),
+            title=f"第{chapter_number}章",
+            outline=ctx.get('outline_content', ''),
+            word_count=target_words,
+            max_iterations=expert_config.get('max_iterations', 5) if expert_config else 5,
+            style_profile=ctx.get('style_profile'),
+            character_profiles=ctx.get('characters'),
+            worldview_config=ctx.get('worldview'),
+        )
+        
+        # V8.0修复：传递章节号供专家模式在event中回传显示
+        request.chapter_number = chapter_number
+        # V8.0修复：确保专家模式能获取目标字数用于评分
+        request.word_count_target = target_words
+        
+        # 附加服务层加工的扩展数据
+        request.expert_config = expert_config
+        request.chapter_outline = ctx.get('chapter_outline', '')
+        request.knowledge_categories = ctx.get('knowledge_categories', [])
+        request.writing_techniques = ctx.get('writing_techniques', [])
+        request.previous_chapter_text = ctx.get('previous_chapter_text', '')
+        
+        return request
+    
+    def _on_expert_generation_complete(self, result):
+        """
+        专家模式生成完成回调（V2.0合规修订）
+        
+        V2.0修订：expert-novel-v1返回GenerationResult而非裸dict，
+        GUI只做通用显示，不做格式适配。
+        同时兼容降级模式（ImportError时返回裸dict）。
+        """
+        try:
+            self._gen_status_var.set("生成完成")
+            self._gen_progress['value'] = 100
+            self._gen_log.insert(tk.END, "\n" + "=" * 40 + "\n")
+            self._gen_log.insert(tk.END, "专家模式生成完成！\n")
+            
+            # 提取内容
+            content = ""
+            scores = {}
+            optimization = []
+            expert_evaluation = None
+            
+            # V2.0合规修订：优先处理GenerationResult格式
+            if hasattr(result, 'content') and hasattr(result, 'validation_scores'):
+                # GenerationResult格式（V2.0标准路径）
+                content = result.content
+                
+                # 从validation_scores获取评分（标准路径）
+                # 提取为 {维度名: 分数值} 的扁平格式，供显示使用
+                vs = getattr(result, 'validation_scores', None)
+                if vs:
+                    scores = {}
+                    # V3.0修订：从quality-validator-v1获取维度映射，避免硬编码
+                    # V2.1修复：插件目录为连字符，旧下划线导入永远失败，改用importlib
+                    try:
+                        import importlib as _il
+                        dim_map_display = _il.import_module(
+                            "plugins.quality-validator-v1.plugin"
+                        ).QualityValidatorPlugin.get_dimension_display_map()
+                    except Exception:
+                        dim_map_display = {
+                            'worldview': '世界观', 'character': '人设', 'outline': '大纲',
+                            'style': '风格', 'knowledge': '知识库', 'writing_technique': '写作技巧',
+                            'word_count': '字数', 'context_coherence': '上下文衔接', 'ai_feeling': 'AI感',
+                        }
+                    # V3.0修订：属性映射从插件层获取，GUI不硬编码
+                    try:
+                        dim_attr_map = QualityValidatorPlugin.get_dimension_attr_map()
+                    except (ImportError, AttributeError):
+                        dim_attr_map = {
+                            'worldview_score': 'worldview', 'character_score': 'character',
+                            'outline_score': 'outline', 'style_score': 'style',
+                            'knowledge_reference_score': 'knowledge',
+                            'writing_technique_score': 'writing_technique',
+                            'word_count_score': 'word_count',
+                            'context_coherence_score': 'context_coherence',
+                            'ai_feeling_score': 'ai_feeling',
+                        }
+                    for attr, dim_name in dim_attr_map.items():
+                        val = getattr(vs, attr, None)
+                        if val is not None:
+                            scores[dim_name] = val
+                    # V3.0修订：从插件层获取已计算的总分，GUI不重复计算
+                    plugin_total_score = getattr(vs, 'total_score', 0)
+                else:
+                    scores = {}
+                    plugin_total_score = 0
+                    dim_map_display = {}
+                
+                # 从metadata获取扩展信息（优化建议等）
+                metadata = getattr(result, 'metadata', {}) or {}
+                if isinstance(metadata, dict):
+                    optimization_raw = metadata.get("optimization_suggestions", None)
+                else:
+                    optimization_raw = None
+                
+                # 处理优化建议
+                optimization = self._parse_optimization_suggestions(optimization_raw)
+                
+            elif isinstance(result, dict):
+                # 降级兼容：裸dict格式（GenerationResult导入失败时）
+                content = result.get("content", "")
+                scores = result.get("scores", {})
+                optimization_raw = result.get("optimization_suggestions", None)
+                optimization = self._parse_optimization_suggestions(optimization_raw)
+                # 降级路径：从dict中获取已计算的总分
+                plugin_total_score = result.get("total_score", 0)
+                # V2.1修复：插件目录为连字符，旧下划线导入永远失败，改用importlib
+                try:
+                    import importlib as _il
+                    dim_map_display = _il.import_module(
+                        "plugins.quality-validator-v1.plugin"
+                    ).QualityValidatorPlugin.get_dimension_display_map()
+                except Exception:
+                    dim_map_display = {
+                        'worldview': '世界观', 'character': '人设', 'outline': '大纲',
+                        'style': '风格', 'knowledge': '知识库', 'writing_technique': '写作技巧',
+                        'word_count': '字数', 'context_coherence': '上下文衔接', 'ai_feeling': 'AI感',
+                    }
+            
+            elif hasattr(result, 'content'):
+                # GenerationResult但无metadata字段（兼容旧版）
+                content = result.content
+                scores = {}
+                plugin_total_score = 0
+                dim_map_display = {}
+            
+            # 构建ExpertEvaluation对象用于显示评估对话框
+            if scores:
+                try:
+                    from gui.expert_evaluation import ExpertEvaluation, OptimizationSuggestion
+                    
+                    # V3.0修订：优先使用插件层已计算的total_score，降级用简单平均
+                    total_score = plugin_total_score if plugin_total_score > 0 else (sum(scores.values()) / len(scores) if scores else 0)
+                    expert_evaluation = ExpertEvaluation(
+                        total_score=total_score,
+                        dimension_scores=scores,
+                        issues=optimization if isinstance(optimization, list) else [],
+                        strengths=[]
+                    )
+                except ImportError:
+                    expert_evaluation = None
+            
+            # 显示评分结果
+            if scores:
+                self._gen_log.insert(tk.END, "\n=== 九维度评分 ===\n")
+                for dim, score in scores.items():
+                    # V3.0修订：使用插件层维度映射显示中文维度名
+                    label = dim_map_display.get(dim, dim) if dim_map_display else dim
+                    self._gen_log.insert(tk.END, f"  {label}: {score:.2f}\n")
+                # V3.0修订：使用插件层已计算的total_score
+                display_total = plugin_total_score if plugin_total_score > 0 else (sum(scores.values()) / len(scores) if scores else 0)
+                self._gen_log.insert(tk.END, f"总分: {display_total:.2f}\n")
+            
+            # 显示优化建议
+            if optimization:
+                self._gen_log.insert(tk.END, "\n=== 优化建议 ===\n")
+                if isinstance(optimization, list):
+                    for i, suggestion in enumerate(optimization[:5], 1):
+                        self._gen_log.insert(tk.END, f"{i}. {suggestion}\n")
+                else:
+                    self._gen_log.insert(tk.END, str(optimization))
+            
+            # 显示生成内容（V7.0修复：确保预览区总是有内容）
+            if content:
+                self._gen_result.delete("1.0", tk.END)
+                self._gen_result.insert("1.0", content)
+                word_count = len(content)
+                self._gen_log.insert(tk.END, f"\n实际字数: {word_count}\n")
+            
+            # 显示专家评估对话框
+            if expert_evaluation:
+                try:
+                    from gui.expert_evaluation import ExpertEvaluationDialog, OptimizationSuggestion
+                    
+                    optimization_suggestion = OptimizationSuggestion(
+                        overall_suggestion=optimization[0] if isinstance(optimization, list) and optimization else "暂无优化建议",
+                        dimension_suggestions={dim: f"当前得分{score:.2f}" for dim, score in scores.items()},
+                        examples=[]
+                    )
+                    
+                    dialog = ExpertEvaluationDialog(
+                        self.root,
+                        expert_evaluation,
+                        optimization_suggestion,
+                        on_regenerate=self._on_expert_regenerate
+                    )
+                    
+                except Exception as e:
+                    logging.warning(f"显示评估对话框失败: {e}")
+            
+            self._gen_log.see(tk.END)
+            self._set_status("专家模式生成完成")
+            
+        except Exception as e:
+            self._gen_status_var.set("处理结果出错")
+            self._gen_log.insert(tk.END, f"\n处理生成结果时出错: {str(e)}\n")
+    
+    def _parse_optimization_suggestions(self, optimization_raw) -> list:
+        """
+        解析优化建议（统一格式处理）
+        
+        V2.0合规修订：优化建议的格式解析统一在此方法中处理，
+        支持 dict/list/str 三种格式。
+        
+        Args:
+            optimization_raw: 原始优化建议数据
+            
+        Returns:
+            list: 统一为列表格式的优化建议
+        """
+        optimization = []
+        if isinstance(optimization_raw, dict):
+            overall = optimization_raw.get("overall_suggestion", "")
+            if overall:
+                optimization.append(overall)
+            dim_suggestions = optimization_raw.get("dimension_suggestions", {})
+            for dim, suggestion in dim_suggestions.items():
+                optimization.append(f"[{dim}] {suggestion}")
+        elif isinstance(optimization_raw, list):
+            optimization = optimization_raw
+        elif isinstance(optimization_raw, str) and optimization_raw:
+            optimization = [optimization_raw]
+        return optimization
+    
+    def _on_expert_regenerate(self):
+        """
+        专家模式重新生成回调（V1.46.0新增）
+        
+        用户在评估对话框中点击"重新生成"时调用
+        """
+        self._gen_log.insert(tk.END, "\n用户请求重新生成...\n")
+        self._on_start_generation()
     
     def _on_stop_generation(self):
         """停止生成"""
@@ -8763,6 +11075,42 @@ data/知识库验证器/backups/
                     # 更新字数统计
                     word_count = len(content)
                     self._gen_log.insert(tk.END, f"实际字数: {word_count}\n")
+                    
+                    # V3.0修订：显示九维度评分详情（从插件层获取已计算的评分，GUI不硬编码权重）
+                    stats = result.final_output.get("stats", {})
+                    dim_scores = stats.get("dimension_scores", {}) if isinstance(stats, dict) else {}
+                    if dim_scores:
+                        self._gen_log.insert(tk.END, "\n--- 九维度评分详情 ---\n")
+                        # 维度显示名映射（从quality-validator-v1获取或使用默认值）
+                        # V2.1修复：插件目录为连字符，旧下划线导入永远失败→一直用硬编码回退
+                        # （违反ADR-011维度映射唯一真值来源）。改用importlib。
+                        try:
+                            import importlib
+                            _qv_mod = importlib.import_module("plugins.quality-validator-v1.plugin")
+                            dim_display = _qv_mod.QualityValidatorPlugin.get_dimension_display_map()
+                        except Exception:
+                            dim_display = {
+                                'worldview': '世界观', 'character': '人设', 'outline': '大纲',
+                                'style': '风格', 'knowledge': '知识库', 'writing_technique': '写作技巧',
+                                'word_count': '字数', 'context_coherence': '上下文衔接', 'ai_feeling': 'AI感',
+                            }
+                        for dim_key, score_val in dim_scores.items():
+                            label = dim_display.get(dim_key, dim_key)
+                            if hasattr(score_val, 'score'):
+                                score_val = score_val.score
+                            self._gen_log.insert(tk.END, f"  {label}: {score_val:.2f}\n")
+                        # 加权总分从插件层读取，GUI不计算
+                        weighted_total = stats.get("weighted_total_score", 0.0)
+                        passed = stats.get("passed", weighted_total >= 0.8)
+                        self._gen_log.insert(tk.END, f"  加权总分: {weighted_total:.2f}\n")
+                        if passed:
+                            self._gen_log.insert(tk.END, "  ✅ 达标（≥0.8且含【本章完】）\n")
+                        else:
+                            self._gen_log.insert(tk.END, "  ⚠️ 未达标（<0.8或缺少【本章完】）\n")
+                    else:
+                        final_score = stats.get("final_score", 0.0) if isinstance(stats, dict) else 0.0
+                        if final_score > 0:
+                            self._gen_log.insert(tk.END, f"综合评分: {final_score:.2f}\n")
                 
                 self._set_status(f"第{result.stages[0].iteration if result.stages else 1}章生成完成")
             else:
@@ -8776,30 +11124,45 @@ data/知识库验证器/backups/
             self._gen_status_var.set("处理结果出错")
             self._gen_log.insert(tk.END, f"\n处理生成结果时出错: {str(e)}\n")
     
-    def _get_outline_content(self) -> str:
-        """获取大纲内容"""
-        # TODO: 从大纲管理页面或文件获取
-        return getattr(self, '_outline_content', "")
+    def _collect_raw_data(self, chapter_number: int) -> dict:
+        """收集原始数据引用（供GenerationDataService使用）
+        
+        V3.0合规修订：GUI只负责收集自身持有的原始数据引用，
+        不执行任何格式化、降级、回退等业务逻辑。
+        所有业务逻辑由GenerationDataService处理。
+        """
+        raw_data = {
+            # 大纲数据（原始引用）
+            'outline_chapters_data': getattr(self, '_outline_chapters_data', []),
+            'outline_content': getattr(self, '_outline_content', ''),
+            'chapter_outlines': getattr(self, '_chapter_outlines', {}),
+            # 风格数据（原始引用）
+            'style_profile': getattr(self, '_style_profile', None),
+            # 人物数据（原始引用）
+            'character_data': getattr(self, '_character_data', []),
+            # 世界观数据（原始引用）
+            'worldview': getattr(self, '_worldview', {}),
+            # 前文数据源（原始引用）
+            'reverse_chapters': getattr(self, '_reverse_chapters', None),
+            'generated_content': getattr(self, '_generated_content', None),
+        }
+        
+        # 项目管理器数据（前文回退策略3需要）
+        if hasattr(self, '_project_manager') and self._project_manager:
+            try:
+                raw_data['project_data'] = self._project_manager.get_project_data() or {}
+            except Exception:
+                raw_data['project_data'] = {}
+        
+        return raw_data
     
-    def _get_chapter_outline(self, chapter_number: int) -> str:
-        """获取指定章节的大纲"""
-        # TODO: 从大纲管理页面获取
-        return getattr(self, '_chapter_outlines', {}).get(chapter_number, "")
-    
-    def _get_style_profile(self) -> dict:
-        """获取风格档案"""
-        # TODO: 从风格学习页面获取
-        return getattr(self, '_style_profile', {})
-    
-    def _get_characters(self) -> list:
-        """获取人物设定"""
-        # TODO: 从人物设定页面获取
-        return getattr(self, '_characters', [])
-    
-    def _get_worldview(self) -> dict:
-        """获取世界观设定"""
-        # TODO: 从世界观页面获取
-        return getattr(self, '_worldview', {})
+    # V3.0合规修订：以下6个业务逻辑方法已迁移到GenerationDataService
+    # _get_outline_content → GenerationDataService._format_outline()
+    # _get_chapter_outline → GenerationDataService._format_chapter_outline()
+    # _get_previous_chapters_text → GenerationDataService._get_previous_chapters()
+    # _get_style_profile → GenerationDataService._format_style_profile()
+    # _get_characters → GenerationDataService._format_characters()
+    # _get_worldview → GenerationDataService直接传递raw_data['worldview']
     
     def _get_llm_client(self):
         """获取LLM客户端"""
@@ -8880,6 +11243,10 @@ data/知识库验证器/backups/
         # 同步各模块数据到项目管理器
         if hasattr(self, '_outline_content') and self._outline_content:
             self._project_manager.sync_module_data('outline', self._outline_content)
+        
+        # 【修复】同步大纲章节数据（解析后的结构化数据）
+        if hasattr(self, '_outline_chapters_data') and self._outline_chapters_data:
+            self._project_manager.sync_module_data('outline_chapters', self._outline_chapters_data)
 
         # 人物数据：优先使用_character_entries（批量解析后的结构化列表），降级到_character_data
         if hasattr(self, '_character_entries') and self._character_entries:
@@ -8913,6 +11280,10 @@ data/知识库验证器/backups/
         # 大纲
         if hasattr(self, '_outline_content') and self._outline_content:
             self.current_project['outline'] = self._outline_content
+        
+        # 【修复】大纲章节数据（解析后的结构化数据）
+        if hasattr(self, '_outline_chapters_data') and self._outline_chapters_data:
+            self.current_project['outline_chapters'] = self._outline_chapters_data
         
         # 人物：优先使用_character_entries（批量解析后的数据），降级到_character_data
         if hasattr(self, '_character_entries') and self._character_entries:
@@ -9257,9 +11628,10 @@ data/知识库验证器/backups/
                 self.root.after(0, lambda: self._update_analysis_result())
                 
             except Exception as e:
+                error_msg = str(e)  # V1.49.47修复：lambda闭包捕获变量问题
                 logger.error(f"分析失败: {e}")
-                self.root.after(0, lambda: self._analysis_progress_label.configure(
-                    text=f"分析失败: {str(e)}"))
+                self.root.after(0, lambda msg=error_msg: self._analysis_progress_label.configure(
+                    text=f"分析失败: {msg}"))
             finally:
                 self.root.after(0, lambda: self._run_analysis_btn.configure(state=tk.NORMAL))
         
@@ -9296,6 +11668,7 @@ data/知识库验证器/backups/
                 config_manager=self._config_manager if hasattr(self, '_config_manager') else None,
                 event_bus=None,
                 service_locator=None,
+                plugin_registry=None,  # V1.49.46修复：添加缺失的plugin_registry参数
             )
             self._reverse_feedback_plugin.initialize(context)
             
@@ -9330,6 +11703,7 @@ data/知识库验证器/backups/
                 config_manager=self._config_manager if hasattr(self, '_config_manager') else None,
                 event_bus=None,
                 service_locator=None,
+                plugin_registry=None,  # V1.49.46修复：添加缺失的plugin_registry参数
             )
             plugin.initialize(context)
             return plugin
@@ -9342,7 +11716,7 @@ data/知识库验证器/backups/
         settings = {
             'project_name': getattr(self, '_current_project_name', '未命名项目'),
             'outline': getattr(self, '_outline_content', ''),
-            'characters': getattr(self, '_character_data', []),
+            'characters': getattr(self, '_character_data', []),  # GUI只传递原始数据，格式由插件处理
             'worldview': getattr(self, '_worldview_content', ''),
             'style': getattr(self, '_style_profile', None),  # 风格设定
             'reverse_feedback': getattr(self, '_reverse_feedback_data', {}),  # 逆向反馈
@@ -10843,17 +13217,41 @@ data/知识库验证器/backups/
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas, style="TFrame")
         
+        # 【V1.48.16修复】参照工作台页面的防抖滚动处理
+        # 问题1：首次点击空白 - Configure事件触发时scrollregion未正确设置
+        # 问题2：滚动后内容卡在中间 - anchor未设置导致内容不靠上
+        self._plugins_configure_id = None
+        
         def on_frame_configure(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(canvas_window, width=canvas.winfo_width())
+            # 防抖：避免频繁触发Configure事件
+            if self._plugins_configure_id:
+                self.root.after_cancel(self._plugins_configure_id)
+            self._plugins_configure_id = self.root.after(50, _update_scrollregion)
+        
+        def _update_scrollregion():
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                # 确保Canvas窗口宽度正确
+                width = canvas.winfo_width()
+                if width > 1:
+                    canvas.itemconfig(canvas_window, width=width)
+            except Exception:
+                pass
         
         scrollable_frame.bind("<Configure>", on_frame_configure)
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         
-        # 鼠标滚轮绑定
+        # 【V1.48.16修复】初始时将Canvas滚动到顶部
+        canvas.yview_moveto(0.0)
+        
+        # 鼠标滚轮绑定（优化：添加防抖和边界检查）
         def on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            # 检查是否在Canvas区域内
+            try:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
         
         def bind_mousewheel(event):
             canvas.bind_all("<MouseWheel>", on_mousewheel)
@@ -10883,8 +13281,9 @@ data/知识库验证器/backups/
         status_info.pack(side=tk.RIGHT)
         
         # 插件列表
+        # 【V1.48.17修复】移除expand=True，避免Treeview被拉伸导致布局异常
         list_frame = ttk.LabelFrame(scrollable_frame, text="已安装插件", padding=15)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        list_frame.pack(fill=tk.X, padx=20, pady=10)
         
         # V2.2新增：增加保护状态列
         columns = ("name", "version", "status", "type", "protected")
@@ -10928,8 +13327,24 @@ data/知识库验证器/backups/
         # 绑定选择事件更新按钮状态
         self._plugin_tree.bind("<<TreeviewSelect>>", self._on_plugin_select)
         
-        # V2.3优化：异步加载插件数据
-        self._load_plugins_async()
+        # 【V1.49.43修复】Canvas预就绪函数：确保scrollregion和width正确设置
+        def _ensure_canvas_ready():
+            try:
+                canvas.update_idletasks()
+                w = canvas.winfo_width()
+                if w > 1:
+                    canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, w, 1))
+                    canvas.itemconfig(canvas_window, width=w)
+                    canvas.yview_moveto(0.0)
+            except Exception:
+                pass
+        
+        # 【V1.49.43修复】分两阶段加载插件数据
+        # 阶段1（50ms）：预设置Canvas scrollregion，确保布局就绪
+        # 阶段2（150ms）：实际加载插件数据
+        # 问题根因：首次显示时Canvas width=1导致内容缩在左侧
+        self.root.after(50, _ensure_canvas_ready)
+        self.root.after(150, self._load_plugins)
         
         # 插件详情区域
         detail_frame = ttk.LabelFrame(scrollable_frame, text="插件详情", padding=15)
@@ -11410,30 +13825,43 @@ data/知识库验证器/backups/
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas, style="TFrame")
         
+        # 性能修复：滚动区域更新防抖（参照插件页）。
+        # 原实现每次 <Configure> 都 canvas.bbox("all")(O(n))，设置页控件多时变成 O(n²)，
+        # 导致设置页同步创建耗时约4.5s。防抖把多次更新合并为一次，不改变外观与滚动行为。
+        self._settings_configure_id = None
+
+        def _update_scrollregion():
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.itemconfig(canvas_window, width=canvas.winfo_width())
+            except Exception:
+                pass
+
         def on_frame_configure(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(canvas_window, width=canvas.winfo_width())
-        
+            if self._settings_configure_id:
+                self.root.after_cancel(self._settings_configure_id)
+            self._settings_configure_id = self.root.after(50, _update_scrollregion)
+
         scrollable_frame.bind("<Configure>", on_frame_configure)
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
-        
+
         # 鼠标滚轮绑定
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        
+
         def bind_mousewheel(event):
             canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
+
         def unbind_mousewheel(event):
             canvas.unbind_all("<MouseWheel>")
-        
+
         canvas.bind("<Enter>", bind_mousewheel)
         canvas.bind("<Leave>", unbind_mousewheel)
-        
+
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        
+
         # 标题
         ttk.Label(scrollable_frame, text="设置", style="Title.TLabel").pack(anchor=tk.W, padx=20, pady=(20, 10))
         
@@ -11469,11 +13897,13 @@ data/知识库验证器/backups/
         model_frame = ttk.Frame(ai_frame, style="TFrame")
         model_frame.pack(fill=tk.X, pady=5)
         ttk.Label(model_frame, text="模型：").pack(side=tk.LEFT)
-        self._model_var = tk.StringVar(value="deepseek-chat")
+        self._model_var = tk.StringVar(value="deepseek-v4-pro")
         self._model_combo = ttk.Combobox(  # V2.23保存引用用于动态更新
             model_frame,
             textvariable=self._model_var,
-            values=["deepseek-chat", "deepseek-reasoner", "gpt-4", "gpt-3.5-turbo", "claude-3", "qwen2.5-14b-gptq", "llama3.1", "mistral"],  # V2.23新增本地模型选项
+            # DeepSeek V4：deepseek-v4-pro(思考)/deepseek-v4-flash(非思考)为最新模型；
+            # 旧名 deepseek-chat/deepseek-reasoner 将于 2026/07/24 弃用，保留仅作兼容。
+            values=["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner", "gpt-4", "gpt-3.5-turbo", "claude-3", "qwen2.5-14b-gptq", "llama3.1", "mistral"],
             state="readonly",
             width=20
         )
@@ -11491,7 +13921,7 @@ data/知识库验证器/backups/
         
         # 显示/隐藏API Key按钮
         self._show_key_var = tk.BooleanVar(value=False)
-        self._toggle_key_btn = ttk.Button(key_frame, text="👁", width=3, 
+        self._toggle_key_btn = ttk.Button(key_frame, text="显", width=4,
                                           command=self._toggle_api_key_visibility)
         self._toggle_key_btn.pack(side=tk.LEFT, padx=2)
         
@@ -11833,6 +14263,15 @@ data/知识库验证器/backups/
         
         # 方式2: 直接动态加载插件（当注册表中没有时）
         try:
+            # 性能修复：缓存动态加载的插件实例，避免每次都 exec_module（约14s）+ initialize，
+            # 从而减少与主线程建UI的GIL争用（热榜页同步创建曾达15s）。
+            _cached = getattr(self, "_cached_hot_ranking_plugin", None)
+            if _cached is not None:
+                result = _cached.execute("get_data", {"force_fresh": False})
+                if result and isinstance(result, dict):
+                    logger.info("[热榜] 成功从HotRankingPlugin获取数据（实例缓存复用）")
+                    return result
+
             import importlib.util
             plugin_path = os.path.join(os.path.dirname(__file__), "plugins", "hot-ranking-v1", "plugin.py")
             spec = importlib.util.spec_from_file_location("hot_ranking_plugin", plugin_path)
@@ -11855,6 +14294,8 @@ data/知识库验证器/backups/
             )
             
             if plugin.initialize(context):
+                # 缓存实例供后续复用（避免重复 exec_module + initialize）
+                self._cached_hot_ranking_plugin = plugin
                 # 获取数据（优先使用缓存）
                 result = plugin.execute("get_data", {"force_fresh": False})
                 if result and isinstance(result, dict):
@@ -11964,41 +14405,102 @@ data/知识库验证器/backups/
         )
         
         def load_task():
-            """后台加载任务"""
-            # 使用线程池执行加载
-            from concurrent.futures import ThreadPoolExecutor
-            import time
+            """后台加载任务 - V1.49.22修复版
             
-            # 模拟加载延迟（实际是文件IO）
-            plugins_data = []
-            plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+            【V1.49.22修复】调用PluginLoader真正加载插件到Registry
             
-            if os.path.exists(plugins_dir):
+            修复问题：
+            - V1.48.15只读取plugin.json显示，未加载到Registry
+            - 导致expert-novel-v1无法获取novel-generator-v3依赖
+            
+            修复方案：
+            1. 调用PluginLoader.load_all()真正加载插件
+            2. 从Registry获取真实状态返回
+            """
+            # V1.49.22：先尝试真正加载插件到Registry
+            try:
+                from core.plugin_loader import get_plugin_loader
+                from core.plugin_registry import get_plugin_registry
+                
+                loader = get_plugin_loader()
+                registry = get_plugin_registry()
+                
+                # 设置插件目录并清除缓存（V1.49.24修复）
+                plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+                loader._plugin_directories = [plugins_dir]
+                loader._discovered_plugins = {}  # 清除旧的发现缓存
+                
+                # 发现并加载插件
+                discovered_ids = loader.discover_plugins()
+                load_results = loader.load_all()
+                
+                logger.info(f"PluginLoader: 发现 {len(discovered_ids)} 个插件，成功加载 {sum(1 for r in load_results.values() if r.success)} 个")
+                
+                # 从Registry获取真实状态
+                plugins_data = []
                 protected_modules = {
                     "outline-parser-v3", "style-learner-v5", "character-manager-v1",
                     "worldview-parser-v1", "context-builder-v1", "iterative-generator-v2",
                     "quality-validator-v1", "novel-generator-v3", "hot-ranking-v1"
                 }
                 
-                for plugin_name in sorted(os.listdir(plugins_dir)):
-                    plugin_path = os.path.join(plugins_dir, plugin_name)
-                    if os.path.isdir(plugin_path) and not plugin_name.startswith("__"):
-                        plugin_json = os.path.join(plugin_path, "plugin.json")
-                        if os.path.exists(plugin_json):
-                            try:
-                                with open(plugin_json, "r", encoding="utf-8") as f:
-                                    data = json.load(f)
-                                
-                                is_protected = plugin_name in protected_modules
-                                plugins_data.append({
-                                    "id": plugin_name,
-                                    "data": data,
-                                    "is_protected": is_protected
-                                })
-                            except Exception as e:
-                                logger.warning(f"Failed to load plugin.json for {plugin_name}: {e}")
-            
-            return plugins_data
+                for plugin_id in discovered_ids:
+                    plugin_info = registry.get_plugin_info(plugin_id)
+                    if not plugin_info:
+                        continue
+                    
+                    metadata = plugin_info.metadata
+                    is_protected = plugin_id in protected_modules
+                    
+                    plugins_data.append({
+                        "id": plugin_id,
+                        "data": {
+                            "name": metadata.name,
+                            "version": metadata.version,
+                            "description": metadata.description,
+                            "author": metadata.author,
+                            "plugin_type": metadata.plugin_type,
+                            "enabled": plugin_info.state in ["loaded", "active"]
+                        },
+                        "is_protected": is_protected,
+                        "state": plugin_info.state  # 添加真实状态
+                    })
+                
+                logger.info(f"从Registry返回 {len(plugins_data)} 个插件")
+                return plugins_data
+                
+            except Exception as e:
+                logger.warning(f"PluginLoader加载失败，回退到文件扫描: {e}")
+                # 回退到原有逻辑（文件扫描）
+                plugins_data = []
+                plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+                
+                if os.path.exists(plugins_dir):
+                    protected_modules = {
+                        "outline-parser-v3", "style-learner-v5", "character-manager-v1",
+                        "worldview-parser-v1", "context-builder-v1", "iterative-generator-v2",
+                        "quality-validator-v1", "novel-generator-v3", "hot-ranking-v1"
+                    }
+                    
+                    for plugin_name in sorted(os.listdir(plugins_dir)):
+                        plugin_path = os.path.join(plugins_dir, plugin_name)
+                        if os.path.isdir(plugin_path) and not plugin_name.startswith("__"):
+                            plugin_json = os.path.join(plugin_path, "plugin.json")
+                            if os.path.exists(plugin_json):
+                                try:
+                                    with open(plugin_json, "r", encoding="utf-8") as f:
+                                        data = json.load(f)
+                                    
+                                    is_protected = plugin_name in protected_modules
+                                    plugins_data.append({
+                                        "id": plugin_name,
+                                        "data": data,
+                                        "is_protected": is_protected
+                                    })
+                                except Exception as e:
+                                    logger.warning(f"Failed to load plugin.json for {plugin_name}: {e}")
+                
+                return plugins_data
         
         def on_success(plugins_data):
             """加载成功回调（在主线程执行）"""
@@ -12019,6 +14521,15 @@ data/知识库验证器/backups/
                 "protocol": "协议"
             }
             
+            # 状态映射（V1.49.22新增）
+            state_map = {
+                "unloaded": "未加载",
+                "loaded": "已加载",
+                "active": "已激活",
+                "error": "错误",
+                "unloading": "卸载中"
+            }
+            
             # 填充数据
             for plugin_info in plugins_data:
                 plugin_id = plugin_info["id"]
@@ -12027,7 +14538,10 @@ data/知识库验证器/backups/
                 
                 protected_text = "🔒" if is_protected else ""
                 type_text = type_map.get(data.get("plugin_type", "tool").lower(), data.get("plugin_type", "工具"))
-                status_text = "已启用" if data.get("enabled", True) else "已禁用"
+                
+                # V1.49.22：优先使用真实状态
+                real_state = plugin_info.get("state", "unloaded")
+                status_text = state_map.get(real_state, real_state)
                 
                 item_id = self._plugin_tree.insert(
                     "",
@@ -12048,7 +14562,7 @@ data/知识库验证器/backups/
                     "description": data.get("description", ""),
                     "author": data.get("author", ""),
                     "type": data.get("plugin_type", "tool"),
-                    "state": "active" if data.get("enabled", True) else "disabled",
+                    "state": real_state,  # V1.49.22：使用真实状态
                     "is_protected": is_protected,
                     "dependencies": data.get("dependencies", [])
                 }
@@ -12086,13 +14600,24 @@ data/知识库验证器/backups/
             self._load_plugins()
     
     def _load_plugins(self) -> None:
-        """加载插件列表 - V2.2重构版
+        """加载插件列表 - V1.49.21修复版
         
-        从PluginRegistry读取真实的插件数据，包括：
-        - 插件元数据（名称、版本、类型）
-        - 插件状态（active/loaded/error等）
-        - V5保护模块标识
+        【V1.49.21修复】使用PluginLoader真正加载插件到Registry
+        
+        修复问题：
+        - V1.48.15只读取plugin.json显示，未加载到Registry
+        - 导致expert-novel-v1无法获取novel-generator-v3依赖
+        
+        修复方案：
+        1. 调用_load_plugins_from_filesystem()真正加载插件
+        2. 从Registry获取真实状态显示
         """
+        # V1.49.21：先尝试真正加载插件到Registry
+        try:
+            self._load_plugins_from_filesystem()
+        except Exception as e:
+            logger.warning(f"PluginLoader加载失败，回退到简单扫描: {e}")
+        
         # 清空现有数据
         for item in self._plugin_tree.get_children():
             self._plugin_tree.delete(item)
@@ -12100,62 +14625,59 @@ data/知识库验证器/backups/
         # 存储插件数据用于后续操作
         self._plugin_data: Dict[str, Dict[str, Any]] = {}
         
-        # 尝试从PluginRegistry获取真实数据
-        registry = None
+        # 从Registry获取插件信息（优先）
         try:
-            if CORE_AVAILABLE:
-                registry = get_plugin_registry()
-        except Exception as e:
-            logger.warning(f"Failed to get PluginRegistry: {e}")
-        
-        if registry and registry._plugins:
-            # 获取所有已注册的插件信息
-            for plugin_id in registry._plugins.keys():
-                plugin_info = registry.get_plugin_info(plugin_id)
-                if plugin_info:
+            from core.plugin_registry import get_plugin_registry
+            
+            registry = get_plugin_registry()
+            all_plugins = registry.get_all_plugins()
+            
+            if all_plugins:
+                # 从Registry显示
+                protected_modules = {
+                    "outline-parser-v3", "style-learner-v5", "character-manager-v1",
+                    "worldview-parser-v1", "context-builder-v1", "iterative-generator-v2",
+                    "quality-validator-v1", "novel-generator-v3", "hot-ranking-v1"
+                }
+                
+                type_map = {
+                    "analyzer": "分析器",
+                    "generator": "生成器",
+                    "validator": "验证器",
+                    "tool": "工具",
+                    "storage": "存储",
+                    "ai": "AI服务",
+                    "protocol": "协议"
+                }
+                
+                state_map = {
+                    "unloaded": "未加载",
+                    "loaded": "已加载",
+                    "active": "已激活",
+                    "error": "错误",
+                    "unloading": "卸载中"
+                }
+                
+                for plugin_id, plugin_info in all_plugins.items():
                     metadata = plugin_info.metadata
-                    state = plugin_info.state
-                    is_protected = registry.is_protected(plugin_id)
+                    is_protected = plugin_id in protected_modules
                     
-                    # 状态显示映射
-                    status_map = {
-                        "active": "已启用",
-                        "loaded": "已加载",
-                        "error": "错误",
-                        "unloaded": "未加载",
-                        "unloading": "卸载中"
-                    }
-                    status_text = status_map.get(state, state)
-                    
-                    # 类型显示映射
-                    type_map = {
-                        "analyzer": "分析器",
-                        "generator": "生成器",
-                        "validator": "验证器",
-                        "tool": "工具",
-                        "storage": "存储",
-                        "ai": "AI服务",
-                        "protocol": "协议"
-                    }
                     type_text = type_map.get(metadata.plugin_type.lower(), metadata.plugin_type)
-                    
-                    # 保护状态显示
                     protected_text = "🔒" if is_protected else ""
+                    state_text = state_map.get(plugin_info.state, plugin_info.state)
                     
-                    # 插入到树形视图
                     item_id = self._plugin_tree.insert(
-                        "", 
-                        tk.END, 
+                        "",
+                        tk.END,
                         values=(
                             metadata.name,
                             metadata.version,
-                            status_text,
+                            state_text,
                             type_text,
                             protected_text
                         )
                     )
                     
-                    # 存储插件数据
                     self._plugin_data[item_id] = {
                         "id": plugin_id,
                         "name": metadata.name,
@@ -12163,20 +14685,101 @@ data/知识库验证器/backups/
                         "description": metadata.description,
                         "author": metadata.author,
                         "type": metadata.plugin_type,
-                        "state": state,
-                        "is_protected": is_protected,
-                        "dependencies": metadata.dependencies,
-                        "error_message": plugin_info.error_message if hasattr(plugin_info, 'error_message') else None
+                        "state": plugin_info.state,
+                        "is_protected": is_protected
                     }
-            
-            logger.info(f"Loaded {len(self._plugin_data)} plugins from registry")
-        else:
-            # 回退：从plugins目录扫描plugin.json文件
-            self._load_plugins_from_filesystem()
-            logger.info(f"Loaded {len(self._plugin_data)} plugins from filesystem")
+                
+                logger.info(f"从Registry加载 {len(all_plugins)} 个插件")
+                return
+        except Exception as e:
+            logger.warning(f"从Registry获取插件失败，回退到文件扫描: {e}")
+        
+        # 回退：直接从文件系统加载（V1.48.15逻辑）
+        plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+        
+        if not os.path.exists(plugins_dir):
+            logger.warning(f"Plugins directory not found: {plugins_dir}")
+            return
+        
+        # V5保护模块列表（更新为实际目录名）
+        protected_modules = {
+            "outline-parser-v3", "style-learner-v5", "character-manager-v1",
+            "worldview-parser-v1", "context-builder-v1", "iterative-generator-v2",
+            "quality-validator-v1", "novel-generator-v3", "hot-ranking-v1"
+        }
+        
+        # 类型映射
+        type_map = {
+            "analyzer": "分析器",
+            "generator": "生成器",
+            "validator": "验证器",
+            "tool": "工具",
+            "storage": "存储",
+            "ai": "AI服务",
+            "protocol": "协议"
+        }
+        
+        loaded_count = 0
+        for plugin_name in sorted(os.listdir(plugins_dir)):
+            plugin_path = os.path.join(plugins_dir, plugin_name)
+            if os.path.isdir(plugin_path) and not plugin_name.startswith("__"):
+                plugin_json = os.path.join(plugin_path, "plugin.json")
+                if os.path.exists(plugin_json):
+                    try:
+                        with open(plugin_json, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        
+                        is_protected = plugin_name in protected_modules
+                        protected_text = "🔒" if is_protected else ""
+                        type_text = type_map.get(data.get("plugin_type", "tool").lower(), data.get("plugin_type", "工具"))
+                        status_text = "已启用" if data.get("enabled", True) else "已禁用"
+                        
+                        item_id = self._plugin_tree.insert(
+                            "",
+                            tk.END,
+                            values=(
+                                data.get("name", plugin_name),
+                                data.get("version", "1.0.0"),
+                                status_text,
+                                type_text,
+                                protected_text
+                            )
+                        )
+                        
+                        self._plugin_data[item_id] = {
+                            "id": plugin_name,
+                            "name": data.get("name", plugin_name),
+                            "version": data.get("version", "1.0.0"),
+                            "description": data.get("description", ""),
+                            "author": data.get("author", ""),
+                            "type": data.get("plugin_type", "tool"),
+                            "state": "active" if data.get("enabled", True) else "disabled",
+                            "is_protected": is_protected,
+                            "dependencies": data.get("dependencies", [])
+                        }
+                        loaded_count += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to load plugin.json for {plugin_name}: {e}")
+        
+        logger.info(f"Loaded {loaded_count} plugins from filesystem")
+        self._set_status(f"已加载 {loaded_count} 个插件")
+        
+        # 【V1.48.17修复】加载完成后延迟滚动到顶部
+        # 延迟50ms让Canvas有时间更新scrollregion
+        def _scroll_to_top():
+            try:
+                # 查找当前页面的Canvas并滚动到顶部
+                if self._current_page == "plugins" and self._current_page in self._pages:
+                    self._scroll_page_to_top(self._pages[self._current_page])
+            except Exception:
+                pass
+        self.root.after(50, _scroll_to_top)
     
     def _load_plugins_from_filesystem(self) -> None:
-        """从文件系统扫描插件并注册到PluginRegistry（修复版本）
+        """从文件系统扫描插件并注册到PluginRegistry（V1.49.23修复版）
+        
+        【V1.49.23修复】添加详细日志定位问题
         
         修复说明：
         匨修复前的流程：
@@ -12190,9 +14793,12 @@ data/知识库验证器/backups/
         2. 使用PluginLoader.load_plugin()加载并注册插件
         3. 从PluginRegistry获取真实状态显示在UI
         """
+        logger.info("[V1.49.23] _load_plugins_from_filesystem() 开始执行")
+        
         plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
         
         if not os.path.exists(plugins_dir):
+            logger.warning(f"[V1.49.23] 插件目录不存在: {plugins_dir}")
             return
         
         # V5保护模块列表
@@ -12210,15 +14816,21 @@ data/知识库验证器/backups/
             loader = get_plugin_loader()
             registry = get_plugin_registry()
             
-            # 设置插件目录
+            # 设置插件目录并清除缓存（V1.49.24修复）
             loader._plugin_directories = [plugins_dir]
+            loader._discovered_plugins = {}  # 清除旧的发现缓存
             
             # 发现插件
+            import time as _t_mod
+            _t_disc = _t_mod.time()
             discovered_ids = loader.discover_plugins()
-            logger.info(f"Discovered {len(discovered_ids)} plugins")
-            
+            logger.info(f"Discovered {len(discovered_ids)} plugins ([PERF] discover耗时 {_t_mod.time()-_t_disc:.2f}s)")
+
             # 按依赖顺序加载插件
+            _t_load = _t_mod.time()
             load_results = loader.load_all()
+            _dt_load = _t_mod.time() - _t_load
+            logger.warning(f"[PERF] load_all() 同步加载全部插件耗时 {_dt_load:.2f}s（主线程，期间UI冻结）")
             logger.info(f"Loaded {sum(1 for r in load_results.values() if r.success)} plugins")
             
             # 清空现有数据
@@ -12581,8 +15193,12 @@ data/知识库验证器/backups/
                     self.root.after(0, lambda: self._on_hot_ranking_loaded(data))
                 except Exception as callback_error:
                     logger.warning(f"[热榜] 主线程回调失败，稍后重试: {callback_error}")
-                    # 延迟重试
-                    self.root.after(100, lambda: self._on_hot_ranking_loaded(data))
+                    # 延迟重试（包裹try-except防止二次失败）
+                    try:
+                        self.root.after(200, lambda: self._on_hot_ranking_loaded(data))
+                    except Exception:
+                        # 主线程仍不可用，数据已缓存，用户切换页面时会重新加载
+                        logger.debug("[热榜] 二次重试仍失败，等待用户触发刷新")
                 
             except Exception as e:
                 error_msg = str(e)
@@ -12637,7 +15253,81 @@ data/知识库验证器/backups/
         self._hot_ranking_progress_var.set(f"加载失败: {error}")
         logger.error(f"[热榜] 加载失败: {error}")
         self._set_status(f"热榜加载失败: {error}")
-    
+
+    # emoji 匹配模式（性能关键）：默认字体"楷体"无 emoji 字形，Tk 首次渲染 emoji 会触发
+    # 字体回退搜索+加载系统 emoji 字体，本机实测首次约 8~13 秒（与所选字体无关、无法绕过），
+    # 导致热榜页等界面卡顿。去掉 emoji 后页面秒开，颜色/布局保持不变。
+    _EMOJI_RE = re.compile(
+        "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF"
+        "\U0001F1E6-\U0001F1FF️‍]+"
+    )
+
+    @classmethod
+    def _strip_emoji(cls, text):
+        """移除文本中的 emoji（保留中文/英文/常规标点）。"""
+        if not text or not isinstance(text, str):
+            return text
+        return cls._EMOJI_RE.sub("", text).strip()
+
+    _emoji_patch_installed = False
+
+    @classmethod
+    def _install_emoji_text_patch(cls):
+        """全局拦截 ttk/tk 文本控件的 text，去掉装饰性 emoji（性能关键，详见 __init__ 注释）。
+
+        规则：去掉 emoji 后——
+        - 仍有可见文字（如"📁 上传文件"→"上传文件"）→ 用去emoji后的文字（消除渲染开销）；
+        - 变成空（纯图标按钮如关闭✕、显示密钥👁）→ 保持原样，避免按钮变空白。
+        只patch构造函数的 text 关键字参数；不影响 StringVar 动态文本（状态栏✅❌单个出现、开销小）。
+        """
+        if cls._emoji_patch_installed:
+            return
+        try:
+            import tkinter as _tk
+            from tkinter import ttk as _ttk
+
+            def _make(orig_init):
+                def patched(self, *args, **kwargs):
+                    t = kwargs.get("text")
+                    if isinstance(t, str) and t:
+                        s = cls._strip_emoji(t)
+                        if s and s != t:           # 去emoji后仍有文字才替换
+                            kwargs["text"] = s
+                    return orig_init(self, *args, **kwargs)
+                return patched
+
+            for widget_cls in (_tk.Label, _tk.Button, _ttk.Label, _ttk.Button,
+                               _ttk.Checkbutton, _ttk.Radiobutton, _ttk.LabelFrame):
+                if not getattr(widget_cls, "_emoji_text_patched", False):
+                    widget_cls.__init__ = _make(widget_cls.__init__)
+                    widget_cls._emoji_text_patched = True
+            cls._emoji_patch_installed = True
+            logger.info("[emoji拦截] 已安装文本emoji剥离拦截器")
+        except Exception as e:
+            logger.warning(f"[emoji拦截] 安装失败（不影响功能）: {e}")
+
+    def _prefetch_hot_ranking_async(self):
+        """启动后在后台慢慢预拉热榜数据（不阻塞、不渲染）。
+
+        性能修复：热榜不再是默认启动页，但用户随时可能切过去。这里在 mainloop
+        运行稳定后，用线程池后台调用一次数据获取，把"插件加载 + 缓存读取/刷新"的
+        成本提前在后台付掉；等用户真正打开热榜页时即可命中已预热的缓存、快速渲染。
+
+        注意：此时热榜页尚未创建，绝不触碰任何热榜页 UI 控件，仅预热数据/缓存。
+        失败不影响任何功能（用户打开页面时仍会按原逻辑自行加载）。
+        """
+        def _task():
+            try:
+                self._get_hot_ranking_data()  # 仅加载插件+读/刷新缓存，不涉及UI
+                logger.info("[热榜] 启动后台预拉完成（缓存已预热）")
+            except Exception as e:
+                logger.warning(f"[热榜] 启动后台预拉失败（不影响使用）: {e}")
+        try:
+            from core.thread_pool_manager import thread_pool_manager
+            thread_pool_manager.submit_sync(_task)
+        except Exception as e:
+            logger.warning(f"[热榜] 后台预拉提交失败: {e}")
+
     def _start_daily_meditation(self):
         """V2.20: 启动每日冥想定时任务"""
         try:
@@ -12784,7 +15474,7 @@ data/知识库验证器/backups/
             # 网站标题
             site_header = tk.Label(
                 site_column,
-                text=site_info['name'],
+                text=self._strip_emoji(site_info['name']),
                 font=(GlassTheme.FONT_FAMILY, 13, 'bold'),
                 fg='white',
                 bg=site_info['color'],
@@ -12872,7 +15562,7 @@ data/知识库验证器/backups/
             
             genre_header = tk.Label(
                 genre_column,
-                text=genre_info.get('title', ''),
+                text=self._strip_emoji(genre_info.get('title', '')),
                 font=(GlassTheme.FONT_FAMILY, 13, 'bold'),
                 fg='white',
                 bg=genre_info.get('color', GlassTheme.PRIMARY),
@@ -12947,7 +15637,7 @@ data/知识库验证器/backups/
             
             type_header = tk.Label(
                 type_column,
-                text=type_info.get('title', ''),
+                text=self._strip_emoji(type_info.get('title', '')),
                 font=(GlassTheme.FONT_FAMILY, 13, 'bold'),
                 fg='white',
                 bg=type_info.get('color', GlassTheme.ACCENT_GREEN),
@@ -13072,42 +15762,79 @@ data/知识库验证器/backups/
     def _on_worldview(self) -> None:
         """世界观管理"""
         self._switch_to_page("workbench")
-        self._workbench_notebook.select(0)  # 切换到世界观标签
+        self._switch_workbench_tab("worldview")  # 切换到世界观标签
     
     def _on_characters(self) -> None:
         """人物设定"""
         self._switch_to_page("workbench")
-        self._workbench_notebook.select(1)  # 切换到人物标签
+        self._switch_workbench_tab("characters")  # 切换到人物标签
     
     def _on_outline(self) -> None:
         """大纲管理"""
         self._switch_to_page("workbench")
-        self._workbench_notebook.select(2)  # 切换到大纲标签
+        self._switch_workbench_tab("outline")  # 切换到大纲标签
     
     def _on_style(self) -> None:
         """风格学习"""
         self._switch_to_page("workbench")
-        self._workbench_notebook.select(3)  # 切换到风格标签
+        # 【V1.48.5修复】使用_switch_workbench_tab正确创建并切换到style子页面
+        self._switch_workbench_tab("style")
+        
+        # 延迟执行恢复，确保控件完全创建后再恢复数据
+        # _switch_workbench_tab会首次调用_create_style_content()创建所有控件
+        self.root.after(200, self._do_pending_style_restore)
+    
+    def _do_pending_style_restore(self):
+        """执行待恢复的风格数据（延迟调用确保控件就绪）
+        
+        V1.48.9修复：简化恢复逻辑，直接检查_style_profile是否存在
+        - 移除对_pending_style_restore标志的依赖（可能导致恢复失败）
+        - 只要_style_profile存在且界面为空就执行恢复
+        """
+        try:
+            # 【主恢复路径】直接检查_style_profile是否存在
+            if hasattr(self, '_style_profile') and self._style_profile:
+                pending_data = self._style_profile
+                
+                # 检查界面是否需要恢复（文本框为空）
+                if hasattr(self, '_style_info') and self._style_info.get("1.0", "end-1c").strip() == "":
+                    logger.info(f"_do_pending_style_restore: 恢复风格数据, author={pending_data.get('author_name', 'N/A')}")
+                    self._restore_style_ui(pending_data)
+                    # 清除标志
+                    if hasattr(self, '_pending_style_restore'):
+                        self._pending_style_restore = False
+                    return
+            
+            # 【备用恢复路径】通过display_name恢复
+            if getattr(self, '_pending_style_display_name', None):
+                display_name = self._pending_style_display_name
+                delattr(self, '_pending_style_display_name')
+                if hasattr(self, '_style_path_var'):
+                    self._style_path_var.set(display_name)
+                    logger.info(f"_do_pending_style_restore: 恢复display_name={display_name}")
+                
+        except Exception as e:
+            logger.error(f"_do_pending_style_restore失败: {e}")
     
     def _on_generation(self) -> None:
         """开始创作"""
         self._switch_to_page("workbench")
-        self._workbench_notebook.select(4)  # 切换到创作标签
+        self._switch_workbench_tab("generation")  # 切换到创作标签
     
     def _on_reverse(self) -> None:
         """逆向反馈"""
         self._switch_to_page("workbench")
-        self._workbench_notebook.select(5)  # 切换到逆向标签
+        self._switch_workbench_tab("reverse")  # 切换到逆向标签
     
     def _on_quick_create(self) -> None:
         """快捷创作"""
         self._switch_to_page("workbench")
-        self._workbench_notebook.select(6)  # 切换到快捷标签
+        self._switch_workbench_tab("quick")  # 切换到快捷标签
     
     def _on_continue(self) -> None:
         """续写功能"""
         self._switch_to_page("workbench")
-        self._workbench_notebook.select(7)  # 切换到续写标签
+        self._switch_workbench_tab("continue")  # 切换到续写标签
     
     def _on_refresh_progress(self) -> None:
         """刷新进度"""
@@ -13567,23 +16294,74 @@ data/知识库验证器/backups/
         try:
             # 恢复大纲（大纲管理页面使用_tree，其他地方可能使用_text）
             if project_data.get('outline'):
-                self._outline_content = project_data['outline']
-                # 更新大纲树（如果存在）
-                if hasattr(self, '_outline_tree'):
-                    self._update_outline_tree_from_content(self._outline_content)
+                outline_data = project_data['outline']
+                self._outline_content = outline_data
+                
+                # 【修复V2】大纲章节数据可能在两个位置：
+                # 1. outline.chapters（新格式，outline是完整解析结果）
+                # 2. outline_chapters（旧格式，独立字段）
+                chapters = None
+                if isinstance(outline_data, dict) and outline_data.get('chapters'):
+                    # 新格式：outline是完整解析结果
+                    chapters = outline_data['chapters']
+                    self._outline_chapters_data = chapters
+                    self._chapter_outlines = chapters
+                    logger.info(f"[大纲恢复] 从outline.chapters恢复: {len(chapters)}章")
+                elif project_data.get('outline_chapters'):
+                    # 旧格式：独立字段
+                    chapters = project_data['outline_chapters']
+                    self._outline_chapters_data = chapters
+                    self._chapter_outlines = chapters
+                    logger.info(f"[大纲恢复] 从outline_chapters恢复: {len(chapters)}章")
+                
+                if chapters:
+                    if hasattr(self, '_outline_tree'):
+                        # 直接从章节数据更新大纲树
+                        self._update_outline_tree_from_chapters(chapters)
+                        logger.info("[大纲恢复] 大纲树已更新")
+
+                        # 【新增V1.49.4】恢复大纲时同步人物出场章节
+                        self._sync_character_chapters_from_outline(chapters)
+
+                        # 【新增V1.49.14】恢复大纲时更新【开始创作】界面的出场人物列表
+                        if hasattr(self, '_gen_characters_listbox'):
+                            self._update_characters_from_outline(1)
+                            logger.info("[大纲恢复] 出场人物列表已更新")
+                    else:
+                        # 大纲树尚未创建，标记需要延迟更新
+                        self._pending_outline_chapters = chapters
+                        logger.info("[大纲恢复] 大纲树尚未创建，延迟更新")
+                elif hasattr(self, '_outline_tree'):
+                    # 降级：从原始内容解析
+                    content_text = outline_data if isinstance(outline_data, str) else ""
+                    if content_text:
+                        self._update_outline_tree_from_content(content_text)
+                
                 # 更新大纲文本框（如果存在，如快捷创作页面）
                 if hasattr(self, '_outline_text'):
                     self._outline_text.delete(1.0, tk.END)
-                    self._outline_text.insert(1.0, self._outline_content)
+                    # 如果outline是字典，提取原始文本内容
+                    if isinstance(outline_data, dict):
+                        # 尝试从各字段提取文本
+                        content_text = outline_data.get('raw_content', '') or \
+                                       str(outline_data.get('metadata', {}).get('title', ''))
+                        self._outline_text.insert(1.0, content_text)
+                    else:
+                        self._outline_text.insert(1.0, str(outline_data))
             
             # 恢复人物设定
             if project_data.get('characters'):
-                self._character_data = project_data['characters']
-                # 【修复】同步到_character_entries，确保批量解析后的数据能正确恢复
-                self._character_entries = project_data['characters']
-                # 【修复】与世界观一致，检查_tree是否存在再更新
+                # 【V1.49.12修复】统一延迟更新机制，避免数据覆盖混乱
                 if hasattr(self, '_character_tree'):
+                    # 人物树已存在，直接更新
+                    self._character_data = project_data['characters']
+                    self._character_entries = project_data['characters']
                     self._update_character_tree()
+                    logger.info(f"[人物恢复] 人物树已更新: {len(project_data['characters'])}个人物")
+                else:
+                    # 人物树尚未创建，标记需要延迟更新
+                    self._pending_character_data = project_data['characters']
+                    logger.info(f"[人物恢复] 人物树尚未创建，延迟更新: {len(project_data['characters'])}个人物")
             
             # 恢复世界观（解析为列表并显示在树中）
             if project_data.get('worldview'):
@@ -13604,9 +16382,8 @@ data/知识库验证器/backups/
             # 恢复风格设定
             if project_data.get('style'):
                 self._style_profile = project_data['style']
-                # 更新风格学习页面显示
-                if hasattr(self, '_update_style_display'):
-                    self._update_style_display(self._style_profile)
+                # 更新风格学习页面显示（完整恢复到UI）
+                self._restore_style_ui(self._style_profile)
             
             # 恢复逆向反馈上传的章节
             if project_data.get('reverse_chapters'):
@@ -13706,6 +16483,129 @@ data/知识库验证器/backups/
         except Exception as e:
             logger.error(f"更新人物树失败: {e}")
     
+    def _sync_character_chapters_from_outline(self, chapters: list):
+        """
+        从大纲数据同步人物出场章节信息
+        
+        设计原则：
+        - 解析大纲章节数据，提取每个章节的characters字段
+        - 更新人物数据中的chapters字段
+        - 自动合并连续章节（如第1,2,3章 → 第1-3章）
+        - 支持多种人物数据格式（列表/字典）
+        
+        Args:
+            chapters: 大纲章节数据列表
+        """
+        if not chapters:
+            return
+        
+        # 获取人物数据（支持多种格式）
+        char_data = getattr(self, '_character_entries', None) or getattr(self, '_character_data', None)
+        if not char_data:
+            return
+        
+        try:
+            # 处理不同的人物数据格式
+            # 格式1：列表 [{'name': '...', ...}, ...]
+            # 格式2：字典 {'characters': [{'name': '...', ...}, ...]}
+            if isinstance(char_data, dict):
+                if 'characters' in char_data:
+                    char_list = char_data['characters']
+                else:
+                    # 字典格式但无characters键，无法处理
+                    return
+            elif isinstance(char_data, list):
+                char_list = char_data
+            else:
+                return
+            
+            # 构建人物 → 出场章节映射
+            character_chapters = {}  # {人物名: [章节号列表]}
+            
+            for idx, chapter in enumerate(chapters, 1):
+                characters = chapter.get('characters', [])
+                if isinstance(characters, str):
+                    # 如果characters是字符串，尝试解析
+                    characters = [c.strip() for c in characters.split(',') if c.strip()]
+                
+                for char_name in characters:
+                    if isinstance(char_name, dict):
+                        char_name = char_name.get('name', '')
+                    if char_name and char_name not in character_chapters:
+                        character_chapters[char_name] = []
+                    if char_name:
+                        character_chapters[char_name].append(idx)
+            
+            # 更新人物数据中的chapters字段
+            updated = False
+            for char in char_list:
+                if not isinstance(char, dict):
+                    continue
+                    
+                char_name = char.get('name', '')
+                if char_name in character_chapters:
+                    chapter_nums = character_chapters[char_name]
+                    
+                    # 合并连续章节
+                    chapters_str = self._format_chapter_range(chapter_nums)
+                    
+                    # 更新字段
+                    if char.get('chapters') != chapters_str:
+                        char['chapters'] = chapters_str
+                        updated = True
+            
+            # 如果有更新，刷新人物树显示
+            if updated and hasattr(self, '_character_tree'):
+                self._update_character_tree()
+                logger.info(f"已从大纲同步人物出场章节信息（共{len(character_chapters)}个人物）")
+                
+        except Exception as e:
+            logger.warning(f"同步人物出场章节失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _format_chapter_range(self, chapter_nums: list) -> str:
+        """
+        格式化章节范围为易读字符串
+        
+        Examples:
+            [1, 2, 3] → "第1-3章"
+            [1, 3, 5] → "第1,3,5章"
+            [1, 2, 3, 5, 6, 7] → "第1-3,5-7章"
+        """
+        if not chapter_nums:
+            return "未设置"
+        
+        # 去重并排序
+        nums = sorted(set(chapter_nums))
+        
+        if len(nums) == 1:
+            return f"第{nums[0]}章"
+        
+        # 查找连续区间
+        ranges = []
+        start = nums[0]
+        end = nums[0]
+        
+        for i in range(1, len(nums)):
+            if nums[i] == end + 1:
+                end = nums[i]
+            else:
+                # 结束当前区间，开始新区间
+                if start == end:
+                    ranges.append(f"{start}")
+                else:
+                    ranges.append(f"{start}-{end}")
+                start = end = nums[i]
+        
+        # 添加最后一个区间
+        if start == end:
+            ranges.append(f"{start}")
+        else:
+            ranges.append(f"{start}-{end}")
+        
+        return f"第{','.join(ranges)}章"
+    
     def _update_outline_tree_from_content(self, outline_content: str):
         """从大纲内容更新大纲树显示"""
         if not hasattr(self, '_outline_tree') or not outline_content:
@@ -13745,6 +16645,143 @@ data/知识库验证器/backups/
                 
         except Exception as e:
             logger.error(f"更新大纲树失败: {e}")
+    
+    def _update_outline_tree_from_chapters(self, chapters: list):
+        """从结构化章节数据更新大纲树显示（支持卷结构）
+        
+        【架构修复V3.2】支持卷-章节两级结构显示
+        - 如果有卷数据，按卷分组显示章节
+        - 如果没有卷数据，直接显示章节列表
+        """
+        if not hasattr(self, '_outline_tree') or not chapters:
+            return
+        
+        try:
+            # 清空现有数据
+            self._outline_tree.delete(*self._outline_tree.get_children())
+            
+            # 获取大纲数据（包含卷信息）
+            outline_data = getattr(self, '_outline_content', {})
+            volumes = outline_data.get('volumes', []) if isinstance(outline_data, dict) else []
+            
+            # 创建章节索引集合，用于判断章节是否属于某卷
+            assigned_chapters = set()
+            
+            if volumes:
+                # 有卷数据：按卷分组显示
+                for vol in volumes:
+                    vol_name = vol.get('volume_name', '未命名卷')
+                    vol_num = vol.get('volume_number', 0)
+                    vol_chapters = vol.get('chapters', [])
+                    vol_desc = vol.get('description', '')
+                    
+                    # 卷节点
+                    vol_text = f"第{vol_num}卷: {vol_name}（{len(vol_chapters)}章）"
+                    vol_id = self._outline_tree.insert("", tk.END, text=vol_text, 
+                                                       values=('volume', vol_num-1), 
+                                                       open=True)
+                    
+                    # 卷描述
+                    if vol_desc:
+                        self._outline_tree.insert(vol_id, tk.END, 
+                            text=f"描述: {vol_desc[:50]}{'...' if len(vol_desc) > 50 else ''}")
+                    
+                    # 卷下章节
+                    for idx in vol_chapters:
+                        if 0 <= idx < len(chapters):
+                            chapter = chapters[idx]
+                            assigned_chapters.add(idx)
+                            
+                            title = chapter.get('title', '未命名')
+                            words = chapter.get('estimated_words', 0)
+                            chars = chapter.get('characters', [])
+                            
+                            # 【修复V3.3】检查title是否已包含章节序号，避免重复显示
+                            if title.startswith('第') and '章' in title:
+                                node_text = f"{title} | 预计{words}字 | {len(chars)}人物"
+                            else:
+                                node_text = f"第{idx+1}章: {title} | 预计{words}字 | {len(chars)}人物"
+                            
+                            chapter_id = self._outline_tree.insert(vol_id, tk.END, 
+                                                                   text=node_text, 
+                                                                   values=(idx,),
+                                                                   open=False)
+                            
+                            # 子节点：人物列表
+                            if chars:
+                                main_chars = chars[:3]
+                                self._outline_tree.insert(chapter_id, tk.END, 
+                                    text=f"主要人物: {', '.join(main_chars)}")
+                            
+                            # 子节点：摘要
+                            summary = chapter.get('summary', '')
+                            if summary:
+                                self._outline_tree.insert(chapter_id, tk.END, 
+                                    text=f"梗概: {summary[:50]}{'...' if len(summary) > 50 else ''}")
+                
+                # 未分配到卷的章节（独立章节）
+                unassigned = [i for i in range(len(chapters)) if i not in assigned_chapters]
+                if unassigned:
+                    # 创建"未分类章节"节点
+                    unassigned_id = self._outline_tree.insert("", tk.END, 
+                        text=f"未分类章节（{len(unassigned)}章）", 
+                        values=('unassigned', -1), 
+                        open=True)
+                    
+                    for idx in unassigned:
+                        chapter = chapters[idx]
+                        title = chapter.get('title', '未命名')
+                        words = chapter.get('estimated_words', 0)
+                        chars = chapter.get('characters', [])
+                        
+                        # 【修复V3.3】检查title是否已包含章节序号，避免重复显示
+                        if title.startswith('第') and '章' in title:
+                            node_text = f"{title} | 预计{words}字 | {len(chars)}人物"
+                        else:
+                            node_text = f"第{idx+1}章: {title} | 预计{words}字 | {len(chars)}人物"
+                        
+                        chapter_id = self._outline_tree.insert(unassigned_id, tk.END, 
+                                                               text=node_text, 
+                                                               values=(idx,),
+                                                               open=False)
+                        
+                        if chars:
+                            main_chars = chars[:3]
+                            self._outline_tree.insert(chapter_id, tk.END, 
+                                text=f"主要人物: {', '.join(main_chars)}")
+                        
+                        summary = chapter.get('summary', '')
+                        if summary:
+                            self._outline_tree.insert(chapter_id, tk.END, 
+                                text=f"梗概: {summary[:50]}{'...' if len(summary) > 50 else ''}")
+            else:
+                # 无卷数据：直接显示章节列表
+                for i, chapter in enumerate(chapters):
+                    title = chapter.get('title', '未命名')
+                    words = chapter.get('estimated_words', 0)
+                    chars = chapter.get('characters', [])
+                    
+                    # 【修复V3.3】检查title是否已包含章节序号，避免重复显示
+                    # 如果title以"第"开头且包含"章"，则直接使用title
+                    if title.startswith('第') and '章' in title:
+                        node_text = f"{title} | 预计{words}字 | {len(chars)}人物"
+                    else:
+                        node_text = f"第{i+1}章: {title} | 预计{words}字 | {len(chars)}人物"
+                    
+                    chapter_id = self._outline_tree.insert("", tk.END, text=node_text, values=(i,))
+                    
+                    if chars:
+                        main_chars = chars[:3]
+                        self._outline_tree.insert(chapter_id, tk.END, 
+                            text=f"主要人物: {', '.join(main_chars)}")
+                    
+                    summary = chapter.get('summary', '')
+                    if summary:
+                        self._outline_tree.insert(chapter_id, tk.END, 
+                            text=f"梗概: {summary[:50]}{'...' if len(summary) > 50 else ''}")
+            
+        except Exception as e:
+            logger.error(f"从章节数据更新大纲树失败: {e}")
     
     def _update_worldview_tree_from_content(self, worldview_content):
         """从世界观内容更新世界观树显示
@@ -13794,46 +16831,246 @@ data/知识库验证器/backups/
             logger.error(f"更新世界观树失败: {e}")
     
     def _update_style_display(self, style_profile):
-        """更新风格显示"""
+        """更新风格显示（兼容新旧两种数据格式）"""
         if not style_profile:
             return
         
         try:
-            # 更新风格信息显示
-            if hasattr(self, '_style_info'):
-                style_name = style_profile.get('name', '未命名风格')
-                author = style_profile.get('author', '未知')
-                genre = style_profile.get('genre', '未知')
-                
-                info_text = f"""风格名称: {style_name}
+            # 检查是否是插件8维度分析结果（新版格式）
+            if style_profile.get('author_name') or style_profile.get('style_tags'):
+                self._restore_style_ui(style_profile)
+                return
+            
+            # 旧版格式兼容
+            style_name = style_profile.get('name', '未命名风格')
+            author = style_profile.get('author', '未知')
+            genre = style_profile.get('genre', '未知')
+            
+            info_text = f"""风格名称: {style_name}
 参考作者: {author}
 作品类型: {genre}
 
 """
-                # 添加词汇特征
-                vocab_features = style_profile.get('vocabulary_features', [])
-                if vocab_features:
-                    info_text += "【词汇特征】\n"
-                    for vf in vocab_features[:10]:  # 只显示前10个
-                        info_text += f"- {vf}\n"
-                
-                # 添加句式特征
-                sentence_patterns = style_profile.get('sentence_patterns', [])
-                if sentence_patterns:
-                    info_text += "\n【句式特征】\n"
-                    for sp in sentence_patterns[:10]:
-                        info_text += f"- {sp}\n"
-                
+            vocab_features = style_profile.get('vocabulary_features', [])
+            if vocab_features:
+                info_text += "【词汇特征】\n"
+                for vf in vocab_features[:10]:
+                    info_text += f"- {vf}\n"
+            
+            sentence_patterns = style_profile.get('sentence_patterns', [])
+            if sentence_patterns:
+                info_text += "\n【句式特征】\n"
+                for sp in sentence_patterns[:10]:
+                    info_text += f"- {sp}\n"
+            
+            if hasattr(self, '_style_info'):
                 self._style_info.delete(1.0, tk.END)
                 self._style_info.insert(1.0, info_text)
             
-            # 更新风格名称标签
             if hasattr(self, '_style_info_label'):
-                style_name = style_profile.get('name', '未命名风格')
                 self._style_info_label.config(text=f"当前风格: {style_name}")
                 
         except Exception as e:
             logger.error(f"更新风格显示失败: {e}")
+
+    def _restore_style_ui(self, style_data):
+        """恢复风格数据到UI完整显示（支持插件8维度分析结果）"""
+        try:
+            if not style_data:
+                logger.warning("restore_style_ui: style_data为空")
+                return
+
+            # 【修复】如果UI控件尚未创建，缓存数据待后续延迟恢复
+            # 场景：项目加载时风格学习页面尚未切换到，_style_info等控件不存在
+            ui_ready = hasattr(self, '_style_info') and hasattr(self, '_style_path_var')
+            
+            # 1. 始终更新风格路径标签（控件存在时立即更新）
+            author = style_data.get('author_name', '')
+            genre = style_data.get('genre', '')
+            sample_size = style_data.get('sample_size_chars', 0)
+            
+            logger.info(f"restore_style_ui: author={author}, genre={genre}, ui_ready={ui_ready}")
+
+            if author and hasattr(self, '_style_path_var'):
+                display_name = f"{author} ({genre})" if genre else author
+                self._style_path_var.set(display_name)
+            elif author:
+                # 控件不存在时缓存显示名称
+                self._pending_style_display_name = f"{author} ({genre})" if genre else author
+                logger.info("restore_style_ui: _style_path_var不存在，缓存display_name")
+
+            # 2. 更新右侧分析器文本区域（完整8维度展示）
+            if ui_ready and hasattr(self, '_style_info'):
+                info_lines = []
+                
+                # 判断是否为深度学习增强后的数据
+                is_deep_learned = style_data.get('_deep_learned') and isinstance(style_data['_deep_learned'], dict)
+                
+                if is_deep_learned:
+                    # 深度学习后的增强展示
+                    deep_data = style_data['_deep_learned']
+                    info_lines.append("=" * 50)
+                    info_lines.append("  已加载的风格档案（深度学习版）")
+                    info_lines.append("=" * 50)
+                    
+                    original_profile = deep_data.get('original_profile', {})
+                    info_lines.append(f"作者: {original_profile.get('author_name', author or '未知')}")
+                    info_lines.append(f"类型: {style_data.get('genre', '未知')}")
+                    info_lines.append(f"样本: {sample_size:,} 字符")
+                    info_lines.append(f"学习时间: {deep_data.get('learned_time', '')}")
+                    
+                    techniques = deep_data.get('writing_techniques', [])
+                    if techniques:
+                        info_lines.append("\n【核心写作手法】")
+                        for tech in techniques:
+                            level_icon = "★" if tech.get('level') == 'high' else "☆"
+                            info_lines.append(f"  {level_icon} {tech['name']}: {tech['detail']}")
+                    
+                    writing_rules = deep_data.get('writing_rules', [])
+                    if writing_rules:
+                        info_lines.append("\n【可操作规则】")
+                        for i, rule in enumerate(writing_rules, 1):
+                            info_lines.append(f"  {i}. {rule}")
+                    
+                    enhanced_desc = deep_data.get('enhanced_description', '')
+                    if enhanced_desc:
+                        info_lines.append(f"\n{enhanced_desc}")
+                    
+                    expert_prompt = deep_data.get('expert_prompt', '')
+                    if expert_prompt:
+                        info_lines.append(f"\n{expert_prompt}")
+                        
+                else:
+                    # 标准完整8维度展示
+                    info_lines.append("=" * 50)
+                    info_lines.append("  已加载的风格档案")
+                    info_lines.append("=" * 50)
+                    info_lines.append(f"作者: {author or '未知'}")
+                    info_lines.append(f"类型: {genre or '未知'}")
+                    info_lines.append(f"样本: {sample_size:,} 字符")
+                    created_date = style_data.get('created_date', '')
+                    if created_date:
+                        info_lines.append(f"分析时间: {created_date}")
+                    info_lines.append("")
+                    
+                    # 1. 词汇特征
+                    vocab = style_data.get('vocabulary_depth', {})
+                    if vocab:
+                        high_freq = vocab.get('high_frequency_words', [])[:10]
+                        info_lines.append("【词汇特征】")
+                        if high_freq:
+                            info_lines.append(f"高频词: {', '.join([w for w, c in high_freq])}")
+                        proper = vocab.get('proper_nouns', [])
+                        if proper:
+                            info_lines.append(f"专有名词: {', '.join(proper[:10])}")
+                        emotion_w = vocab.get('emotion_words', {})
+                        if emotion_w:
+                            info_lines.append(f"情感词分布: {json.dumps(emotion_w, ensure_ascii=False)}")
+                        sensory = vocab.get('sensory_words', {})
+                        if sensory:
+                            for stype, swords in sensory.items():
+                                info_lines.append(f"{stype}描写: {', '.join(swords)}")
+                    
+                    # 2. 句式模式
+                    sentence = style_data.get('sentence_patterns', {})
+                    if sentence:
+                        info_lines.append("")
+                        info_lines.append("【句式模式】")
+                        info_lines.append(f"短句占比: {sentence.get('short_sentences_ratio', 0)*100:.1f}%")
+                        info_lines.append(f"长句占比: {sentence.get('long_sentences_ratio', 0)*100:.1f}%")
+                        info_lines.append(f"句子节奏: {sentence.get('sentence_rhythm', '未知')}")
+
+                    # 3. 修辞手法
+                    rhetoric = style_data.get('rhetorical_devices', {})
+                    if rhetoric:
+                        info_lines.append("")
+                        info_lines.append(f"【修辞手法】(密度: {rhetoric.get('rhetorical_density', 0):.2f}/千字)")
+                        meta_count = len(rhetoric.get('metaphors', []))
+                        pers_count = len(rhetoric.get('personifications', []))
+                        hyper_count = len(rhetoric.get('hyperboles', []))
+                        para_count = len(rhetoric.get('parallelisms', []))
+                        info_lines.append(f"比喻{meta_count} / 拟人{pers_count} / 夸张{hyper_count} / 排比{para_count}")
+
+                    # 4. 叙事风格
+                    narrative = style_data.get('narrative_style', {})
+                    if narrative:
+                        info_lines.append("")
+                        info_lines.append("【叙事风格】")
+                        info_lines.append(f"视角: {narrative.get('perspective', '未知')} | 时态: {narrative.get('tense', '未知')}")
+                        info_lines.append(f"节奏: {narrative.get('narrative_pace', '未知')}")
+
+                    # 5. 情感色彩
+                    emotion = style_data.get('emotional_tone', {})
+                    if emotion:
+                        info_lines.append("")
+                        info_lines.append("【情感色彩】")
+                        info_lines.append(f"整体倾向: {emotion.get('overall_sentiment', '中性')}")
+                        info_lines.append(f"情感强度: {emotion.get('emotional_intensity', 0):.2f}")
+
+                    # 6. 语言风格
+                    language = style_data.get('language_style', {})
+                    if language:
+                        info_lines.append("")
+                        info_lines.append("【语言风格】")
+                        info_lines.append(f"语体: {language.get('register', '通用')} | 正式度: {language.get('formality', 0):.2f}")
+                        idioms = language.get('idioms', [])
+                        if idioms:
+                            info_lines.append(f"成语: {', '.join(idioms[:15])}")
+
+                    # 7. 节奏风格
+                    pacing = style_data.get('pacing_style', {})
+                    if pacing:
+                        info_lines.append("")
+                        info_lines.append("【节奏风格】")
+                        info_lines.append(f"整体节奏: {pacing.get('overall_pace', '中等')}")
+
+                    # 8. 风格标签 + 相似作家 + 写作特点
+                    tags = style_data.get('style_tags', [])
+                    similar = style_data.get('similar_authors', [])
+                    chars = style_data.get('writing_characteristics', [])
+                    info_lines.append("")
+                    info_lines.append(f"【风格标签】{', '.join(tags)}")
+                    if similar:
+                        info_lines.append(f"相似作家: {', '.join(similar)}")
+                    if chars:
+                        info_lines.append("\n【写作特点】")
+                        for c in chars:
+                            info_lines.append(f"  - {c}")
+                
+                self._style_info.delete("1.0", tk.END)
+                self._style_info.insert("1.0", "\n".join(info_lines))
+
+            # 3. 更新左侧Treeview档案库
+            if hasattr(self, '_style_tree') and author:
+                self._style_tree.delete(*self._style_tree.get_children())
+                
+                vocab = style_data.get('vocabulary_depth', {})
+                sentence = style_data.get('sentence_patterns', {})
+                rhetoric = style_data.get('rhetorical_devices', {})
+                emotion = style_data.get('emotional_tone', {})
+                pacing = style_data.get('pacing_style', {})
+                narrative = style_data.get('narrative_style', {})
+                # 【V1.48.8修复】chars在两个分支都可用：deep_learned分支可能没有writing_characteristics
+                chars = style_data.get('writing_characteristics', [])
+                detail_score = min(5, len(chars)) if chars else 0
+                
+                tree_name = f"{author}_{genre}" if genre else author
+                self._style_tree.insert("", tk.END, values=(
+                    tree_name,
+                    "★" * min(5, len(vocab.get('high_frequency_words', []))) if vocab else "-",
+                    sentence.get('sentence_rhythm', '-')[:2] if sentence else "-",
+                    str(rhetoric.get('rhetorical_density', 0))[:3] if rhetoric else "-",
+                    emotion.get('overall_sentiment', '-')[:2] if emotion else "-",
+                    pacing.get('overall_pace', '-')[:2] if pacing else "-",
+                    narrative.get('perspective', '-')[:2] if narrative else "-",
+                    str(detail_score)
+                ))
+            elif author and not ui_ready:
+                # UI控件尚未创建，标记待延迟恢复
+                self._pending_style_restore = True
+
+        except Exception as e:
+            logger.error(f"恢复风格UI失败: {e}")
     
     def _update_reverse_feedback_display(self, feedback_data):
         """更新逆向反馈显示"""
@@ -13953,8 +17190,53 @@ data/知识库验证器/backups/
                 else:
                     self._progress_style.set("未设置")
             
+            # 【V1.49.43修复】强制更新创作进度页面的Canvas scrollregion
+            # 问题根因：刷新时StringVar更新了但Canvas未重新计算布局导致部分数据不可见
+            self.root.after(50, self._refresh_progress_canvas)
+            
         except Exception as e:
             logger.error(f"更新进度显示失败: {e}")
+    
+    def _refresh_progress_canvas(self):
+        """刷新创作进度页面Canvas的滚动区域
+        
+        【V1.49.44修复】进度页面打开后内容截断的完整修复：
+        1. 递归设置所有子Canvas窗口宽度
+        2. 直接触发scrollregion重算（不依赖Configure事件）
+        """
+        try:
+            if 'progress' not in self._pages:
+                return
+            
+            progress_page = self._pages['progress']
+            
+            # 步骤1：递归更新Canvas窗口宽度
+            self._update_canvas_width_recursive(progress_page)
+            
+            # 步骤2：直接找到Canvas并强制重算scrollregion
+            # （Configure事件可能未触发，因为页面可能尚未显示）
+            def _force_scrollregion_update(widget):
+                if widget.winfo_class() == 'Canvas':
+                    try:
+                        w = widget.winfo_width()
+                        if w > 1:
+                            # 设置内部窗口宽度匹配Canvas
+                            for item_id in widget.find_withtag("all"):
+                                tags = widget.gettags(item_id)
+                                if "all" not in tags:
+                                    widget.itemconfig(item_id, width=w)
+                            # 强制重新计算scrollregion
+                            bbox = widget.bbox("all")
+                            if bbox:
+                                widget.configure(scrollregion=bbox)
+                    except Exception:
+                        pass
+                for child in widget.winfo_children():
+                    _force_scrollregion_update(child)
+            
+            _force_scrollregion_update(progress_page)
+        except Exception:
+            pass
     
     def _on_backup_project(self) -> None:
         """备份项目 - 完整实现"""
@@ -14640,11 +17922,11 @@ ID: {plugin_id}
         if self._show_key_var.get():
             # 显示明文
             self._key_entry.config(show="")
-            self._toggle_key_btn.config(text="🔒")
+            self._toggle_key_btn.config(text="隐")
         else:
             # 显示密文
             self._key_entry.config(show="*")
-            self._toggle_key_btn.config(text="👁")
+            self._toggle_key_btn.config(text="显")
         self._show_key_var.set(not self._show_key_var.get())
     
     def _on_test_api_connection(self):
@@ -15467,8 +18749,8 @@ ID: {plugin_id}
             
             # 更新模型选项为线上模型
             if hasattr(self, '_model_combo'):
-                self._model_combo['values'] = ["deepseek-chat", "deepseek-reasoner", "gpt-4", "gpt-3.5-turbo", "claude-3"]
-                self._model_var.set("deepseek-chat")  # 默认选择DeepSeek模型
+                self._model_combo['values'] = ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner", "gpt-4", "gpt-3.5-turbo", "claude-3"]
+                self._model_var.set("deepseek-v4-pro")  # 默认选择DeepSeek V4 Pro（最新，思考模式）
     
     def _on_theme_changed(self):
         """主题切换回调"""
@@ -15589,6 +18871,13 @@ ID: {plugin_id}
             # 订阅热榜进度事件（P2-001修复）
             ("hot_ranking.progress", self._on_hot_ranking_progress_event),
             ("hot_ranking.updated", self._on_hot_ranking_updated_event),
+            # 新增：插件执行事件（监控所有插件）
+            ("plugin.executing", self._on_gen_event_plugin_executing),
+            ("plugin.completed", self._on_gen_event_plugin_completed),
+            ("plugin.failed", self._on_gen_event_plugin_failed),
+            # 新增：模块状态事件
+            ("module.started", self._on_gen_event_module_started),
+            ("module.completed", self._on_gen_event_module_completed),
         ]
         
         for event_type, handler in events:
@@ -15684,6 +18973,25 @@ ID: {plugin_id}
     def _on_gen_event_started(self, event) -> None:
         """生成开始事件"""
         def update():
+            # 清空Agent状态树
+            self._clear_agent_status_tree()
+            
+            # 初始化核心模块状态
+            core_modules = [
+                ("outline-parser-v3", "大纲解析器"),
+                ("style-learner-v5", "风格学习器"),
+                ("character-manager-v1", "人物管理器"),
+                ("worldview-parser-v1", "世界观解析器"),
+                ("context-builder-v1", "上下文构建器"),
+                ("iterative-generator-v2", "迭代生成器"),
+                ("quality-validator-v1", "质量验证器"),
+                ("novel-generator-v3", "小说生成入口"),
+            ]
+            
+            # 预填充核心模块（状态为"待命"）
+            for module_id, module_name in core_modules:
+                self._update_agent_status_tree(module_id, "⏳ 待命", module_name)
+            
             self._gen_update_status("🚀 生成任务已开始")
             self._gen_log_insert(f"[{self._timestamp()}] 🚀 生成任务已开始\n")
             pipeline_id = event.data.get("pipeline_id", "")
@@ -15700,19 +19008,29 @@ ID: {plugin_id}
             scores = event.data.get("scores", {})
             chapter_id = event.data.get("chapter_id", "")
             content = event.data.get("content", "")
+            score = event.data.get("score", 0)  # V7.0: 专家模式直接传总分
+            # V8.0修复：使用event中的章节号（而非可能过时的UI变量）
+            chapter_number_from_event = event.data.get("chapter_number", None)
             
             self._gen_log_insert(f"[{self._timestamp()}] ✅ 生成任务已完成\n")
-            self._gen_log_insert(f"[{self._timestamp()}] 总字数: {total_words}\n")
+            
+            # V7.0修复：显示总分（专家模式直接传score而非scores dict）
+            if score > 0:
+                self._gen_log_insert(f"[{self._timestamp()}] 综合评分: {score:.2f}\n")
+            elif scores:
+                # 兼容旧格式（默认模式的完整scores dict）
+                avg_score = sum(scores.values()) / len(scores) if scores else 0
+                self._gen_log_insert(f"[{self._timestamp()}] 平均评分: {avg_score:.2f}\n")
+            
+            if total_words:
+                self._gen_log_insert(f"[{self._timestamp()}] 总字数: {total_words}\n")
             self._gen_update_progress(100)
             
-            # P1修复：生成完成后弹出反馈对话框
-            if content and scores:
-                # 延迟弹出，避免阻塞UI更新
-                self.root.after(500, lambda: self._show_feedback_dialog_auto(
-                    chapter_id=chapter_id,
-                    content=content,
-                    scores=scores
-                ))
+            # V7.0修复：有内容时更新预览区域（不再依赖scores dict）
+            if content:
+                self._gen_result.delete("1.0", tk.END)
+                self._gen_result.insert("1.0", content)
+                self._gen_log_insert(f"[{self._timestamp()}] 内容已写入预览区({len(content)}字符)\n")
         
         self._safe_after(0, update)
     
@@ -15818,6 +19136,102 @@ ID: {plugin_id}
                     pass
         
         self._safe_after(0, update)
+    
+    def _on_gen_event_plugin_executing(self, event) -> None:
+        """插件执行开始事件"""
+        def update():
+            plugin_name = event.data.get("plugin", "Unknown")
+            plugin_id = event.data.get("plugin_id", plugin_name)
+            self._gen_log_insert(f"[{self._timestamp()}] 🔌 插件执行: {plugin_name}\n")
+            # 更新Agent状态树
+            self._update_agent_status_tree(plugin_id, "🔄 执行中", plugin_name)
+        
+        self._safe_after(0, update)
+    
+    def _on_gen_event_plugin_completed(self, event) -> None:
+        """插件执行完成事件"""
+        def update():
+            plugin_name = event.data.get("plugin", "Unknown")
+            plugin_id = event.data.get("plugin_id", plugin_name)
+            success = event.data.get("success", False)
+            status = "✅ 完成" if success else "❌ 失败"
+            self._gen_log_insert(f"[{self._timestamp()}] {status} 插件: {plugin_name}\n")
+            # 更新Agent状态树
+            self._update_agent_status_tree(plugin_id, status, plugin_name)
+        
+        self._safe_after(0, update)
+    
+    def _on_gen_event_plugin_failed(self, event) -> None:
+        """插件执行失败事件"""
+        def update():
+            plugin_name = event.data.get("plugin", "Unknown")
+            plugin_id = event.data.get("plugin_id", plugin_name)
+            error = event.data.get("error", "未知错误")
+            self._gen_log_insert(f"[{self._timestamp()}] ❌ 插件失败: {plugin_name} - {error[:50]}\n")
+            # 更新Agent状态树
+            self._update_agent_status_tree(plugin_id, "❌ 失败", f"{plugin_name}: {error[:30]}")
+        
+        self._safe_after(0, update)
+    
+    def _on_gen_event_module_started(self, event) -> None:
+        """模块启动事件"""
+        def update():
+            module_name = event.data.get("module", "Unknown")
+            module_id = event.data.get("module_id", module_name)
+            self._gen_log_insert(f"[{self._timestamp()}] 📦 模块启动: {module_name}\n")
+            # 更新Agent状态树
+            self._update_agent_status_tree(module_id, "🔄 运行中", module_name)
+        
+        self._safe_after(0, update)
+    
+    def _on_gen_event_module_completed(self, event) -> None:
+        """模块完成事件"""
+        def update():
+            module_name = event.data.get("module", "Unknown")
+            module_id = event.data.get("module_id", module_name)
+            success = event.data.get("success", False)
+            status = "✅ 完成" if success else "❌ 失败"
+            self._gen_log_insert(f"[{self._timestamp()}] {status} 模块: {module_name}\n")
+            # 更新Agent状态树
+            self._update_agent_status_tree(module_id, status, module_name)
+        
+        self._safe_after(0, update)
+    
+    def _update_agent_status_tree(self, item_id: str, status: str, info: str) -> None:
+        """更新Agent状态树（线程安全）
+        
+        Args:
+            item_id: 项目ID（用于查找现有项目）
+            status: 状态文本（如"🔄 运行中"、"✅ 完成"、"❌ 失败"）
+            info: 信息文本
+        """
+        if not hasattr(self, '_gen_agent_tree') or not self._gen_agent_tree:
+            return
+        
+        try:
+            # 检查项目是否已存在
+            existing_items = self._gen_agent_tree.get_children()
+            for item in existing_items:
+                if item == item_id:
+                    # 更新现有项目
+                    self._gen_agent_tree.item(item, values=(status, info))
+                    return
+            
+            # 项目不存在，插入新项目
+            self._gen_agent_tree.insert("", tk.END, iid=item_id, values=(status, info))
+        except Exception as e:
+            logger.warning(f"更新Agent状态树失败: {e}")
+    
+    def _clear_agent_status_tree(self) -> None:
+        """清空Agent状态树"""
+        if not hasattr(self, '_gen_agent_tree') or not self._gen_agent_tree:
+            return
+        
+        try:
+            for item in self._gen_agent_tree.get_children():
+                self._gen_agent_tree.delete(item)
+        except Exception as e:
+            logger.warning(f"清空Agent状态树失败: {e}")
     
     def _timestamp(self) -> str:
         """获取当前时间戳"""

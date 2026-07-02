@@ -341,9 +341,10 @@ class KnowledgeValidatorPlugin(ValidatorPlugin):
         ]
         
         # 历史术语
+        # V2.1修复：原第6项 r'(\w+役' 缺右括号→正则编译崩溃→知识库验证维度整体失效
         history_patterns = [
             r'(\w+帝)', r'(\w+王)', r'(\w+侯)',
-            r'(\w+军)', r'(\w+战)', r'(\w+役'
+            r'(\w+军)', r'(\w+战)', r'(\w+役)'
         ]
         
         # 提取所有术语
