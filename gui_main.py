@@ -12957,50 +12957,60 @@ data/知识库验证器/backups/
                     else:
                         temps = [0.6, 0.8, 1.0]
                     
+                    # V2.4修复：request 提为变量，供 select_best_version 复用
+                    cont_request = ContinuationRequest(
+                        starting_text=source_text,
+                        word_count=word_count,
+                        direction=direction,
+                        outline=outline,
+                        characters=characters,
+                        worldview=worldview,
+                        style_profile=style_profile,
+                        previous_chapters=previous_chapters,
+                        temperature=temperature
+                    )
                     results = self._continuation_plugin.generate_multiple_versions(
-                        request=ContinuationRequest(
-                            starting_text=source_text,
-                            word_count=word_count,
-                            direction=direction,
-                            outline=outline,
-                            characters=characters,
-                            worldview=worldview,
-                            style_profile=style_profile,
-                            previous_chapters=previous_chapters,
-                            temperature=temperature
-                        ),
+                        request=cont_request,
                         num_versions=num_to_generate,
                         temperatures=temps
                     )
-                    
-                    # 存储所有版本
+
+                    # 存储所有成功版本（记录对应的原始 result，供评分回填按序对齐）
+                    success_results = []
                     for i, result in enumerate(results):
                         if result.success:
                             version_data = {
                                 "text": result.text,
                                 "word_count": result.word_count,
-                                "temperature": [0.6, 0.8, 1.0][i],
+                                "temperature": temps[i] if i < len(temps) else temperature,
                                 "metadata": result.metadata.model_dump(),
-                                "score": 0
+                                "score": 0,
                             }
                             self._continue_versions.append(version_data)
-                    
+                            success_results.append(result)
+
                     # 自动选择最佳版本
-                    if self._continue_versions:
-                        best_result, best_index, scores = self._continuation_plugin.select_best_version(
-                            results[:len(self._continue_versions)]
+                    # V2.4修复：①原调用缺 request 参数（TypeError）；
+                    # ②返回的第三元素是 dict {"scores":[...]}，旧代码 enumerate 到 keys
+                    # 后 .get 崩溃 → 评分从未真正回填。改为取 detail["scores"] 列表，
+                    # 并按 success_results 对齐（避免有失败版本时索引错位）。
+                    if success_results:
+                        best_result, best_index, detail = self._continuation_plugin.select_best_version(
+                            success_results, cont_request
                         )
-                        self._best_version_index = best_index
-                        
-                        # 更新评分
-                        for i, score_dict in enumerate(scores):
-                            if i < len(self._continue_versions):
-                                self._continue_versions[i]["score"] = score_dict.get("total", 0)
-                        
+                        # 回填真实评分（版本列表与一键保存 argmax 都依赖它）
+                        base = len(self._continue_versions) - len(success_results)
+                        for i, score_dict in enumerate(detail.get("scores", [])):
+                            idx = base + i
+                            if 0 <= idx < len(self._continue_versions) and isinstance(score_dict, dict):
+                                self._continue_versions[idx]["score"] = score_dict.get("total", 0)
+                        self._best_version_index = base + best_index
+
                         # 显示最佳版本
-                        self._current_version_index = best_index
-                        self.root.after(0, lambda: self._display_version(best_index))
-                    
+                        self._current_version_index = self._best_version_index
+                        _bi = self._best_version_index
+                        self.root.after(0, lambda i=_bi: self._display_version(i))
+
                     self.root.after(0, lambda: self._set_status(f"已生成 {len(self._continue_versions)} 个版本"))
                 else:
                     # 单次生成
@@ -13130,13 +13140,11 @@ data/知识库验证器/backups/
         if not self._continue_versions:
             messagebox.showwarning("提示", "没有可选择的版本")
             return
-        
-        if self._best_version_index < 0:
-            # 如果没有最佳版本索引，使用当前选中的版本
-            best_index = self._current_version_index
-        else:
-            best_index = self._best_version_index
-        
+
+        # V2.4：统一走"取评分最高版本"辅助（best_index 未设时按 score 现算 argmax，
+        # 不再兜底当前浏览版本）
+        best_index = self._get_best_continue_version_index()
+
         # 切换到最佳版本
         self._current_version_index = best_index
         self._display_version(best_index)
@@ -13211,17 +13219,43 @@ data/知识库验证器/backups/
         ttk.Button(btn_frame, text="保存", command=on_save).pack(side=tk.RIGHT, padx=5)
         ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
     
+    def _get_best_continue_version_index(self) -> int:
+        """返回评分最高的续写版本索引（V2.4新增）
+
+        需求：一键保存永远保存评分最高的内容，与用户当前浏览的是哪个版本无关。
+        策略——**始终以各版本实际 score 的 argmax 为准**（不盲信可能被误标的
+        _best_version_index，确保拿到真·最高分）；仅当所有版本都无有效 score 时，
+        才回退到生成时记录的 _best_version_index，再兜底 0。
+        """
+        versions = self._continue_versions
+        if not versions:
+            return 0
+        scores = [v.get('score') for v in versions]
+        if any(isinstance(s, (int, float)) for s in scores):
+            return max(range(len(versions)),
+                       key=lambda i: scores[i] if isinstance(scores[i], (int, float)) else -1.0)
+        bi = getattr(self, '_best_version_index', -1)
+        if isinstance(bi, int) and 0 <= bi < len(versions):
+            return bi
+        return 0
+
     def _on_continue_save(self):
-        """保存续写结果"""
+        """保存续写结果
+
+        V2.4：不论用户浏览到哪个版本，一键保存的都是评分最高的版本。
+        """
         if not self._continue_versions:
             messagebox.showwarning("提示", "没有可保存的内容")
             return
-        
-        current_version = self._continue_versions[self._current_version_index]
+
+        # 锁定评分最高的版本（而非当前浏览版本）
+        best_index = self._get_best_continue_version_index()
+        current_version = self._continue_versions[best_index]
         continuation_text = current_version.get("text", "")
-        
+        best_score = current_version.get("score", 0) or 0
+
         if not continuation_text:
-            messagebox.showwarning("提示", "当前版本内容为空")
+            messagebox.showwarning("提示", "最佳版本内容为空")
             return
         
         # 创建保存对话框
@@ -13238,9 +13272,19 @@ data/知识库验证器/backups/
         y = self.root.winfo_y() + (self.root.winfo_height() - 300) // 2
         dialog.geometry(f"+{x}+{y}")
         
+        # 明示：保存的是评分最高的版本（V2.4）
+        total_versions = len(self._continue_versions)
+        if total_versions > 1:
+            ttk.Label(
+                dialog,
+                text=f"将保存评分最高的版本 V{best_index + 1}/{total_versions}"
+                     f"（评分：{best_score:.2f}）",
+                foreground="#10B981",
+            ).pack(pady=(10, 0))
+
         # 保存选项
         ttk.Label(dialog, text="保存方式：").pack(pady=10)
-        
+
         save_mode = tk.StringVar(value="new")
         ttk.Radiobutton(dialog, text="📄 保存为新章节", variable=save_mode, value="new").pack(anchor=tk.W, padx=40, pady=5)
         ttk.Radiobutton(dialog, text="📝 追加到当前章节", variable=save_mode, value="append").pack(anchor=tk.W, padx=40, pady=5)

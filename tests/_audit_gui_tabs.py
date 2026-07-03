@@ -509,6 +509,23 @@ try:
     report("续写", "开始续写→结果+版本", ok and not errs,
            f"LLM={FAKE.calls - calls0} 结果={len(text_of(res_widget)) if res_widget else 0}字 "
            f"版本树={nv} 错误={len(errs)}" + (f" {errs[0][2][:100]}" if errs else ""))
+
+    # 一键保存永远取评分最高版本（与浏览版本无关）
+    app._continue_versions = [
+        {"text": "低分版本内容" * 30, "score": 0.61, "word_count": 180},
+        {"text": "最高分版本内容" * 30, "score": 0.88, "word_count": 210},
+        {"text": "中分版本内容" * 30, "score": 0.73, "word_count": 195},
+    ]
+    app._current_version_index = 0  # 用户切到浏览低分版本
+    app._best_version_index = 1
+    best_idx = app._get_best_continue_version_index()       # score argmax
+    app._best_version_index = 2                             # 故意误标为非最高分
+    best_when_mislabeled = app._get_best_continue_version_index()  # 仍应取真最高分
+    app._best_version_index = 1                             # 复原
+    report("续写", "一键保存锁定最高分版本",
+           best_idx == 1 and best_when_mislabeled == 1,
+           f"argmax={best_idx}(期望1) 误标best_index=2时仍取={best_when_mislabeled}(期望1) "
+           f"当前浏览={app._current_version_index}")
 except Exception as e:
     report("续写", "续写链路", False, f"异常: {e}")
     traceback.print_exc()
