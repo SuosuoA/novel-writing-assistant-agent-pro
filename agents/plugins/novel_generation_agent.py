@@ -261,7 +261,17 @@ class NovelGenerationAgent(BaseAgent):
             knowledge_categories = payload.get("knowledge_categories", [])
             knowledge_domains = payload.get("knowledge_domains", [])
             writing_techniques = payload.get("writing_techniques", [])
-            
+
+            # V2.2修复：前章上下文透传（上下文记忆前5章）。
+            # payload 携带 previous_chapters/previous_chapter_text（由内置
+            # context_building 阶段规整），此前在本接缝被丢弃 → 会话恢复后
+            # 生成完全没有前文记忆。种子到插件（插件内部仍自累计并保持5章上限）。
+            previous_chapters = payload.get("previous_chapters") or []
+            if not previous_chapters and payload.get("previous_chapter_text"):
+                previous_chapters = [payload["previous_chapter_text"]]
+            if previous_chapters and hasattr(self._plugin, "seed_previous_chapters"):
+                self._plugin.seed_previous_chapters(previous_chapters)
+
             # 调用插件进行生成
             final_content, stats = self._plugin.generate_chapter(
                 chapter_title=chapter_title,

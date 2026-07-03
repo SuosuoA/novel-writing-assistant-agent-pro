@@ -104,6 +104,12 @@ class PluginSignatureVerifier:
     # 该机制自设计以来从未可能通过校验（生产模式全部插件被 L3 拦截）。
     SIGNATURE_CARRIER_FILES = frozenset({"plugin.json", "plugin.sig"})
 
+    # V2.2修复：插件目录内的运行时可变数据必须排除在哈希之外——
+    # 例如 hot-ranking-v1/data/hot_ranking_cache.json 每次抓取都变化，
+    # 若纳入签名则缓存一更新签名即失效，生产模式插件被拦。
+    # 签名保护的是代码与清单完整性，不是运行时状态。
+    SIGNATURE_EXCLUDED_DIRS = frozenset({"__pycache__", "data", "cache", "logs", "tmp"})
+
     @classmethod
     def _calculate_directory_hash(cls, directory: Path) -> str:
         """计算目录的SHA256哈希
@@ -145,7 +151,9 @@ class PluginSignatureVerifier:
             try:
                 # V2.1修复：排序遍历保证哈希确定性
                 for item in sorted(current_dir.iterdir(), key=lambda p: p.name):
-                    # 跳过__pycache__目录
+                    # V2.2修复：跳过运行时数据目录（含__pycache__）
+                    if item.is_dir() and item.name in cls.SIGNATURE_EXCLUDED_DIRS:
+                        continue
                     if item.name == "__pycache__":
                         continue
 

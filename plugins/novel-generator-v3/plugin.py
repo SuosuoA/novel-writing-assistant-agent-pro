@@ -384,7 +384,29 @@ class NovelGeneratorPlugin(GeneratorPlugin):
         }
     
     # ========== 核心功能方法（从V5迁移）==========
-    
+
+    def seed_previous_chapters(self, chapter_texts: List[str]) -> None:
+        """外部种子前章上下文（V2.2新增，会话恢复场景）
+
+        仅在内部记忆为空时生效（会话内自累计优先），保持前5章上限
+        （评分反馈循环锁定规则：上下文记忆前 5 章）。
+
+        Args:
+            chapter_texts: 前章正文文本列表（按章节顺序）
+        """
+        if self.previous_chapters or not chapter_texts:
+            return
+        for text in chapter_texts[-5:]:
+            if isinstance(text, str) and text.strip():
+                self.previous_chapters.append({
+                    'title': '',
+                    'content': text,
+                    'word_count': len(text),
+                })
+        if self._logger and self.previous_chapters:
+            self._logger.info(
+                f"[V3] 前章上下文已种子: {len(self.previous_chapters)} 章")
+
     def generate_chapter(
         self,
         chapter_title: str,

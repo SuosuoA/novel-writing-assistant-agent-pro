@@ -22,11 +22,16 @@ GUI异步任务辅助模块
     )
 """
 
+import queue
 import threading
 from typing import Any, Callable, Coroutine, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+# 主线程UI泵的排空间隔（毫秒）。50ms 对进度条/日志更新无感知延迟，
+# 同时避免高频空转。
+UI_PUMP_INTERVAL_MS = 50
 
 
 class GUIAsyncHelper:
@@ -55,8 +60,41 @@ class GUIAsyncHelper:
         self._current_task_future = None
         self._cancel_requested = threading.Event()
         self._lock = threading.RLock()
-        
+
+        # V2.2修复：跨线程 root.after() 依赖主线程正处于 mainloop，
+        # 否则抛 "main thread is not in main loop"（回调静默丢失）。
+        # 改为教科书模式：工作线程只 put 队列（纯Python，永远安全），
+        # 主线程用定时泵排空执行。
+        self._ui_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
+        self._pump_stopped = False
+        self._start_ui_pump()
+
         logger.info("GUIAsyncHelper initialized")
+
+    def _start_ui_pump(self) -> None:
+        """在主线程启动UI回调泵（构造时于主线程调用）"""
+        def _drain():
+            if self._pump_stopped:
+                return
+            try:
+                while True:
+                    fn = self._ui_queue.get_nowait()
+                    try:
+                        fn()
+                    except Exception as e:
+                        logger.error(f"主线程回调执行失败: {e}", exc_info=True)
+            except queue.Empty:
+                pass
+            try:
+                self._root.after(UI_PUMP_INTERVAL_MS, _drain)
+            except Exception:
+                # 窗口已销毁，泵自然终止
+                self._pump_stopped = True
+
+        try:
+            self._root.after(UI_PUMP_INTERVAL_MS, _drain)
+        except Exception as e:
+            logger.error(f"UI泵启动失败: {e}")
     
     def submit_task(
         self,
@@ -121,18 +159,26 @@ class GUIAsyncHelper:
         logger.debug(f"Task submitted: {task_id}")
         return task_id
     
+    def call_on_main_thread(self, fn: Callable[[], None]) -> None:
+        """把无参回调调度到Tk主线程执行（GUI线程安全更新的公共入口）
+
+        V2.2修复：gui_main 的生成进度/完成/错误回调均调用本方法，
+        但类中此前只有私有 _safe_callback → 每次回调 AttributeError
+        被服务层捕获吞掉 → 生成在后台成功、界面永远空白（正文/评分不显示）。
+
+        实现为入队（工作线程侧零 Tcl 调用），由主线程UI泵排空执行。
+        """
+        self._ui_queue.put(fn)
+
     def _safe_callback(self, callback: Optional[Callable], *args):
         """
         安全执行回调（确保在主线程）
-        
-        通过root.after(0, ...)确保回调在主线程执行
+
+        V2.2修复：与 call_on_main_thread 同路——入队由主线程UI泵执行
+        （原先跨线程 root.after 在主线程不在 mainloop 时抛异常丢回调）。
         """
         if callback:
-            try:
-                # 使用after(0, ...)确保在主线程执行
-                self._root.after(0, lambda: callback(*args))
-            except Exception as e:
-                logger.error(f"Callback error: {e}")
+            self._ui_queue.put(lambda: callback(*args))
     
     def cancel_task(self) -> bool:
         """
@@ -163,6 +209,7 @@ class GUIAsyncHelper:
     
     def shutdown(self):
         """关闭助手"""
+        self._pump_stopped = True
         self.cancel_task()
         logger.info("GUIAsyncHelper shutdown")
 

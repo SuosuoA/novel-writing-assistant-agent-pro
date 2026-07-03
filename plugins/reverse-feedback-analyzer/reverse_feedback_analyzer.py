@@ -177,9 +177,12 @@ class AnalysisCache:
         """
         生成缓存键
 
-        使用内容哈希避免存储大量文本
+        使用内容哈希避免存储大量文本。
+        V2.2修复：加入分析器版本盐（本地缓存有磁盘持久化——旧版
+        "规则降级空结果"若不失效，新的LLM语义分析永远不执行）。
         """
-        content = f"{analysis_type}:{chapter_text[:500]}:{json.dumps(settings, sort_keys=True, ensure_ascii=False)[:1000]}"
+        content = (f"{ANALYZER_CACHE_VERSION}:{analysis_type}:{chapter_text[:500]}:"
+                   f"{json.dumps(settings, sort_keys=True, ensure_ascii=False)[:1000]}")
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     def get(
@@ -367,6 +370,11 @@ class AnalysisCache:
 # ============================================================================
 
 
+# 分析器缓存版本盐（V2.2新增）：分析语义变化时递增，避免旧版"规则降级空结果"
+# 持久化缓存永远命中、新的LLM语义分析永远不执行。
+ANALYZER_CACHE_VERSION = "v2.2-unified-llm"
+
+
 class LLMAnalyzer:
     """
     LLM语义分析封装
@@ -424,6 +432,11 @@ class LLMAnalyzer:
         Returns:
             分析结果字典
         """
+        # V2.2修复：入口统一归一化（LLM与规则两条路径都受益）——
+        # 项目文件中大纲是dict/世界观是list，直接切片会KeyError(slice)
+        outline = self._normalize_setting_text(outline)
+        worldview = self._normalize_setting_text(worldview)
+
         if not self._llm_client:
             logger.warning("LLM客户端未设置，使用规则检测")
             return self._rule_based_analysis(
@@ -470,6 +483,42 @@ class LLMAnalyzer:
                 chapter_text, outline, characters, worldview, chapter_id
             )
 
+    @staticmethod
+    def _normalize_setting_text(value: Any) -> str:
+        """把大纲/世界观等设定归一化为文本（V2.2新增，系统边界校验）
+
+        项目文件中大纲可能是 dict（含 content/chapters 等键）、
+        世界观可能是 list[dict]；提示词构建需要纯文本。
+        """
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            # 常见形状：{content: str, ...} 优先取正文
+            for key in ("content", "outline_content", "text", "summary"):
+                inner = value.get(key)
+                if isinstance(inner, str) and inner.strip():
+                    return inner
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except Exception:
+                return str(value)
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    name = item.get("name") or item.get("title") or ""
+                    desc = (item.get("description") or item.get("content")
+                            or item.get("summary") or "")
+                    parts.append(f"{name}: {desc}" if name else str(desc))
+                else:
+                    parts.append(str(item))
+            return "\n".join(p for p in parts if p)
+        return str(value)
+
     def _build_analysis_prompt(
         self,
         chapter_text: str,
@@ -479,9 +528,14 @@ class LLMAnalyzer:
         chapter_id: str
     ) -> str:
         """构建分析提示
-        
+
         V1.49.48修复：兼容characters的字典/列表格式
+        V2.2修复：outline/worldview 归一化为文本——项目文件中大纲是 dict、
+        世界观是 list，直接切片 dict 会抛 KeyError(slice)，分析整体失败。
         """
+        outline = self._normalize_setting_text(outline)
+        worldview = self._normalize_setting_text(worldview)
+
         # V1.49.48修复：确保characters始终是列表格式
         if isinstance(characters, dict):
             characters = list(characters.values()) if characters else []
@@ -975,8 +1029,33 @@ class ReverseFeedbackAnalyzer(AnalyzerPlugin):
         return None
 
     def _init_llm_client(self, context: PluginContext) -> None:
-        """初始化LLM客户端"""
-        # 尝试从ServiceLocator获取
+        """初始化LLM客户端
+
+        V2.2修复：优先接入统一AI服务管理器（与生成/续写/快捷创作同一入口，
+        用户在设置页配置的API直接生效）。旧路径找的 llm_client 服务与
+        llm.api_key 配置键在本项目从未存在 → 永远静默降级到规则检测，
+        逆向分析的LLM语义分析形同虚设。
+        """
+        try:
+            from core.ai_service_manager import get_ai_service_manager
+
+            class _UnifiedLLMClient:
+                """把统一AI服务管理器适配为 LLMAnalyzer 需要的 call(prompt) 接口"""
+
+                def call(self, prompt: str) -> str:
+                    manager = get_ai_service_manager()
+                    resp = manager.generate_text(prompt=prompt)
+                    if getattr(resp, 'success', False):
+                        return getattr(resp, 'text', '') or ''
+                    raise RuntimeError(getattr(resp, 'error', None) or 'AI服务调用失败')
+
+            self._llm_analyzer.set_llm_client(_UnifiedLLMClient())
+            logger.info("逆向分析LLM已接入统一AI服务管理器")
+            return
+        except Exception as e:
+            logger.warning(f"接入统一AI服务管理器失败，尝试旧路径: {e}")
+
+        # 旧路径1：从ServiceLocator获取
         try:
             service_locator = context.service_locator
             if hasattr(service_locator, 'get'):
@@ -1112,7 +1191,8 @@ class ReverseFeedbackAnalyzer(AnalyzerPlugin):
         cached_result = None
         if GLOBAL_CACHE_AVAILABLE:
             cache_manager = get_cache_manager()
-            cache_key = generate_cache_key(chapter_text[:500], current_settings)
+            cache_key = generate_cache_key(
+                ANALYZER_CACHE_VERSION, chapter_text[:500], current_settings)
             cached_result = cache_manager.get("analysis", cache_key)
         
         if cached_result is None:
@@ -1172,7 +1252,8 @@ class ReverseFeedbackAnalyzer(AnalyzerPlugin):
         report_dict = report.to_dict()
         if GLOBAL_CACHE_AVAILABLE:
             cache_manager = get_cache_manager()
-            cache_key = generate_cache_key(chapter_text[:500], current_settings)
+            cache_key = generate_cache_key(
+                ANALYZER_CACHE_VERSION, chapter_text[:500], current_settings)
             cache_manager.set("analysis", cache_key, report_dict)
         # 同时存储到本地缓存作为备份
         self._cache.set(chapter_text, current_settings, report_dict)

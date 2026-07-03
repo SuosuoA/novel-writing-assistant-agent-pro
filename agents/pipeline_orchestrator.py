@@ -544,6 +544,19 @@ class PipelineOrchestrator:
         )
         
         try:
+            # V2.2修复：context_building 为内置阶段（无独立Agent，见阶段定义注释），
+            # 旧代码仍按Agent查找 → 每次生成必报"Agent未注册: context_building"，
+            # 前章上下文（上下文记忆前5章）在配置层→生成层的透传中断。
+            if agent_type == "context_building":
+                result.success = True
+                result.data = self._build_context_stage_data(payload)
+                result.duration_seconds = time.time() - start_time
+                logger.info(
+                    f"[Pipeline] 内置上下文构建完成：前章数="
+                    f"{len(result.data.get('previous_chapters', []))}"
+                )
+                return result
+
             # 获取Agent
             agent = self._agent_registry.get_agent(agent_type)
             if not agent:
@@ -617,6 +630,21 @@ class PipelineOrchestrator:
         
         return context
     
+    def _build_context_stage_data(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """内置上下文构建阶段：规整前章上下文供 content_generation 使用
+
+        提示词级的上下文组装由 novel-generator-v3 内部的 ContextBuilder 完成；
+        本阶段负责把配置层传入的前章文本统一为 previous_chapters 列表透传
+        （评分反馈循环锁定规则：上下文记忆前 5 章）。
+        """
+        prev_list = [p for p in (payload.get("previous_chapters") or [])
+                     if isinstance(p, str) and p.strip()]
+        prev_text = payload.get("previous_chapter_text") or ""
+        if isinstance(prev_text, str) and prev_text.strip() and prev_text not in prev_list:
+            prev_list = prev_list + [prev_text]
+        prev_list = prev_list[-5:]
+        return {"previous_chapters": prev_list, "context_built": bool(prev_list)}
+
     def _build_initial_payload(
         self,
         config: NovelGenerationConfig,

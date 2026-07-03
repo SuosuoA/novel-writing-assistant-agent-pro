@@ -1308,7 +1308,7 @@ class CustomTitleBar(tk.Frame):
             success = event.data.get("success", False)
             duration = event.data.get("duration_seconds", 0)
             
-            status = "✅ 成功" if success else "❌ 失败"
+            status = "[成功]" if success else "[失败]"
             self._log_insert(f"[{self._timestamp()}] {status} 阶段完成: {stage_name} (耗时: {duration:.2f}s)\n")
             self._update_agent_row(stage_name, status, f"{duration:.2f}s", "完成" if success else "失败")
         
@@ -1333,7 +1333,7 @@ class CustomTitleBar(tk.Frame):
             total_iterations = result_data.get("total_iterations", 0)
             total_duration = result_data.get("total_duration_seconds", 0)
             
-            status = "✅ 成功" if success else "❌ 失败"
+            status = "[成功]" if success else "[失败]"
             self._log_insert(f"\n{'='*40}\n")
             self._log_insert(f"[{self._timestamp()}] {status} 流水线完成\n")
             self._log_insert(f"  总迭代次数: {total_iterations}\n")
@@ -3829,11 +3829,10 @@ class MainWindow:
         self._selected_writing_techniques.clear()
         self._update_selected_tech_display()
     
-    def get_selected_writing_techniques(self) -> List[str]:
-        """获取选中的写作技巧列表"""
-        # 返回技巧名称列表
-        return [tech_name for _, tech_name in self._selected_writing_techniques]
-    
+    # V2.2清理：此处原有旧版 get_selected_writing_techniques（读
+    # _selected_writing_techniques 元组列表），运行时被后文新版（读复选框
+    # _all_writing_tech_vars）静默覆盖，属不可达死代码且易被误改——已删除。
+
     # ==================== 旧方法保留（兼容性）====================
     
     def _toggle_category_fold(self):
@@ -4593,31 +4592,67 @@ class MainWindow:
             expand_btn.configure(text="▼")
             self._quick_result_expanded[result_type] = True
     
-    def _load_quick_creator_plugin(self):
-        """加载快捷创作插件"""
+    def _get_kernel_plugin(self, plugin_id: str):
+        """从微内核插件注册表获取已初始化的插件实例（V2.2新增）
+
+        架构正道：启动时内核已完成全部插件的加载+初始化+激活，
+        GUI 应复用注册表实例而非自行裸导入（裸实例缺 initialize，
+        且旧代码写错类名导致快捷创作入口从未工作过）。
+        """
         try:
-            # 使用动态导入（支持连字符目录名）
-            plugin_class = _dynamic_import_plugin('quick-creator-v1', 'QuickCreatorPlugin')
+            registry = get_plugin_registry()
+            inst = registry.get_plugin(plugin_id)
+            if inst:
+                logger.info(f"[内核插件] {plugin_id} 从注册表获取成功")
+                return inst
+        except Exception as e:
+            logger.warning(f"[内核插件] 注册表获取失败 {plugin_id}: {e}")
+        return None
+
+    def _init_naked_plugin(self, plugin) -> bool:
+        """为动态导入的裸插件补齐初始化（V2.2新增，降级路径专用）"""
+        try:
+            from core.plugin_interface import PluginContext
+            context = PluginContext(
+                event_bus=getattr(self, '_event_bus', None),
+                service_locator=get_service_locator() if CORE_AVAILABLE else None,
+                config_manager=get_config_manager() if CORE_AVAILABLE else None,
+                plugin_registry=getattr(self, '_plugin_registry', None),
+            )
+            if hasattr(plugin, 'initialize'):
+                return bool(plugin.initialize(context))
+            return True
+        except Exception as e:
+            logger.error(f"裸插件初始化失败: {e}")
+            return False
+
+    def _load_quick_creator_plugin(self):
+        """加载快捷创作插件
+
+        V2.2修复：旧代码 _dynamic_import_plugin('quick-creator-v1',
+        'QuickCreatorPlugin') 类名写错（实际为 QuickCreationPlugin）→
+        恒 None → 报"请先配置AI服务"误导用户；且裸实例从不初始化。
+        改为注册表优先；插件内部走统一 AIServiceManager，无需 set_api_client。
+        """
+        # 1. 微内核注册表（启动时已加载+初始化）
+        plugin = self._get_kernel_plugin('quick-creator-v1')
+        if plugin:
+            self._quick_creator_plugin = plugin
+            self._set_status("快捷创作插件就绪")
+            return
+
+        # 2. 降级：动态导入（修正类名）+ 补初始化
+        try:
+            plugin_class = _dynamic_import_plugin('quick-creator-v1', 'QuickCreationPlugin')
             if not plugin_class:
                 logger.error("快捷创作插件类未找到")
                 self._quick_creator_plugin = None
                 return
-            
-            self._quick_creator_plugin = plugin_class()
-            
-            # 从服务定位器获取AI客户端
-            if CORE_AVAILABLE:
-                service_locator = get_service_locator()
-                ai_service = service_locator.get_service("ai_service")
-                if ai_service and hasattr(ai_service, 'get_client'):
-                    client = ai_service.get_client()
-                    if client:
-                        self._quick_creator_plugin.set_api_client(client)
-                        self._set_status("快捷创作插件加载成功")
-                        logger.info("快捷创作插件加载成功")
-                        return
-            
-            logger.warning("快捷创作插件未找到AI客户端")
+            inst = plugin_class()
+            self._init_naked_plugin(inst)
+            self._quick_creator_plugin = inst
+            self._set_status("快捷创作插件就绪（本地实例）")
+            logger.info("快捷创作插件加载成功（降级本地实例）")
         except Exception as e:
             logger.error(f"加载快捷创作插件失败: {e}")
             self._quick_creator_plugin = None
@@ -4831,44 +4866,31 @@ class MainWindow:
         return frame
     
     def _load_continuation_plugin(self):
-        """加载续写插件"""
+        """加载续写插件
+
+        V2.2修复：与快捷创作同类问题——裸导入不初始化、依赖已废弃的
+        set_api_client 旧机制（无 AI 客户端时留下半残实例，续写必失败）。
+        改为注册表优先；插件内部走统一 AIServiceManager。
+        """
+        # 1. 微内核注册表（启动时已加载+初始化）
+        plugin = self._get_kernel_plugin('continuation-generator-v1')
+        if plugin:
+            self._continuation_plugin = plugin
+            self._set_status("续写插件就绪")
+            return
+
+        # 2. 降级：动态导入 + 补初始化
         try:
-            # 使用动态导入（支持连字符目录名）
             plugin_class = _dynamic_import_plugin('continuation-generator-v1', 'ContinuationGeneratorPlugin')
             if not plugin_class:
                 logger.error("续写插件类未找到")
                 self._continuation_plugin = None
                 return
-            
-            self._continuation_plugin = plugin_class()
-            
-            # 从服务定位器获取AI客户端
-            if CORE_AVAILABLE:
-                service_locator = get_service_locator()
-                ai_service = service_locator.get_service("ai_service")
-                if ai_service and hasattr(ai_service, 'get_client'):
-                    client = ai_service.get_client()
-                    if client:
-                        self._continuation_plugin.set_api_client(client)
-                        self._set_status("续写插件加载成功")
-                        logger.info("续写插件加载成功")
-                        return
-            
-            # 如果无法获取AI服务，使用配置文件中的设置
-            if hasattr(self, '_config_manager') and self._config_manager:
-                ai_config = self._config_manager.get("ai_service", {})
-                if ai_config:
-                    from openai import OpenAI
-                    api_key = ai_config.get("api_key", "")
-                    base_url = ai_config.get("base_url", "https://api.deepseek.com/v1")
-                    if api_key:
-                        client = OpenAI(api_key=api_key, base_url=base_url)
-                        self._continuation_plugin.set_api_client(client)
-                        self._set_status("续写插件加载成功（使用配置文件）")
-                        logger.info("续写插件加载成功（使用配置文件）")
-                        return
-            
-            logger.warning("续写插件未找到AI客户端，请先配置AI服务")
+            inst = plugin_class()
+            self._init_naked_plugin(inst)
+            self._continuation_plugin = inst
+            self._set_status("续写插件就绪（本地实例）")
+            logger.info("续写插件加载成功（降级本地实例）")
         except Exception as e:
             logger.error(f"加载续写插件失败: {e}")
             self._continuation_plugin = None
@@ -5159,24 +5181,28 @@ class MainWindow:
             elapsed = time.time() - start_time
             self.root.after(0, lambda: self._consistency_time_label.config(text=f"耗时：{elapsed:.1f}s"))
         
+        # V2.2修复：Tk变量必须在主线程读取（原先在工作线程 .get() 属
+        # 跨线程Tcl调用，主线程不在mainloop间隙时崩溃且报错路径也有bug）
+        genre_val = self._consistency_genre_var.get()
+        check_context = {
+            "new_chapter": new_chapter,
+            "genre": genre_val if genre_val != "auto" else None,
+            "top_k": self._consistency_topk_var.get(),
+            "check_types": {
+                "character": self._check_character_var.get(),
+                "plot": self._check_plot_var.get(),
+                "worldview": self._check_worldview_var.get()
+            }
+        }
+
         # 异步执行检查
         def do_check():
             try:
                 # 阶段1：准备上下文
                 update_stage("准备上下文")
                 update_time()
-                
-                # 构建检查上下文
-                context = {
-                    "new_chapter": new_chapter,
-                    "genre": self._consistency_genre_var.get() if self._consistency_genre_var.get() != "auto" else None,
-                    "top_k": self._consistency_topk_var.get(),
-                    "check_types": {
-                        "character": self._check_character_var.get(),
-                        "plot": self._check_plot_var.get(),
-                        "worldview": self._check_worldview_var.get()
-                    }
-                }
+
+                context = check_context
                 
                 # 阶段2：召回相似章节
                 update_stage("召回相似章节")
@@ -5202,7 +5228,10 @@ class MainWindow:
             except Exception as e:
                 logger.error(f"一致性检查失败: {e}")
                 total_time = time.time() - start_time
-                self.root.after(0, lambda: self._handle_consistency_error(str(e), total_time))
+                # V2.2修复：lambda晚绑定e——except块结束后e被删除，
+                # 错误显示路径必抛"cannot access free variable"（错误被二次吞掉）
+                self.root.after(0, lambda msg=str(e), t=total_time:
+                                self._handle_consistency_error(msg, t))
         
         # 启动异步任务（使用统一线程池，解决卡顿问题）
         from core.thread_pool_manager import thread_pool_manager
@@ -5224,14 +5253,14 @@ class MainWindow:
             accuracy = result.get("accuracy", 0.0)
             
             if is_consistent:
-                self._consistency_status_label.config(text="状态：✅ 无冲突", foreground="#10B981")
+                self._consistency_status_label.config(text="状态：无冲突", foreground="#10B981")
             else:
                 conflicts = result.get("conflicts", [])
                 p0_count = sum(1 for c in conflicts if c.get("severity") == "P0")
                 p1_count = sum(1 for c in conflicts if c.get("severity") == "P1")
                 p2_count = sum(1 for c in conflicts if c.get("severity") == "P2")
                 self._consistency_status_label.config(
-                    text=f"状态：⚠️ 发现{len(conflicts)}个冲突（P0:{p0_count} P1:{p1_count} P2:{p2_count}）",
+                    text=f"状态：发现{len(conflicts)}个冲突（P0:{p0_count} P1:{p1_count} P2:{p2_count}）",
                     foreground="#F59E0B")
             
             self._consistency_accuracy_label.config(text=f"准确率：{accuracy:.1%}")
@@ -5246,7 +5275,7 @@ class MainWindow:
                 suggestion = conflict.get("suggestion", "")
                 
                 # 严重程度标签
-                severity_tag = {"P0": "🔴严重", "P1": "🟡中等", "P2": "🟢轻微"}.get(severity, severity)
+                severity_tag = {"P0": "P0严重", "P1": "P1中等", "P2": "P2轻微"}.get(severity, severity)
                 
                 # 类型标签
                 type_tag = {"character": "人物", "plot": "情节", "worldview": "世界观"}.get(conflict_type, conflict_type)
@@ -5279,7 +5308,7 @@ class MainWindow:
         self._consistency_check_btn.config(state=tk.NORMAL)
         self._consistency_stage_label.config(text="")
         self._consistency_time_label.config(text=f"耗时：{elapsed_time:.1f}s")
-        self._consistency_status_label.config(text=f"状态：❌ 检测失败", foreground="#EF4444")
+        self._consistency_status_label.config(text=f"状态：检测失败", foreground="#EF4444")
         self._consistency_accuracy_label.config(text="准确率：-")
         self._set_status(f"一致性检查失败: {error_msg}")
     
@@ -5674,20 +5703,9 @@ class MainWindow:
             self._knowledge_stats_label1.config(text=f"题材分类: 加载失败")
             self._knowledge_stats_label2.config(text=f"写作技巧: 加载失败")
     
-    def _on_knowledge_refresh(self):
-        """刷新知识库缓存"""
-        if self._knowledge_manager:
-            try:
-                self._knowledge_manager.reload_cache()
-                # 刷新列表显示
-                self._on_knowledge_search()
-                messagebox.showinfo("成功", "知识库缓存已刷新")
-            except Exception as e:
-                logger.error(f"刷新知识库缓存失败: {e}")
-                # P2-003修复：用户友好错误提示
-                from core.user_friendly_errors import convert_knowledge_error
-                title, full_message = convert_knowledge_error(e, "刷新")
-                messagebox.showerror(title, full_message)
+    # V2.2清理：此处原有一个 _on_knowledge_refresh（带 reload_cache），
+    # 被后文同名方法静默覆盖 → "刷新缓存"按钮实际从不重载缓存。
+    # 已合并到后文唯一版本（先 reload_cache 再刷新列表）。
 
     def _on_category_changed(self, event):
         """题材切换事件：根据题材自动切换领域下拉框选项
@@ -5757,42 +5775,62 @@ class MainWindow:
             title, full_message = convert_knowledge_error(e, "搜索")
             messagebox.showerror(title, full_message)
     
+    # 知识库列表单页显示上限（避免超大列表插入引起卡顿；总数在状态栏诚实显示）
+    KNOWLEDGE_LIST_DISPLAY_CAP = 500
+
     def _on_knowledge_refresh(self):
-        """刷新知识列表"""
+        """刷新知识库（V2.2合并版：重载缓存 + 刷新列表）
+
+        修复：原先有两个同名方法，带 reload_cache 的版本被本方法静默覆盖，
+        "刷新缓存"按钮从不真正重载；且状态栏显示总数但列表只插入200条，
+        计数与所见不一致。现合并为一个：先尽力重载缓存，再刷新列表并诚实计数。
+        """
         if not self._knowledge_manager:
             return
-        
+
+        # 1. 重载缓存（尽力而为；旧缓存仍可浏览时不因重载失败而中断）
+        try:
+            if hasattr(self._knowledge_manager, 'reload_cache'):
+                self._knowledge_manager.reload_cache()
+        except Exception as e:
+            logger.warning(f"知识库缓存重载失败（继续用现有缓存刷新列表）: {e}")
+
         category = self._knowledge_category_var.get()
         domain = self._knowledge_domain_var.get()
-        
+
         # 中文转英文过滤条件
         category_filter = None if self._category_map.get(category) == "all" else self._category_map.get(category)
         domain_filter = None if self._domain_map.get(domain) == "all" else self._domain_map.get(domain)
-        
+
         try:
             # 清空列表
             for item in self._knowledge_tree.get_children():
                 self._knowledge_tree.delete(item)
-            
+
             # 获取知识点列表
             knowledge_list = self._knowledge_manager.list_knowledge(
                 category=category_filter,
                 domain=domain_filter
             )
-            
-            for kp in knowledge_list[:200]:  # 限制显示数量
+
+            cap = self.KNOWLEDGE_LIST_DISPLAY_CAP
+            for kp in knowledge_list[:cap]:
                 keywords_str = ", ".join(kp.keywords[:5])
                 preview = kp.content[:80] + "..." if len(kp.content) > 80 else kp.content
                 # 英文转中文显示
                 category_cn = self._category_reverse_map.get(kp.category, kp.category)
                 domain_cn = self._domain_reverse_map.get(kp.domain, kp.domain)
-                
+
                 self._knowledge_tree.insert("", tk.END, values=(
                     kp.knowledge_id, kp.title, category_cn, domain_cn, keywords_str, preview
                 ))
-            
-            self._set_status(f"已加载 {len(knowledge_list)} 条知识点")
-            
+
+            total = len(knowledge_list)
+            if total > cap:
+                self._set_status(f"显示前 {cap}/{total} 条知识点（用搜索或分类筛选查看其余）")
+            else:
+                self._set_status(f"已加载 {total} 条知识点")
+
         except Exception as e:
             logger.error(f"刷新知识列表失败: {e}")
             # P2-003修复：用户友好错误提示
@@ -5892,37 +5930,37 @@ class MainWindow:
                 detail += f"{'═'*60}\n\n"
                 
                 # 元信息区
-                detail += f"📌 ID: {kp.knowledge_id}\n"
+                detail += f"ID: {kp.knowledge_id}\n"
                 # 英文转中文显示
                 category_cn = self._category_reverse_map.get(kp.category, kp.category)
                 domain_cn = self._domain_reverse_map.get(kp.domain, kp.domain)
-                detail += f"📚 题材: {category_cn}  |  领域: {domain_cn}\n"
-                detail += f"🎯 难度: {kp.difficulty or 'intermediate'}\n"
-                detail += f"🏷️ 关键词: {', '.join(kp.keywords)}\n"
+                detail += f"题材: {category_cn}  |  领域: {domain_cn}\n"
+                detail += f"难度: {kp.difficulty or 'intermediate'}\n"
+                detail += f"关键词: {', '.join(kp.keywords)}\n"
                 detail += f"{'─'*60}\n\n"
                 
                 # 核心概念解释（新增）
                 if hasattr(kp, 'explanation') and kp.explanation:
-                    detail += f"💡 核心概念\n"
+                    detail += f"【核心概念】\n"
                     detail += f"{'─'*60}\n"
                     detail += f"{kp.explanation}\n\n"
                 
                 # 详细内容区
-                detail += f"📖 详细内容\n"
+                detail += f"【详细内容】\n"
                 detail += f"{'─'*60}\n"
                 detail += f"{kp.content}\n"
                 
                 # 经典案例应用（新增）
                 if hasattr(kp, 'classic_cases') and kp.classic_cases:
                     detail += f"\n{'─'*60}\n"
-                    detail += f"🎬 经典案例应用\n"
+                    detail += f"【经典案例应用】\n"
                     detail += f"{'─'*60}\n"
                     detail += f"{kp.classic_cases}\n"
                 
                 # 示例列表
                 if hasattr(kp, 'examples') and kp.examples:
                     detail += f"\n{'─'*60}\n"
-                    detail += f"📝 作品示例\n"
+                    detail += f"【作品示例】\n"
                     detail += f"{'─'*60}\n"
                     for ex in kp.examples:
                         detail += f"  ◆ {ex}\n"
@@ -5930,7 +5968,7 @@ class MainWindow:
                 # 常见写作误区
                 if hasattr(kp, 'common_mistakes') and kp.common_mistakes:
                     detail += f"\n{'─'*60}\n"
-                    detail += f"⚠️ 常见写作误区\n"
+                    detail += f"【常见写作误区】\n"
                     detail += f"{'─'*60}\n"
                     mistakes = kp.common_mistakes if isinstance(kp.common_mistakes, list) else [kp.common_mistakes]
                     for m in mistakes:
@@ -5939,7 +5977,7 @@ class MainWindow:
                 # 参考文献
                 if hasattr(kp, 'references') and kp.references:
                     detail += f"\n{'─'*60}\n"
-                    detail += f"📚 参考文献\n"
+                    detail += f"参考文献\n"
                     detail += f"{'─'*60}\n"
                     refs = kp.references if isinstance(kp.references, list) else [kp.references]
                     for ref in refs:
@@ -6328,7 +6366,7 @@ data/知识库验证器/backups/
                     removed = result['removed_count']
                     final = result['final_count']
                     
-                    result_text.insert(tk.END, f"✅ 知识库清理完成\n\n")
+                    result_text.insert(tk.END, f"知识库清理完成\n\n")
                     result_text.insert(tk.END, f"清理结果:\n")
                     result_text.insert(tk.END, f"  原始词条: {total}条\n")
                     result_text.insert(tk.END, f"  已删除: {removed}条\n")
@@ -6789,7 +6827,7 @@ data/知识库验证器/backups/
                 report_lines.append(f"\n📝 生成详情：")
                 
                 for detail in result.details:
-                    status_icon = "✅" if detail.get("status") == "valid" else "⚠️"
+                    status_icon = "[有效]" if detail.get("status") == "valid" else "[注意]"
                     title = detail.get("title", "未知")[:30]
                     status_text = "通过" if detail.get("status") == "valid" else detail.get("reason", "未通过")
                     report_lines.append(f"  {status_icon} {title} - {status_text}")
@@ -6893,7 +6931,7 @@ data/知识库验证器/backups/
 
 """
                 for detail in res['details']:
-                    status = "✅ 通过" if detail.get("status") == "valid" else f"⚠️ {detail.get('reason', '未通过')}"
+                    status = "[通过]" if detail.get("status") == "valid" else f"[未通过] {detail.get('reason', '未通过')}"
                     report += f"- **{detail.get('title', '未知')}**：{status}\n"
                 
                 if res['knowledge_ids']:
@@ -7077,56 +7115,76 @@ data/知识库验证器/backups/
         pass
     
     def _display_version(self, index: int):
-        """显示指定版本"""
+        """显示指定版本
+
+        V2.2修复（性能+死循环）：
+        1. "⭐最佳"emoji 经 configure(text=) 设置——emoji拦截器只拦构造参数，
+           configure 首渲染 ⭐ 触发 Tk 字体回退（本机实测约7秒/字形）；
+        2. _highlight_version_in_tree 的 selection_set 触发 <<TreeviewSelect>>
+           → _on_version_tree_select → 再次 _display_version，形成重入环，
+           每圈重渲染 emoji → 界面卡死数十秒。
+        修复：emoji 改纯文字 + 重入防护。
+        """
         if not self._continue_versions or index >= len(self._continue_versions):
             return
-        
-        version = self._continue_versions[index]
-        
-        # 更新文本框
-        self._continue_result.delete("1.0", tk.END)
-        self._continue_result.insert("1.0", version.get("text", ""))
-        
-        # 更新信息栏
-        metadata = version.get("metadata", {})
-        word_count = version.get("word_count", 0)
-        gen_time = metadata.get("generation_time", 0)
-        model = metadata.get("model_name", "-")
-        
-        self._result_info_label.configure(text=f"字数：{word_count} | 耗时：{gen_time:.1f}秒 | 模型：{model}")
-        
-        # 更新评分
-        score = version.get("score", 0)
-        self._score_label.configure(text=f"评分：{score:.2f}")
-        
-        # 更新版本信息
-        total = len(self._continue_versions)
-        is_best = index == self._best_version_index
-        best_mark = " ⭐最佳" if is_best else ""
-        self._version_info_label.configure(text=f"版本 {index + 1}/{total}{best_mark}")
-        
-        # 同步高亮版本列表
-        self._highlight_version_in_tree(index)
-        
-        # 启用按钮
-        self._regenerate_btn.configure(state=tk.NORMAL)
-        self._select_best_btn.configure(state=tk.NORMAL)
-        self._save_btn.configure(state=tk.NORMAL)
+        if getattr(self, '_displaying_version', False):
+            return
+        self._displaying_version = True
+        try:
+            version = self._continue_versions[index]
+
+            # 更新文本框
+            self._continue_result.delete("1.0", tk.END)
+            self._continue_result.insert("1.0", version.get("text", ""))
+
+            # 更新信息栏
+            metadata = version.get("metadata", {})
+            word_count = version.get("word_count", 0)
+            gen_time = metadata.get("generation_time", 0)
+            model = metadata.get("model_name", "-")
+
+            self._result_info_label.configure(
+                text=f"字数：{word_count} | 耗时：{gen_time:.1f}秒 | 模型：{model}")
+
+            # 更新评分
+            score = version.get("score", 0)
+            self._score_label.configure(text=f"评分：{score:.2f}")
+
+            # 更新版本信息（勿用emoji：configure不经emoji拦截器）
+            total = len(self._continue_versions)
+            is_best = index == self._best_version_index
+            best_mark = "（最佳）" if is_best else ""
+            self._version_info_label.configure(text=f"版本 {index + 1}/{total}{best_mark}")
+
+            # 同步高亮版本列表
+            self._highlight_version_in_tree(index)
+
+            # 启用按钮
+            self._regenerate_btn.configure(state=tk.NORMAL)
+            self._select_best_btn.configure(state=tk.NORMAL)
+            self._save_btn.configure(state=tk.NORMAL)
+        finally:
+            self._displaying_version = False
     
     def _highlight_version_in_tree(self, index: int):
-        """高亮版本列表中的指定版本"""
+        """高亮版本列表中的指定版本
+
+        V2.2修复（死循环）：原实现先 selection_remove 全部再 selection_set，
+        每次选择变化都触发 <<TreeviewSelect>> → _on_version_tree_select →
+        _display_version → 再次高亮 → 无限事件乒乓，主线程被选择事件占满
+        （界面卡死数十秒，py-spy 抓获）。改为幂等：已是目标选择则不动。
+        """
         if not hasattr(self, '_version_tree'):
             return
-        
-        # 清除所有选择
-        for item in self._version_tree.get_children():
-            self._version_tree.selection_remove(item)
-        
-        # 选择指定版本
+
         children = self._version_tree.get_children()
-        if 0 <= index < len(children):
-            self._version_tree.selection_set(children[index])
-            self._version_tree.see(children[index])  # 滚动到可见区域
+        if not (0 <= index < len(children)):
+            return
+        target = children[index]
+        if self._version_tree.selection() == (target,):
+            return  # 已选中目标，避免触发新一轮选择事件
+        self._version_tree.selection_set(target)  # set 本身会替换旧选择
+        self._version_tree.see(target)  # 滚动到可见区域
     
     def _update_version_tree(self):
         """更新版本列表Treeview"""
@@ -7146,9 +7204,9 @@ data/知识库验证器/backups/
             score = version.get("score", 0)
             word_count = version.get("word_count", 0)
             
-            # 确定状态
+            # 确定状态（勿用emoji：Treeview values渲染不经emoji拦截器）
             is_best = i == self._best_version_index
-            status = "⭐最佳" if is_best else ""
+            status = "最佳" if is_best else ""
             
             # 插入到Treeview
             self._version_tree.insert("", tk.END, values=(
@@ -7584,7 +7642,7 @@ data/知识库验证器/backups/
                     result = adapter.execute(task)
                     self.root.after(0, lambda: self._on_worldview_import_complete(result))
                 except Exception as e:
-                    self.root.after(0, lambda: self._on_worldview_import_error(str(e)))
+                    self.root.after(0, lambda msg=str(e): self._on_worldview_import_error(msg))
             
             from core.thread_pool_manager import thread_pool_manager
             thread_pool_manager.submit_sync(run_parse)
@@ -7689,7 +7747,7 @@ data/知识库验证器/backups/
                     result = adapter.execute(task)
                     self.root.after(0, lambda: self._on_character_import_complete(result))
                 except Exception as e:
-                    self.root.after(0, lambda: self._on_character_import_error(str(e)))
+                    self.root.after(0, lambda msg=str(e): self._on_character_import_error(msg))
             
             from core.thread_pool_manager import thread_pool_manager
             thread_pool_manager.submit_sync(run_parse)
@@ -8510,7 +8568,7 @@ data/知识库验证器/backups/
                 return
             
             # 添加根节点到大纲树
-            root_node = self._outline_tree.insert("", tk.END, text=f"📖 {name}", open=True)
+            root_node = self._outline_tree.insert("", tk.END, text=f"{name}", open=True)
             self._outline_tree.insert(root_node, tk.END, text="第一卷")
             self._outline_tree.insert(root_node, tk.END, text="第二卷")
             
@@ -8522,8 +8580,61 @@ data/知识库验证器/backups/
         ttk.Button(btn_frame, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
     
     def _on_outline_export(self):
-        """导出大纲"""
-        self._set_status("导出大纲功能开发中...")
+        """导出大纲（V2.2实现：原为『开发中』占位按钮）
+
+        按扩展名导出：.json=结构化章节数据（可再导入），.txt=可读文本。
+        """
+        chapters = getattr(self, '_outline_chapters_data', []) or []
+        outline_text = getattr(self, '_outline_content', '') or ''
+        if not chapters and not outline_text:
+            messagebox.showwarning("提示", "没有可导出的大纲，请先导入或新建大纲")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            initialfile="大纲导出.txt",
+            filetypes=[("文本文件", "*.txt"), ("JSON文件", "*.json"), ("所有文件", "*.*")],
+            title="导出大纲",
+        )
+        if not file_path:
+            return
+        try:
+            if file_path.lower().endswith('.json'):
+                payload = {
+                    "outline_content": outline_text,
+                    "chapters": chapters,
+                    "chapter_outlines": getattr(self, '_chapter_outlines', {}) or {},
+                }
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+            else:
+                lines = []
+                if outline_text:
+                    lines.append("===== 总纲 =====")
+                    lines.append(outline_text)
+                    lines.append("")
+                if chapters:
+                    lines.append("===== 分章大纲 =====")
+                    for ch in chapters:
+                        if not isinstance(ch, dict):
+                            continue
+                        num = ch.get('chapter_number', '')
+                        title = ch.get('title', '')
+                        lines.append(f"\n第{num}章 {title}")
+                        if ch.get('summary'):
+                            lines.append(f"  摘要：{ch['summary']}")
+                        for point in (ch.get('plot_points') or []):
+                            lines.append(f"  - {point}")
+                        if ch.get('characters'):
+                            lines.append(f"  出场：{', '.join(map(str, ch['characters']))}")
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(lines))
+            self._set_status(f"已导出大纲：{os.path.basename(file_path)}")
+            messagebox.showinfo("成功", f"已导出：{file_path}")
+        except Exception as e:
+            from core.user_friendly_errors import convert_file_error
+            title, full_message = convert_file_error(e, "导出大纲")
+            messagebox.showerror(title, full_message)
     
     def _on_outline_add_volume(self):
         """添加卷 - 支持选择已有章节组成卷"""
@@ -9357,7 +9468,7 @@ data/知识库验证器/backups/
                     result = agent.execute(task_id, payload)
                     self.root.after(0, lambda: self._on_outline_parse_complete(result))
                 except Exception as e:
-                    self.root.after(0, lambda: self._on_outline_parse_error(str(e)))
+                    self.root.after(0, lambda msg=str(e): self._on_outline_parse_error(msg))
             
             from core.thread_pool_manager import thread_pool_manager
             thread_pool_manager.submit_sync(run_parse)
@@ -10757,7 +10868,7 @@ data/知识库验证器/backups/
                     )
                 except Exception as e:
                     self._async_helper.call_on_main_thread(
-                        lambda: self._on_generation_error(e)
+                        lambda err=e: self._on_generation_error(err)
                     )
             
             # V1.49.19修复：使用submit_sync替代submit
@@ -11104,9 +11215,9 @@ data/知识库验证器/backups/
                         passed = stats.get("passed", weighted_total >= 0.8)
                         self._gen_log.insert(tk.END, f"  加权总分: {weighted_total:.2f}\n")
                         if passed:
-                            self._gen_log.insert(tk.END, "  ✅ 达标（≥0.8且含【本章完】）\n")
+                            self._gen_log.insert(tk.END, "  [达标]（≥0.8且含【本章完】）\n")
                         else:
-                            self._gen_log.insert(tk.END, "  ⚠️ 未达标（<0.8或缺少【本章完】）\n")
+                            self._gen_log.insert(tk.END, "  [未达标]（<0.8或缺少【本章完】）\n")
                     else:
                         final_score = stats.get("final_score", 0.0) if isinstance(stats, dict) else 0.0
                         if final_score > 0:
@@ -11315,13 +11426,76 @@ data/知识库验证器/backups/
         if hasattr(self, '_generated_content') and self._generated_content:
             self.current_project['generated_content'] = self._generated_content
     
+    def _get_gen_result_for_export(self) -> str:
+        """获取生成结果文本（导出用，V2.2新增）"""
+        widget = getattr(self, '_gen_result', None)
+        if widget is None:
+            return ""
+        return widget.get("1.0", tk.END).strip()
+
     def _on_gen_export_txt(self):
-        """导出TXT"""
-        self._set_status("导出TXT功能开发中...")
-    
+        """导出生成结果为TXT（V2.2实现：原为『开发中』占位按钮）"""
+        content = self._get_gen_result_for_export()
+        if not content:
+            messagebox.showwarning("提示", "没有可导出的生成内容，请先生成章节")
+            return
+        try:
+            chapter_no = self._start_chapter_var.get()
+        except Exception:
+            chapter_no = ""
+        default_name = f"第{chapter_no}章.txt" if chapter_no else "生成章节.txt"
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            initialfile=default_name,
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+            title="导出生成结果为TXT",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            self._set_status(f"已导出TXT：{os.path.basename(file_path)}")
+            messagebox.showinfo("成功", f"已导出：{file_path}")
+        except Exception as e:
+            from core.user_friendly_errors import convert_file_error
+            title, full_message = convert_file_error(e, "导出TXT")
+            messagebox.showerror(title, full_message)
+
     def _on_gen_export_docx(self):
-        """导出DOCX"""
-        self._set_status("导出DOCX功能开发中...")
+        """导出生成结果为DOCX（V2.2实现：原为『开发中』占位按钮）"""
+        content = self._get_gen_result_for_export()
+        if not content:
+            messagebox.showwarning("提示", "没有可导出的生成内容，请先生成章节")
+            return
+        try:
+            chapter_no = self._start_chapter_var.get()
+        except Exception:
+            chapter_no = ""
+        default_name = f"第{chapter_no}章.docx" if chapter_no else "生成章节.docx"
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".docx",
+            initialfile=default_name,
+            filetypes=[("Word文档", "*.docx"), ("所有文件", "*.*")],
+            title="导出生成结果为DOCX",
+        )
+        if not file_path:
+            return
+        try:
+            from docx import Document
+            doc = Document()
+            if chapter_no:
+                doc.add_heading(f"第{chapter_no}章", level=1)
+            for para in content.split('\n'):
+                if para.strip():
+                    doc.add_paragraph(para)
+            doc.save(file_path)
+            self._set_status(f"已导出DOCX：{os.path.basename(file_path)}")
+            messagebox.showinfo("成功", f"已导出：{file_path}")
+        except Exception as e:
+            from core.user_friendly_errors import convert_file_error
+            title, full_message = convert_file_error(e, "导出DOCX")
+            messagebox.showerror(title, full_message)
     
     def _on_reverse_browse(self):
         """浏览逆向分析文件（已弃用，保留兼容）"""
@@ -11743,9 +11917,9 @@ data/知识库验证器/backups/
         
         # 优先级映射
         severity_map = {
-            'high': '🔴 高',
-            'medium': '🟡 中',
-            'low': '🟢 低',
+            'high': '高',
+            'medium': '中',
+            'low': '低',
         }
         
         for issue in issues:
@@ -11889,22 +12063,60 @@ data/知识库验证器/backups/
         self._set_status("修正已应用")
     
     def _apply_corrections_to_project(self, corrections: Dict):
-        """将修正应用到项目设定"""
+        """将修正应用到项目设定（V2.2修复：真正落地）
+
+        修复前：只改两个内存字段（丢掉世界观修正）、"刷新"只改状态栏文字——
+        修正既不进项目管理器也不进 current_project、界面不刷新、保存不生效，
+        逆向反馈的核心价值（分析结果反哺设定）形同虚设。
+        """
+        applied = []
+
         # 更新大纲
         if corrections.get('updated_outline'):
             self._outline_content = corrections['updated_outline']
-        
+            self.current_project['outline'] = self._outline_content
+            applied.append('outline')
+
         # 更新人物
         if corrections.get('updated_characters'):
             self._character_data = corrections['updated_characters']
-        
-        # 刷新项目管理器
-        self._refresh_project_manager()
-    
-    def _refresh_project_manager(self):
-        """刷新项目管理器"""
-        # 切换到项目管理页面更新显示
-        self._set_status("项目设定已更新")
+            self.current_project['characters'] = self._character_data
+            applied.append('characters')
+
+        # 更新世界观（修复前被整个丢弃）
+        if corrections.get('updated_worldview'):
+            self._worldview_content = corrections['updated_worldview']
+            self.current_project['worldview'] = self._worldview_content
+            applied.append('worldview')
+
+        self._refresh_project_manager(applied)
+
+    def _refresh_project_manager(self, applied_modules: Optional[List[str]] = None):
+        """把已应用的修正同步到项目管理器并刷新相关界面（V2.2修复）"""
+        applied_modules = applied_modules or []
+
+        # 1. 同步到项目管理器（保存项目时才能真正持久化）
+        try:
+            pm = getattr(self, '_project_manager', None)
+            if pm and pm.is_project_open():
+                for module in applied_modules:
+                    pm.sync_module_data(module, self.current_project.get(module))
+        except Exception as e:
+            logger.error(f"修正同步到项目管理器失败: {e}")
+
+        # 2. 刷新受影响板块的界面显示
+        try:
+            if 'worldview' in applied_modules and hasattr(self, '_update_worldview_tree_from_content'):
+                self._update_worldview_tree_from_content(self.current_project.get('worldview'))
+            if 'characters' in applied_modules and hasattr(self, '_update_character_tree'):
+                self._update_character_tree()
+        except Exception as e:
+            logger.warning(f"修正后界面刷新失败（数据已更新）: {e}")
+
+        if applied_modules:
+            self._set_status(f"项目设定已更新：{', '.join(applied_modules)}（记得保存项目）")
+        else:
+            self._set_status("没有需要应用的修正")
     
     def _on_reverse_export_report(self):
         """导出分析报告"""
@@ -12007,7 +12219,7 @@ data/知识库验证器/backups/
         if not hasattr(self, '_quick_creator_plugin') or not self._quick_creator_plugin:
             self._load_quick_creator_plugin()
             if not self._quick_creator_plugin:
-                messagebox.showerror("错误", "快捷创作插件未加载，请先配置AI服务")
+                messagebox.showerror("错误", "快捷创作插件加载失败，请通过日志查看原因（与API配置无关）")
                 return
         
         # 获取关键词
@@ -12051,23 +12263,32 @@ data/知识库验证器/backups/
                 result = self._quick_creator_plugin.generate_all(request)
                 
                 # 更新UI
+                # V2.2修复：Result模型没有 .content 字段（世界观/大纲/情节用
+                # get_full_text() 格式化，人物是 List[CharacterResult]）——
+                # 旧代码四个显示回调全部 AttributeError 被吞，生成成功但界面空白。
                 if result.success:
                     # 世界观
                     if result.worldview:
-                        self.root.after(0, lambda: self._update_quick_result("worldview", result.worldview.content))
-                    
+                        wv_text = result.worldview.get_full_text()
+                        self.root.after(0, lambda t=wv_text: self._update_quick_result("worldview", t))
+
                     # 大纲
                     if result.outline:
-                        self.root.after(0, lambda: self._update_quick_result("outline", result.outline.content))
-                    
-                    # 人设
+                        ol_text = result.outline.get_full_text()
+                        self.root.after(0, lambda t=ol_text: self._update_quick_result("outline", t))
+
+                    # 人设（列表：逐个格式化拼接）
                     if result.characters:
-                        self.root.after(0, lambda: self._update_quick_result("characters", result.characters.content))
-                    
+                        ch_text = "\n\n".join(
+                            c.get_full_text() for c in result.characters
+                        )
+                        self.root.after(0, lambda t=ch_text: self._update_quick_result("characters", t))
+
                     # 情节
                     if result.plot:
-                        self.root.after(0, lambda: self._update_quick_result("plot", result.plot.content))
-                    
+                        pl_text = result.plot.get_full_text()
+                        self.root.after(0, lambda t=pl_text: self._update_quick_result("plot", t))
+
                     self.root.after(0, lambda: self._set_status("生成完成"))
                 else:
                     self.root.after(0, lambda: messagebox.showerror("错误", f"生成失败：{result.error}"))
@@ -12128,45 +12349,50 @@ data/知识库验证器/backups/
         self._set_status(f"正在生成{type_names.get(gen_type, '')}...")
         
         # 在后台线程执行
+        # V2.2修复：旧代码传不存在的 detail_level 参数（四个方法签名里都没有）
+        # → 单项生成必抛 TypeError；且显示用 .content（模型无此字段）→ 界面空白。
+        # 改为按各方法真实签名调用 + get_full_text() 格式化显示。
         def generate_task():
             try:
-                # 根据类型调用对应的生成方法
+                kw_list = [k for k in keywords.split() if k.strip()]
                 if gen_type == "worldview":
                     result = self._quick_creator_plugin.generate_worldview(
-                        keywords=keywords,
-                        detail_level=detail,
+                        keywords=kw_list,
                         reference_text="\n\n".join(reference_texts.get("worldview", []))
                     )
-                    if result.success:
-                        self.root.after(0, lambda: self._update_quick_result("worldview", result.content))
-                
+                    if result:
+                        text = result.get_full_text()
+                        self.root.after(0, lambda t=text: self._update_quick_result("worldview", t))
+
                 elif gen_type == "outline":
                     result = self._quick_creator_plugin.generate_outline(
-                        keywords=keywords,
-                        detail_level=detail,
+                        theme=keywords,
                         reference_text="\n\n".join(reference_texts.get("outline", []))
                     )
-                    if result.success:
-                        self.root.after(0, lambda: self._update_quick_result("outline", result.content))
-                
+                    if result:
+                        text = result.get_full_text()
+                        self.root.after(0, lambda t=text: self._update_quick_result("outline", t))
+
                 elif gen_type == "characters":
                     result = self._quick_creator_plugin.generate_character(
-                        keywords=keywords,
-                        detail_level=detail,
+                        character_name="主角",
+                        role="主角",
+                        personality_keywords=kw_list,
                         reference_text="\n\n".join(reference_texts.get("characters", []))
                     )
-                    if result.success:
-                        self.root.after(0, lambda: self._update_quick_result("characters", result.content))
-                
+                    if result:
+                        text = result.get_full_text()
+                        self.root.after(0, lambda t=text: self._update_quick_result("characters", t))
+
                 elif gen_type == "plot":
                     result = self._quick_creator_plugin.generate_plot(
-                        keywords=keywords,
-                        detail_level=detail,
+                        outline_summary=keywords,
                         reference_text="\n\n".join(reference_texts.get("plot", []))
                     )
-                    if result.success:
-                        self.root.after(0, lambda: self._update_quick_result("plot", result.content))
-                
+                    if result:
+                        text = result.get_full_text()
+                        self.root.after(0, lambda t=text: self._update_quick_result("plot", t))
+
                 self.root.after(0, lambda: self._set_status(f"{type_names.get(gen_type, '')}生成完成"))
                 
             except Exception as e:
@@ -12556,7 +12782,7 @@ data/知识库验证器/backups/
         """开始续写"""
         # 检查插件
         if not hasattr(self, '_continuation_plugin') or not self._continuation_plugin:
-            messagebox.showerror("错误", "续写插件未加载，请先配置AI服务")
+            messagebox.showerror("错误", "续写插件加载失败，请通过日志查看原因（与API配置无关）")
             return
         
         # 获取原文
@@ -12724,11 +12950,20 @@ data/知识库验证器/backups/
                     )
                     
                     result = self._continuation_plugin.generate_continuation(request)
-                    
+
                     if result.success:
                         # 计算评分
-                        scores = self._continuation_plugin._evaluate_version(result, request)
-                        
+                        # V2.2修复：旧代码调用不存在的私有方法 _evaluate_version
+                        # → 单版本续写生成成功后必抛 AttributeError（结果被丢弃）。
+                        # 改用公共接口 select_best_version（单版本同样返回评分详情）。
+                        try:
+                            _, _, score_detail = self._continuation_plugin.select_best_version(
+                                [result], request)
+                            scores = (score_detail.get("scores") or [{}])[0]
+                        except Exception as se:
+                            logger.warning(f"续写评分失败（不影响结果显示）: {se}")
+                            scores = {}
+
                         version_data = {
                             "text": result.text,
                             "word_count": result.word_count,
@@ -14208,9 +14443,21 @@ data/知识库验证器/backups/
             pass
 
     def _set_status(self, message: str) -> None:
-        """设置状态栏消息"""
-        if self._status_var:
+        """设置状态栏消息（V2.2修复：线程安全）
+
+        多个后台任务（续写/快捷/知识库等）在工作线程直接调本方法，
+        跨线程写 Tk 变量属未定义行为。统一在此路由：非主线程时经
+        root.after 调度回主线程，所有调用点无需改动。
+        """
+        if not self._status_var:
+            return
+        if threading.current_thread() is threading.main_thread():
             self._status_var.set(message)
+        else:
+            try:
+                self.root.after(0, lambda m=message: self._status_var.set(m))
+            except Exception:
+                pass  # 窗口销毁间隙的状态消息可安全丢弃
     
     def _get_character_manager(self) -> Any:
         """获取或创建人物管理器适配器（延迟初始化）"""
@@ -14313,7 +14560,7 @@ data/知识库验证器/backups/
         return {
             'sites': [
                 {
-                    'name': '📚 起点中文网',
+                    'name': '起点中文网',
                     'color': '#457B9D',
                     'books': [
                         {'title': '诡秘之主', 'author': '爱潜水的乌贼', 'category': '玄幻', 'heat': 150000},
@@ -14536,7 +14783,7 @@ data/知识库验证器/backups/
                 data = plugin_info["data"]
                 is_protected = plugin_info["is_protected"]
                 
-                protected_text = "🔒" if is_protected else ""
+                protected_text = "[保护]" if is_protected else ""
                 type_text = type_map.get(data.get("plugin_type", "tool").lower(), data.get("plugin_type", "工具"))
                 
                 # V1.49.22：优先使用真实状态
@@ -14663,7 +14910,7 @@ data/知识库验证器/backups/
                     is_protected = plugin_id in protected_modules
                     
                     type_text = type_map.get(metadata.plugin_type.lower(), metadata.plugin_type)
-                    protected_text = "🔒" if is_protected else ""
+                    protected_text = "[保护]" if is_protected else ""
                     state_text = state_map.get(plugin_info.state, plugin_info.state)
                     
                     item_id = self._plugin_tree.insert(
@@ -14730,7 +14977,7 @@ data/知识库验证器/backups/
                             data = json.load(f)
                         
                         is_protected = plugin_name in protected_modules
-                        protected_text = "🔒" if is_protected else ""
+                        protected_text = "[保护]" if is_protected else ""
                         type_text = type_map.get(data.get("plugin_type", "tool").lower(), data.get("plugin_type", "工具"))
                         status_text = "已启用" if data.get("enabled", True) else "已禁用"
                         
@@ -14859,7 +15106,7 @@ data/知识库验证器/backups/
                     "protocol": "协议"
                 }
                 type_text = type_map.get(metadata.plugin_type.lower(), metadata.plugin_type)
-                protected_text = "🔒" if is_protected else ""
+                protected_text = "[保护]" if is_protected else ""
                 
                 # 状态映射
                 state_map = {
@@ -14925,7 +15172,7 @@ data/知识库验证器/backups/
                             data = json.load(f)
                         
                         is_protected = plugin_name in protected_modules
-                        protected_text = "🔒" if is_protected else ""
+                        protected_text = "[保护]" if is_protected else ""
                         
                         # 类型映射
                         type_map = {
@@ -15278,7 +15525,12 @@ data/知识库验证器/backups/
         规则：去掉 emoji 后——
         - 仍有可见文字（如"📁 上传文件"→"上传文件"）→ 用去emoji后的文字（消除渲染开销）；
         - 变成空（纯图标按钮如关闭✕、显示密钥👁）→ 保持原样，避免按钮变空白。
-        只patch构造函数的 text 关键字参数；不影响 StringVar 动态文本（状态栏✅❌单个出现、开销小）。
+
+        V2.2扩展：仅拦构造参数不够——实测三类**动态路径**同样触发字体回退
+        （首个新emoji字形~7秒，py-spy抓获续写显示卡死案例）：
+        configure(text=)、StringVar.set、Treeview.insert values。现一并拦截。
+        Text.insert 不拦（可能承载正文/用户数据，剥离会污染导出内容）——
+        正文路径的 app 级 emoji 已逐处改纯文字。
         """
         if cls._emoji_patch_installed:
             return
@@ -15296,13 +15548,74 @@ data/知识库验证器/backups/
                     return orig_init(self, *args, **kwargs)
                 return patched
 
+            def _make_configure(orig_configure):
+                def patched(self, cnf=None, **kwargs):
+                    t = kwargs.get("text")
+                    if isinstance(t, str) and t:
+                        s = cls._strip_emoji(t)
+                        if s and s != t:
+                            kwargs["text"] = s
+                    if isinstance(cnf, dict) and isinstance(cnf.get("text"), str):
+                        s = cls._strip_emoji(cnf["text"])
+                        if s and s != cnf["text"]:
+                            cnf = dict(cnf)
+                            cnf["text"] = s
+                    if cnf is not None:
+                        return orig_configure(self, cnf, **kwargs)
+                    return orig_configure(self, **kwargs)
+                return patched
+
             for widget_cls in (_tk.Label, _tk.Button, _ttk.Label, _ttk.Button,
                                _ttk.Checkbutton, _ttk.Radiobutton, _ttk.LabelFrame):
                 if not getattr(widget_cls, "_emoji_text_patched", False):
                     widget_cls.__init__ = _make(widget_cls.__init__)
+                    widget_cls.configure = _make_configure(widget_cls.configure)
+                    widget_cls.config = widget_cls.configure
                     widget_cls._emoji_text_patched = True
+
+            # StringVar.set：状态栏/进度标题等动态文本（用户键盘输入不经set，无影响）
+            if not getattr(_tk.StringVar, "_emoji_text_patched", False):
+                _orig_set = _tk.StringVar.set
+
+                def _patched_set(self, value):
+                    if isinstance(value, str) and value:
+                        s = cls._strip_emoji(value)
+                        if s and s != value:
+                            value = s
+                    return _orig_set(self, value)
+                _tk.StringVar.set = _patched_set
+                _tk.StringVar._emoji_text_patched = True
+
+            # Treeview.insert：values/text 均为展示数据
+            if not getattr(_ttk.Treeview, "_emoji_text_patched", False):
+                _orig_tv_insert = _ttk.Treeview.insert
+
+                def _patched_tv_insert(self, parent, index, iid=None, **kw):
+                    vals = kw.get("values")
+                    if vals:
+                        new_vals = []
+                        changed = False
+                        for v in vals:
+                            if isinstance(v, str) and v:
+                                s = cls._strip_emoji(v)
+                                if s != v and s:
+                                    new_vals.append(s)
+                                    changed = True
+                                    continue
+                            new_vals.append(v)
+                        if changed:
+                            kw["values"] = tuple(new_vals)
+                    t = kw.get("text")
+                    if isinstance(t, str) and t:
+                        s = cls._strip_emoji(t)
+                        if s and s != t:
+                            kw["text"] = s
+                    return _orig_tv_insert(self, parent, index, iid=iid, **kw)
+                _ttk.Treeview.insert = _patched_tv_insert
+                _ttk.Treeview._emoji_text_patched = True
+
             cls._emoji_patch_installed = True
-            logger.info("[emoji拦截] 已安装文本emoji剥离拦截器")
+            logger.info("[emoji拦截] 已安装（构造+configure+StringVar+Treeview动态路径）")
         except Exception as e:
             logger.warning(f"[emoji拦截] 安装失败（不影响功能）: {e}")
 
@@ -17092,16 +17405,16 @@ data/知识库验证器/backups/
                 
                 # 优先级映射
                 severity_map = {
-                    'high': '🔴 高',
-                    'medium': '🟡 中',
-                    'low': '🟢 低',
+                    'high': '高',
+                    'medium': '中',
+                    'low': '低',
                 }
                 
                 for report in reports:
                     issues = report.get('issues', [])
                     for issue in issues:
                         issue_type = type_map.get(issue.get('type', 'outline'), '其他')
-                        severity = severity_map.get(issue.get('severity', 'medium'), '🟡 中')
+                        severity = severity_map.get(issue.get('severity', 'medium'), '中')
                         element = issue.get('element', '未知')
                         description = issue.get('description', '')[:50]  # 截取前50字符
                         
@@ -18264,12 +18577,12 @@ ID: {plugin_id}
                 self._memory_update_label.config(text="-")
             
             # 更新总体状态
-            self._memory_status_label.config(text="✅ 所有记忆层级已加载")
+            self._memory_status_label.config(text="所有记忆层级已加载")
             self._set_status("记忆状态已刷新")
             
         except Exception as e:
             logger.error(f"刷新记忆状态失败: {e}")
-            self._memory_status_label.config(text=f"❌ 加载失败: {str(e)[:30]}")
+            self._memory_status_label.config(text=f"加载失败: {str(e)[:30]}")
     
     def _on_view_session_state(self):
         """查看当前会话状态"""
@@ -19067,7 +19380,7 @@ ID: {plugin_id}
         def update():
             stage = event.data.get("stage", "Unknown")
             success = event.data.get("success", False)
-            status = "✅" if success else "❌"
+            status = "[OK]" if success else "[失败]"
             self._gen_log_insert(f"[{self._timestamp()}] {status} 阶段完成: {stage}\n")
         
         self._safe_after(0, update)
@@ -19085,7 +19398,7 @@ ID: {plugin_id}
         """流水线完成事件"""
         def update():
             success = event.data.get("success", False)
-            status = "✅ 成功" if success else "❌ 失败"
+            status = "[成功]" if success else "[失败]"
             self._gen_log_insert(f"[{self._timestamp()}] 🏁 流水线{status}\n")
         
         self._safe_after(0, update)
@@ -19098,7 +19411,7 @@ ID: {plugin_id}
             self._gen_log_insert(f"[{self._timestamp()}] 🤖 Agent启动: {agent_name}\n")
             # 更新Agent状态树
             if hasattr(self, '_gen_agent_tree') and self._gen_agent_tree:
-                self._gen_agent_tree.insert("", tk.END, iid=task_id or agent_name, values=("🔄 运行中", agent_name))
+                self._gen_agent_tree.insert("", tk.END, iid=task_id or agent_name, values=("运行中", agent_name))
         
         self._safe_after(0, update)
     
@@ -19108,7 +19421,7 @@ ID: {plugin_id}
             agent_name = event.data.get("agent", "Unknown")
             success = event.data.get("success", False)
             task_id = event.data.get("task_id", "")
-            status = "✅" if success else "❌"
+            status = "[OK]" if success else "[失败]"
             self._gen_log_insert(f"[{self._timestamp()}] {status} Agent完成: {agent_name}\n")
             # 更新Agent状态树
             if hasattr(self, '_gen_agent_tree') and self._gen_agent_tree:
