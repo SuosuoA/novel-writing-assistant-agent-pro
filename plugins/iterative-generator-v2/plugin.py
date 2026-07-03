@@ -415,6 +415,11 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             # === 步骤3: 接受返回文章 ===
             logger.info(f"[V2] 接收到返回内容，长度: {len(generated_content)} 字符")
 
+            # V2.15：真实补完——若返回内容在句中截断或缺【本章完】，追加一次
+            # 无缝续写请求把章节真正写完（而非裁剪或贴标记假装完整），
+            # 保证进入评分的是实际完整的章节。
+            generated_content = self._ensure_complete_ending(generated_content, strategy)
+
             # === 步骤4: 从多维度评分 ===
             total_score, dimension_scores, suggestions = self._evaluate_content(
                 generated_content, validation_fn
@@ -595,6 +600,66 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
 
         return final_prompt
 
+    def _ensure_complete_ending(
+        self,
+        content: str,
+        strategy: GenerationStrategy
+    ) -> str:
+        """V2.15：确保章节以真实完整的结尾收束
+
+        触发条件：末尾在句中截断（不以终止标点收束）或缺【本章完】标记。
+        处理方式：向模型追加一次"无缝续写至自然收束"的真实生成请求，
+        把章节写完——绝不以裁剪或直接贴【本章完】假装完整。
+        仅当补完请求本身失败时，才退回原文并打警告（由评分环节判罚）。
+        """
+        TERMINAL = ('。', '！', '？', '…', '”', '』', '】', '"', '）', ')')
+        body = (content or "").rstrip()
+        if not body:
+            return content
+
+        marker = '【本章完】'
+        if body.endswith(marker):
+            inner = body[:-len(marker)].rstrip()
+            if not inner or inner.endswith(TERMINAL):
+                return content  # 真完整，无需处理
+            # 标记盖在悬句上：摘掉标记，走补完
+            body = inner
+            logger.warning("[V2] 检测到【本章完】盖在截断句上，转真实补完")
+
+        tail = body[-1200:]
+        cont_prompt = (
+            "以下是一段小说章节的末尾，在句中被截断或缺少结尾：\n\n"
+            f"{tail}\n\n"
+            "请从上文最后一个字之后无缝续写，用不超过500字把当前场景自然收束为"
+            "完整的章节结尾。只输出新增的续写文字，不要重复上文的任何句子，"
+            "最后一行必须是【本章完】。"
+        )
+        try:
+            completion = self._send_request_to_model(cont_prompt, strategy).strip()
+        except Exception as e:
+            logger.warning(f"[V2] 截断补完请求失败，保留原文交由评分判罚: {e}")
+            return content
+
+        if completion:
+            # 模型偶尔复述末尾：做一次首尾重叠裁剪
+            overlap = 0
+            for k in range(min(len(completion), 200), 10, -1):
+                if body.endswith(completion[:k]):
+                    overlap = k
+                    break
+            completion = completion[overlap:].lstrip()
+            body = body + "\n\n" + completion
+            logger.info(f"[V2] 截断补完成功，新增{len(completion)}字")
+
+        if marker not in body:
+            # 补完仍未给标记：再判一次末句完整性后追加（此时正文已真实收束）
+            if body.rstrip().endswith(TERMINAL):
+                body = body.rstrip() + "\n\n" + marker
+            else:
+                logger.warning("[V2] 补完后仍不完整，保留原样交由评分判罚")
+                return content
+        return body
+
     def _send_request_to_model(
         self,
         prompt: str,
@@ -621,7 +686,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         base_tokens = int(self.target_word_count / 1.0)  # 基础内容token数（保守1字/token）
         max_tokens = int(base_tokens * 2.0)  # 留出100%空间确保能写完【本章完】
         max_tokens = max(max_tokens, 1000)  # 最小1000 tokens
-        max_tokens = min(max_tokens, 8192)  # 最大8192 tokens（DeepSeek输出上限）
+        max_tokens = min(max_tokens, 64000)  # V2.15：对齐provider注册表 deepseek-v4系=64000
 
         # 根据策略设置温度
         temperature_map = {

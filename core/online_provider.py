@@ -345,10 +345,22 @@ class OnlineProvider(AIProvider):
             )
         
         # 使用默认配置或传入配置
-        gen_config = config or GenerationConfig(
-            temperature=self._temperature,
-            max_tokens=self._model_config.get("max_tokens", 4096)
-        )
+        # V2.15修复：调用方以 kwargs 传入的 max_tokens/temperature 此前被静默
+        # 丢弃（负数都能通过）——生成链路的token预算从未真正生效。现合并进
+        # 配置；max_tokens 统一按模型注册表上限钳制（无效值回退模型默认）。
+        _model_max = self._model_config.get("max_tokens", 4096)
+        if config is None:
+            _kw_mt = kwargs.pop("max_tokens", None)
+            _mt = min(_kw_mt, _model_max) if isinstance(_kw_mt, int) and _kw_mt > 0 else _model_max
+            gen_config = GenerationConfig(
+                temperature=kwargs.pop("temperature", self._temperature),
+                max_tokens=_mt
+            )
+        elif getattr(config, "max_tokens", 0) and config.max_tokens > _model_max:
+            from dataclasses import replace as _dc_replace
+            gen_config = _dc_replace(config, max_tokens=_model_max)
+        else:
+            gen_config = config
         
         # 重试循环
         last_error = None
@@ -504,10 +516,22 @@ class OnlineProvider(AIProvider):
             )
         
         # 使用默认配置或传入配置
-        gen_config = config or GenerationConfig(
-            temperature=self._temperature,
-            max_tokens=self._model_config.get("max_tokens", 4096)
-        )
+        # V2.15修复：调用方以 kwargs 传入的 max_tokens/temperature 此前被静默
+        # 丢弃（负数都能通过）——生成链路的token预算从未真正生效。现合并进
+        # 配置；max_tokens 统一按模型注册表上限钳制（无效值回退模型默认）。
+        _model_max = self._model_config.get("max_tokens", 4096)
+        if config is None:
+            _kw_mt = kwargs.pop("max_tokens", None)
+            _mt = min(_kw_mt, _model_max) if isinstance(_kw_mt, int) and _kw_mt > 0 else _model_max
+            gen_config = GenerationConfig(
+                temperature=kwargs.pop("temperature", self._temperature),
+                max_tokens=_mt
+            )
+        elif getattr(config, "max_tokens", 0) and config.max_tokens > _model_max:
+            from dataclasses import replace as _dc_replace
+            gen_config = _dc_replace(config, max_tokens=_model_max)
+        else:
+            gen_config = config
         
         # 构造消息
         messages = self._build_messages(prompt, **kwargs)

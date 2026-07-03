@@ -864,7 +864,7 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
     # =========================================================================
     
     DEFAULT_TIMEOUT = 120           # 默认超时时间（秒）
-    MAX_TOKENS_LIMIT = 8192         # 最大token限制（V2.14：DeepSeek输出上限8k，4096会截断3500字以上章节）
+    MAX_TOKENS_LIMIT = 64000        # 最大token限制（V2.15：对齐provider注册表 deepseek-v4-pro/flash=64000）
     MAX_VERSIONS = 5                # 最大版本数
     MAX_RETRIES = 3                 # 最大重试次数
     DEFAULT_TEMPERATURE = 0.8       # 默认温度
@@ -1228,7 +1228,11 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
                 max_tokens=max_tokens,
                 temperature=temperature
             )
-            
+
+            # V2.15：真实补完——截断/悬句时追加无缝续写请求把内容真正写完，
+            # 不以裁剪或贴标记假装完整
+            generated_text = self._ensure_complete_ending(generated_text, temperature)
+
             # 5. 后处理
             processed_text = self._post_process(generated_text, request)
             
@@ -2094,6 +2098,54 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
     # 辅助方法
     # =========================================================================
     
+    def _ensure_complete_ending(self, content: str, temperature: float) -> str:
+        """V2.15：确保续写内容以真实完整的句子收束
+
+        末尾在句中截断时，向模型追加一次"无缝续写至自然收束"的真实生成，
+        绝不裁剪或贴标记假装完整。补完失败则退回原文打警告。
+        （续写内容的【本章完】标记由保存链路按完成态规范处理，本方法
+        只负责“正文真实完整”。）
+        """
+        TERMINAL = ('。', '！', '？', '…', '”', '』', '】', '"', '）', ')')
+        body = (content or "").rstrip()
+        if not body:
+            return content
+        inner = body[:-len('【本章完】')].rstrip() if body.endswith('【本章完】') else body
+        if inner.endswith(TERMINAL):
+            return content  # 真完整
+
+        if body.endswith('【本章完】'):
+            if self._logger:
+                self._logger.warning("[ContinuationGenerator] 标记盖在截断句上，转真实补完")
+            body = inner
+
+        tail = body[-1200:]
+        cont_prompt = (
+            "以下是一段小说续写内容的末尾，在句中被截断：\n\n"
+            f"{tail}\n\n"
+            "请从上文最后一个字之后无缝续写，用不超过300字把当前场景自然收束。"
+            "只输出新增的续写文字，不要重复上文的任何句子。"
+        )
+        try:
+            completion = self._call_llm_api(
+                prompt=cont_prompt, max_tokens=2000, temperature=temperature).strip()
+        except Exception as e:
+            if self._logger:
+                self._logger.warning(f"[ContinuationGenerator] 截断补完失败，保留原文: {e}")
+            return content
+
+        if completion:
+            overlap = 0
+            for k in range(min(len(completion), 200), 10, -1):
+                if body.endswith(completion[:k]):
+                    overlap = k
+                    break
+            completion = completion[overlap:].lstrip()
+            body = body + "\n\n" + completion
+            if self._logger:
+                self._logger.info(f"[ContinuationGenerator] 截断补完成功，新增{len(completion)}字")
+        return body
+
     def _calculate_max_tokens(self, word_count: int) -> int:
         """
         计算max_tokens参数
@@ -2107,7 +2159,7 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
             max_tokens值
         """
         base_tokens = int(word_count / self.TOKEN_RATIO)
-        max_tokens = int(base_tokens * 1.3)  # 预留30%空间
+        max_tokens = int(base_tokens * 2.0)  # V2.15：预留100%空间（64K上限下宽松预算无额外成本）
         max_tokens = max(max_tokens, self.MIN_TOKENS)
         max_tokens = min(max_tokens, self.MAX_TOKENS_LIMIT)
         return max_tokens
