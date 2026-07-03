@@ -177,11 +177,34 @@ class ConsistencyCheckerAgent:
         return self._event_bus
     
     def _get_llm_client(self):
-        """延迟加载LLM客户端"""
+        """延迟加载LLM客户端
+
+        V2.7修复：原导入不存在的 services.llm_client_with_resilience.get_llm_client
+        → 客户端恒 None → 长篇检测的LLM冲突检测从未工作过（静默返回0冲突）。
+        改接统一 AIServiceManager（与生成/逆向/知识检测同一入口），
+        适配本Agent期望的 chat_completion(messages=...) -> str 接口。
+        """
         if self._llm_client is None:
             try:
-                from services.llm_client_with_resilience import get_llm_client
-                self._llm_client = get_llm_client()
+                from core.ai_service_manager import get_ai_service_manager
+
+                class _UnifiedChatClient:
+                    """把统一AI服务适配为 chat_completion 接口"""
+
+                    def chat_completion(self, messages, temperature=0.3,
+                                        max_tokens=2000, **kwargs):
+                        manager = get_ai_service_manager()
+                        prompt = "\n".join(
+                            m.get("content", "") for m in messages
+                            if isinstance(m, dict))
+                        resp = manager.generate_text(prompt=prompt)
+                        if getattr(resp, "success", False):
+                            return getattr(resp, "text", "") or ""
+                        raise RuntimeError(
+                            getattr(resp, "error", None) or "AI服务调用失败")
+
+                self._llm_client = _UnifiedChatClient()
+                self._logger.info("长篇检测LLM已接入统一AI服务管理器")
             except Exception as e:
                 self._logger.warning(f"LLM客户端获取失败: {e}")
                 self._llm_client = None

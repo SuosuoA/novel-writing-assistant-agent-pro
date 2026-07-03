@@ -843,20 +843,51 @@ class QuickCreationPlugin(BasePlugin):
         logger.info(f"人物生成完成: {character_name}")
         
         personality = character_dict.get("personality", {})
-        
+
+        # V2.7修复（系统边界校验）：LLM输出天然不可信——真实模型实测返回
+        # age=17(int) 与 relationships=[列表]，与模型 str/dict 约束不符 →
+        # pydantic 校验崩溃、快捷创作整体失败。此处对边界字段归一化。
+        age_val = character_dict.get("age", "")
+        if not isinstance(age_val, str):
+            age_val = str(age_val) if age_val is not None else ""
+
+        rel_val = character_dict.get("relationships", {})
+        if isinstance(rel_val, list):
+            # ["养父·苏老石：…", ...] → {"养父·苏老石": "…"}
+            rel_dict = {}
+            for i, item in enumerate(rel_val):
+                s = str(item)
+                for sep in ("：", ":"):
+                    if sep in s:
+                        k, v = s.split(sep, 1)
+                        rel_dict[k.strip()] = v.strip()
+                        break
+                else:
+                    rel_dict[f"关系{i + 1}"] = s
+            rel_val = rel_dict
+        elif not isinstance(rel_val, dict):
+            rel_val = {"描述": str(rel_val)} if rel_val else {}
+
+        def _as_str_list(v):
+            if isinstance(v, list):
+                return [str(x) for x in v]
+            if v is None or v == "":
+                return []
+            return [str(v)]
+
         return CharacterResult(
-            name=character_dict.get("name", character_name),
-            role=character_dict.get("role", role),
-            age=character_dict.get("age", ""),
-            gender=character_dict.get("gender", ""),
-            appearance=character_dict.get("appearance", ""),
+            name=str(character_dict.get("name", character_name)),
+            role=str(character_dict.get("role", role)),
+            age=age_val,
+            gender=str(character_dict.get("gender", "")),
+            appearance=str(character_dict.get("appearance", "")),
             personality=personality.get("core", "") if isinstance(personality, dict) else str(personality),
-            background=character_dict.get("background", ""),
-            abilities=character_dict.get("abilities", []),
-            goals=character_dict.get("goals", []),
-            weaknesses=character_dict.get("weaknesses", []),
-            relationships=character_dict.get("relationships", {}),
-            character_arc=character_dict.get("arc", "")
+            background=str(character_dict.get("background", "")),
+            abilities=_as_str_list(character_dict.get("abilities", [])),
+            goals=_as_str_list(character_dict.get("goals", [])),
+            weaknesses=_as_str_list(character_dict.get("weaknesses", [])),
+            relationships=rel_val,
+            character_arc=str(character_dict.get("arc", ""))
         )
     
     def generate_plot(
@@ -994,15 +1025,30 @@ class QuickCreationPlugin(BasePlugin):
                 )
                 results.outline = outline
             
-            # 3. 生成人物（依赖世界观）
+            # 3. 生成人物（依赖世界观 + 大纲）
+            # V2.7修复（《无极》实战捕获）：此前人物生成不知道大纲——大纲主角
+            # "陈元"、人物表主角"林越"、正文主角"林晨"三处名字三样，人设维度
+            # 评分崩到0.5。现从大纲提取真实人物名传给人物生成；占位名场景
+            # 明确要求模型自行命名（不得保留"角色N"字样）。
             if request.target in ["characters", "all"]:
                 worldview_summary = self._get_worldview_summary()
+                outline_names = self._extract_character_names_from_outline(
+                    results.outline)
                 for i in range(request.character_count):
-                    char_name = f"角色{i+1}" if i > 0 else "主角"
+                    if i < len(outline_names):
+                        char_name = outline_names[i]
+                        role = "主角" if i == 0 else "配角"
+                    else:
+                        char_name = (f"（请结合世界观自行命名的"
+                                     f"{'主角' if i == 0 else '配角'}，"
+                                     f"不要使用'角色{i+1}'等占位名）")
+                        role = "主角" if i == 0 else "配角"
                     character = self.generate_character(
                         character_name=char_name,
-                        role="主角" if i == 0 else "配角",
-                        worldview_summary=worldview_summary,
+                        role=role,
+                        worldview_summary=worldview_summary
+                        + ("\n【大纲人物名单（务必与大纲一致）】"
+                           + "、".join(outline_names) if outline_names else ""),
                         personality_keywords=[],
                         reference_text=request.reference_text or "",
                         generation_type=request.detailed_level
@@ -1041,7 +1087,50 @@ class QuickCreationPlugin(BasePlugin):
         return results
     
     # ==================== 辅助方法 ====================
-    
+
+    @staticmethod
+    def _extract_character_names_from_outline(outline) -> List[str]:
+        """从大纲提取人物名（V2.7新增：保证人物表与大纲人名一致）
+
+        优先取结构化 chapters[].characters；回退正则匹配大纲文本中
+        "名字（主角/配角…）"形态。返回按出现顺序去重的人名（主角优先）。
+        """
+        names: List[str] = []
+        seen = set()
+
+        def _add(name: str, is_lead: bool = False):
+            n = str(name).strip()
+            # 过滤占位名与过长串
+            if not n or n in seen or len(n) > 6 or n.startswith("角色"):
+                return
+            seen.add(n)
+            if is_lead:
+                names.insert(0, n)
+            else:
+                names.append(n)
+
+        try:
+            chapters = getattr(outline, "chapters", None) or []
+            for ch in chapters:
+                if isinstance(ch, dict):
+                    for c in (ch.get("characters") or []):
+                        _add(c if isinstance(c, str) else str(c))
+        except Exception:
+            pass
+
+        try:
+            text = outline.get_full_text() if outline else ""
+            import re as _re
+            # "陈元（主角…）" / "陆横（矿场监工…）" 形态
+            for m in _re.finditer(r'([一-龥]{2,4})（(主角|男主|女主)', text):
+                _add(m.group(1), is_lead=True)
+            for m in _re.finditer(r'([一-龥]{2,4})（[^）]{0,12}）', text):
+                _add(m.group(1))
+        except Exception:
+            pass
+
+        return names[:8]
+
     def _get_worldview_summary(self) -> str:
         """获取世界观概述（从缓存）"""
         if "worldview" in self._generation_history:

@@ -49,6 +49,12 @@ from dataclasses import dataclass, field, asdict
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
+import logging
+
+# V2.7修复：reload_cache 引用裸 logger 但模块从未定义 → 尾行必 NameError
+# （被调用方 try 吞成"缓存重载失败"警告，刷新缓存功能打折）。
+logger = logging.getLogger(__name__)
+
 
 # ============================================================================
 # Pydantic数据模型

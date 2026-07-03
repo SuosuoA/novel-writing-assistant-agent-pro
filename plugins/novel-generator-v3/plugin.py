@@ -53,6 +53,14 @@ from core.models import GenerationRequest, GenerationResult, ValidationScores
 # 导入其他插件
 # V1.49.27修复：使用importlib动态导入（因为目录名包含短横线）
 import importlib.util
+from pathlib import Path  # V2.7修复：知识评分函数裸用 Path（原仅局部导入两处）
+
+# V2.7修复（《无极》实战捕获）：本模块 L1204/L1219 的 except 分支引用裸 logger
+# 但模块级 logger 从未定义 → 知识维度评分一抛异常，except 自身 NameError
+# 顶替原始异常向上崩掉整个九维评分 → 全维度降级 0.5、迭代反馈失去区分度。
+# 修 logger 后原始异常现形：知识评分里 name 'Path' is not defined（链式第二层）。
+logger = logging.getLogger(__name__)
+
 
 def _load_plugin_module(plugin_dir: str, module_name: str = "plugin"):
     """动态加载插件模块（处理目录名包含短横线的情况）"""
