@@ -612,7 +612,13 @@ class ContextBuilderPlugin(GeneratorPlugin):
         行为模式: ...
         语言风格: ...
         """
+        # V2.13修复（《无极》九维审计）：只读 V5 嵌套形态 basic_info.name，
+        # 快捷创作产出的扁平 dict（name/personality 在顶层）在此恒返回 ""，
+        # 人物块整体从 prompt 消失 → LLM 自造主角名、人设维度恒兜底 0.7。
+        # 与上游 _retrieve_relevant_characters 同款双形态兼容：嵌套缺失时回退扁平。
         basic_info = char.get('basic_info', {})
+        if not (isinstance(basic_info, dict) and basic_info.get('name')):
+            basic_info = char
         name = basic_info.get('name', '')
         if not name:
             return ""
@@ -628,7 +634,8 @@ class ContextBuilderPlugin(GeneratorPlugin):
 
         age = basic_info.get('age', '')
         if age and age != '未知':
-            basic_parts.append(f"年龄:{age}岁")
+            age_text = str(age).rstrip('岁')
+            basic_parts.append(f"年龄:{age_text}岁")
 
         gender = basic_info.get('gender', '')
         if gender and gender != '未知':
@@ -674,14 +681,22 @@ class ContextBuilderPlugin(GeneratorPlugin):
             lines.append(f"目标动机: {goals}")
 
         # 6. 人物关系（从设定中提取）
+        # V2.13：兼容 dict 形态 {对象: 关系}（快捷创作归一化输出）
         relationships = char.get('relationships', [])
         if relationships:
             rel_desc = []
-            for rel in relationships[:3]:  # 最多3个关键关系
-                target = rel.get('target', '')
-                rel_type = rel.get('type', '')
-                if target and rel_type:
-                    rel_desc.append(f"{target}({rel_type})")
+            if isinstance(relationships, dict):
+                for target, rel_type in list(relationships.items())[:3]:
+                    if target and rel_type:
+                        rel_desc.append(f"{target}({rel_type})")
+            else:
+                for rel in relationships[:3]:  # 最多3个关键关系
+                    if not isinstance(rel, dict):
+                        continue
+                    target = rel.get('target', '')
+                    rel_type = rel.get('type', '')
+                    if target and rel_type:
+                        rel_desc.append(f"{target}({rel_type})")
             if rel_desc:
                 lines.append(f"人物关系: {', '.join(rel_desc)}")
 

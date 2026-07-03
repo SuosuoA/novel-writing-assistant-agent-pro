@@ -675,6 +675,11 @@ class NovelVectorStore:
                 vector = self.embed_func.embed(content)
                 
                 # 准备数据
+                # V2.13修复：空 metadata dict 会让 LanceDB 构造无字段 StructArray
+                # 直接 panic（Insert task panicked）。归一到与表 schema 一致的
+                # 默认结构 {difficulty, tags}。
+                if not metadata:
+                    metadata = {"difficulty": "", "tags": None}
                 data = [{
                     "knowledge_id": knowledge_id,
                     "category": category,
@@ -683,7 +688,7 @@ class NovelVectorStore:
                     "content": content,
                     "vector": vector,
                     "keywords": keywords or [],
-                    "metadata": metadata or {},
+                    "metadata": metadata,
                     "created_at": datetime.now().isoformat(),
                     "updated_at": datetime.now().isoformat()
                 }]

@@ -961,15 +961,22 @@ class KnowledgeManager:
 
                     if vector_results:
                         # VectorSearchResult转KnowledgeSearchResult
+                        # V2.13修复：VectorSearchResult 的属性是 id/content/score/
+                        # metadata（title/category/domain 在 metadata 里），原代码
+                        # 读 r.knowledge_id 等不存在属性 → AttributeError 被吞 →
+                        # 向量路径恒失败静默回退关键词。score 为 L2 距离，换算相似度。
                         return [
                             KnowledgeSearchResult(
-                                knowledge_id=r.knowledge_id,
-                                title=r.title,
+                                knowledge_id=r.id,
+                                title=r.metadata.get("title", ""),
                                 content=r.content,
-                                category=r.category,
-                                domain=r.domain,
-                                score=r.score,
-                                keywords=r.keywords if hasattr(r, 'keywords') else []
+                                category=r.metadata.get("category", ""),
+                                domain=r.metadata.get("domain", ""),
+                                score=max(0.0, min(1.0, 1.0 - r.score / 2.0)),
+                                # keywords 从 LanceDB 读回是 numpy 数组，直接 or 会触发
+                                # 真值歧义异常，显式转 list
+                                keywords=(list(r.metadata["keywords"])
+                                          if r.metadata.get("keywords") is not None else [])
                             )
                             for r in vector_results
                         ]

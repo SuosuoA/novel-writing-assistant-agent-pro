@@ -1160,7 +1160,10 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                         feedback_parts.append(f"     - {issue}")
             
             # 记录字数问题（V6.1修复：使用英文key 'word_count'）
-            if dim_name == 'word_count' and dim_score.score < 0.3:
+            # V2.13修复（《无极》九维审计）：原阈值 <0.3 过松——实测第1章
+            # 超标58%（3162/2000字）评分0.5，5轮迭代反馈从未提及字数，
+            # 模型无从纠偏。凡明显偏离（<0.95）即给出方向性纠偏指令。
+            if dim_name == 'word_count' and dim_score.score < 0.95:
                 word_count_issue = dim_score
             
             # 记录大纲问题（V6.1修复：使用英文key 'outline'）
@@ -1192,8 +1195,18 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             feedback_parts.append(f"❌ 未达标 - 存在设定偏离问题（{', '.join([d[0] for d in setting_issues])}）")
             feedback_parts.append("   请立即修正设定偏离,然后重新生成内容。")
         elif word_count_issue:
-            feedback_parts.append(f"❌ 未达标 - 字数偏差过大（评分 {word_count_issue.score:.3f} < 0.3）")
-            feedback_parts.append("   请严格控制字数，重新生成内容。")
+            # V2.13：给出方向性纠偏（扩写/删减+目标区间），而非笼统"控制字数"
+            actual_words = len(content) if content else 0
+            target = self.target_word_count
+            lo, hi = int(target * 0.9), int(target * 1.1)
+            if actual_words > hi:
+                direction = f"当前约{actual_words}字，超出目标，请删减到{lo}-{hi}字（精简描写与重复段落，不要砍情节主线）"
+            elif 0 < actual_words < lo:
+                direction = f"当前约{actual_words}字，低于目标，请扩写到{lo}-{hi}字（扩展细节描写与人物互动，不要注水）"
+            else:
+                direction = f"请将字数控制在{lo}-{hi}字"
+            feedback_parts.append(f"❌ 未达标 - 字数偏离（评分 {word_count_issue.score:.3f}）")
+            feedback_parts.append(f"   {direction}。")
         elif total_score >= self.quality_threshold and has_chapter_end:
             feedback_parts.extend([
                 "✅ 优秀！内容质量达标且包含结束标记",

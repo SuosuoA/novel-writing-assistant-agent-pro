@@ -183,14 +183,21 @@ class KnowledgeRetriever:
         self._initialized = True
     
     def _get_vector_store(self):
-        """延迟获取向量存储"""
+        """延迟获取向量存储
+
+        V2.13修复（《无极》九维审计）：原实现用全局单例 get_vector_store()
+        ——默认连 data/vector_store（L2 章节记忆库），而知识向量在
+        data/knowledge_base（knowledge_manager 同款路径）。知识检索
+        从一开始就在查错库 → 向量召回恒 0 → 知识维度恒兜底。
+        """
         if self._vector_store_instance is None:
             if self._vector_store is not None:
                 self._vector_store_instance = self._vector_store
             else:
                 try:
-                    from infrastructure.vector_store import get_vector_store
-                    self._vector_store_instance = get_vector_store()
+                    from infrastructure.vector_store import NovelVectorStore
+                    db_path = str(self.workspace_root / "data" / "knowledge_base")
+                    self._vector_store_instance = NovelVectorStore(db_path=db_path)
                 except Exception as e:
                     print(f"[KnowledgeRetriever] 初始化向量存储失败: {e}")
         return self._vector_store_instance
@@ -228,7 +235,7 @@ class KnowledgeRetriever:
         category: Optional[str] = None,
         domain: Optional[str] = None,
         top_k: int = 10,
-        min_score: float = 0.5
+        min_score: float = 0.35
     ) -> List[RetrievalResult]:
         """
         向量检索召回top-10相关知识（OpenClaw memory_search）
@@ -274,7 +281,11 @@ class KnowledgeRetriever:
                 )
                 
                 for vr in vector_results:
-                    if vr.score >= min_score:
+                    # V2.13修复：vr.score 是 LanceDB _distance（L2，越小越近，
+                    # 常见值≈1.0），原代码当相似度用 → 过滤语义颠倒。
+                    # 归一化向量下 squared-L2 = 2(1-cos)，换算 sim = 1 - d/2。
+                    similarity = max(0.0, min(1.0, 1.0 - vr.score / 2.0))
+                    if similarity >= min_score:
                         results.append(RetrievalResult(
                             knowledge_id=vr.id,
                             title=vr.metadata.get("title", "未知标题"),
@@ -282,8 +293,8 @@ class KnowledgeRetriever:
                             category=vr.metadata.get("category", "general"),
                             domain=vr.metadata.get("domain", "general"),
                             keywords=vr.metadata.get("keywords", []),
-                            score=vr.score,
-                            vector_score=vr.score,
+                            score=similarity,
+                            vector_score=similarity,
                             keyword_score=0.0,
                             references=vr.metadata.get("references")
                         ))

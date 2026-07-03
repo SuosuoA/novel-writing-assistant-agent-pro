@@ -456,11 +456,15 @@ class QualityValidatorPlugin(ValidatorPlugin):
         chapter_outline: str = None,
         style_profile: Dict[str, Any] = None,
         character_profiles: List[Dict] = None,
-        world_view: str = None
+        world_view: str = None,
+        knowledge_categories: List[str] = None
     ) -> WeightedValidationResult:
         """完整验证并返回详细结果（兼容V5接口）
 
         此方法保留V5原有接口，提供更详细的验证结果。
+
+        V2.13（《无极》九维审计）：新增可选 knowledge_categories——此前
+        context 不带 genre，知识维度恒以'通用'空查召回 0 条 → 恒 0.6。
         """
         context = {
             'target_word_count': target_word_count,
@@ -469,6 +473,9 @@ class QualityValidatorPlugin(ValidatorPlugin):
             'character_profiles': character_profiles,
             'world_view': world_view
         }
+        if knowledge_categories:
+            context['genre'] = knowledge_categories[0]
+            context['knowledge_categories'] = list(knowledge_categories)
 
         # 执行验证
         validation_scores = self.validate(text, context)

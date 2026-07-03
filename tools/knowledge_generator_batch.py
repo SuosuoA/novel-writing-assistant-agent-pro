@@ -204,12 +204,16 @@ class AIGenerator:
 """
         
         results = self.generate_batch(prompt, count)
-        
+
         knowledge_points = []
+        # V2.13修复：原 uuid hex 后缀不符合 KnowledgePoint 校验要求的
+        # {category}-{domain}-{序号} 格式，导入 LanceDB 时 20/20 全部被拒。
+        # 改为在已有条目基础上顺延数字编号。
+        id_base = len(existing_titles or [])
         for i, item in enumerate(results):
             try:
                 kp = KnowledgePoint(
-                    knowledge_id=f"{category}-{domain}-{str(uuid.uuid4())[:8]}",
+                    knowledge_id=f"{category}-{domain}-{id_base + i + 1:03d}",
                     category=category,
                     domain=domain,
                     title=item.get("title", ""),

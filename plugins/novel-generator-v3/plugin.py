@@ -514,6 +514,27 @@ class NovelGeneratorPlugin(GeneratorPlugin):
                 writing_techniques=writing_techniques
             )
 
+        # V2.13修复（《无极》九维审计）：知识库/写作技巧注入原来只存在于
+        # 降级版提示词——主路径（ContextBuilder 可用时）从未注入，正文
+        # 不可能引用知识 → knowledge 维度恒 0.6。主路径补同源注入段。
+        if self._context_builder and (knowledge_categories or writing_techniques):
+            extra_parts = []
+            if knowledge_categories:
+                knowledge_content = self._retrieve_knowledge(
+                    knowledge_categories, query=chapter_outline or chapter_title)
+                if knowledge_content:
+                    extra_parts.append("【知识库参考】")
+                    extra_parts.append("以下是相关的知识库内容，请在创作时自然化用（用修辞与情节体现，勿复述原文）：")
+                    extra_parts.append(knowledge_content)
+            if writing_techniques:
+                techniques_content = self._retrieve_writing_techniques(writing_techniques)
+                if techniques_content:
+                    extra_parts.append("【写作技巧要求】")
+                    extra_parts.append("以下写作技巧请在创作中严格运用：")
+                    extra_parts.append(techniques_content)
+            if extra_parts:
+                base_prompt = base_prompt + "\n\n" + "\n".join(extra_parts)
+
         # 强制附加【本章完】要求（百分百保证）
         base_prompt = self._ensure_chapter_end_marker(base_prompt)
 
@@ -608,13 +629,20 @@ class NovelGeneratorPlugin(GeneratorPlugin):
         }
         weighted_total = sum(display_scores.get(k, 0.5) * w for k, w in weights.items())
         
+        # V2.13修复（《无极》九维审计）：判定分与上报分必须同源。
+        # 迭代循环以 validation_fn 的加权总分对照 0.8 阈值做达标判定，
+        # 而此处曾用本地权重表对维度字典事后重算——两者因维度键差异
+        # （如迭代器补充的'知识库一致性'覆盖分）产生分歧，出现
+        # "循环判定达标停轮、上报却<0.8"的矛盾。返回内容是最佳轮次，
+        # 故上报其真实评分 max(scores)；重算仅作 scores 为空时的兜底。
+        authoritative_score = max(scores) if scores else round(weighted_total, 4)
         final_stats = {
             'final_score': scores[-1] if scores else 0.0,
             'total_iterations': stats.get('iterations', 0),
             'all_scores': scores,
             'dimension_scores': display_scores,
-            'weighted_total_score': round(weighted_total, 4),
-            'passed': weighted_total >= 0.8 and '【本章完】' in final_content,
+            'weighted_total_score': round(authoritative_score, 4),
+            'passed': authoritative_score >= 0.8 and '【本章完】' in final_content,
             'has_chapter_end': '【本章完】' in final_content,
             'word_count': len(final_content),
             'target_word_count': target_word_count
@@ -718,52 +746,62 @@ class NovelGeneratorPlugin(GeneratorPlugin):
 
         return prompt
     
-    def _retrieve_knowledge(self, knowledge_categories: List[str]) -> str:
+    def _retrieve_knowledge(self, knowledge_categories: List[str],
+                            query: str = "") -> str:
         """
         检索知识库内容（V2.12新增）
-        
+
+        V2.13重写（《无极》九维审计）：原实现调用 recall.recall_by_category
+        ——该方法在全代码库从未存在，每次 AttributeError 被 except 吞成
+        警告 → 知识注入恒为空（幽灵符号+吞异常反模式，与 get_llm_client 同款）。
+        改用真实 API KnowledgeRetriever.recall_knowledge(query, category)，
+        query 用章节大纲以获得语义相关召回。
+
         Args:
-            knowledge_categories: 知识库分类列表
-            
+            knowledge_categories: 知识库分类列表（如 xuanhuan/scifi）
+            query: 检索查询文本（通常传章节大纲；空则用类别名）
+
         Returns:
             格式化的知识库内容
         """
         try:
-            # 尝试导入知识库召回器
-            from core.knowledge_recall import get_knowledge_recall
-            from pathlib import Path
-            
-            workspace_root = Path(__file__).parent.parent.parent
-            recall = get_knowledge_recall(workspace_root)
-            
-            if not recall:
+            from core.knowledge_retriever import get_knowledge_retriever
+            from pathlib import Path as _Path
+
+            workspace_root = _Path(__file__).parent.parent.parent
+            retriever = get_knowledge_retriever(workspace_root)
+
+            if not retriever:
                 if self._logger:
-                    self._logger.warning("[V3] 知识库召回器不可用")
+                    self._logger.warning("[V3] 知识检索器不可用")
                 return ""
-            
-            # 检索每个分类的知识点
+
             all_knowledge = []
             for category in knowledge_categories:
                 try:
-                    results = recall.recall_by_category(category, top_k=5)
-                    if results:
-                        for item in results:
-                            knowledge_text = f"- [{item.get('category', category)}] {item.get('name', '未知知识点')}"
-                            if 'definition' in item:
-                                knowledge_text += f": {item['definition']}"
-                            all_knowledge.append(knowledge_text)
+                    results = retriever.recall_knowledge(
+                        query=(query or category)[:500],
+                        category=category,
+                        top_k=5,
+                        min_score=0.3,
+                    )
+                    for item in results or []:
+                        title = getattr(item, 'title', '') or '未知知识点'
+                        content = (getattr(item, 'content', '') or '')[:200]
+                        all_knowledge.append(f"- [{getattr(item, 'category', category)}] {title}: {content}")
                 except Exception as e:
                     if self._logger:
                         self._logger.warning(f"[V3] 检索知识库 {category} 失败: {e}")
-            
+
             if all_knowledge:
                 return "\n".join(all_knowledge[:20])  # 最多20条知识点
-            else:
-                return ""
-                
+            if self._logger:
+                self._logger.info(f"[V3] 知识库召回为空: categories={knowledge_categories}")
+            return ""
+
         except ImportError:
             if self._logger:
-                self._logger.warning("[V3] 知识库召回模块未安装")
+                self._logger.warning("[V3] 知识库检索模块未安装")
             return ""
         except Exception as e:
             if self._logger:
@@ -856,14 +894,26 @@ class NovelGeneratorPlugin(GeneratorPlugin):
                 return None
             
             # 使用validate_with_weights方法（直接传参）
-            result = validator.validate_with_weights(
-                text=content,
-                target_word_count=target_word_count,
-                chapter_outline=chapter_outline,
-                style_profile=style_profile,
-                character_profiles=characters,
-                world_view=world_view
-            )
+            # V2.13：透传知识库类别（旧签名validator无此参则回退不传，保持兼容）
+            try:
+                result = validator.validate_with_weights(
+                    text=content,
+                    target_word_count=target_word_count,
+                    chapter_outline=chapter_outline,
+                    style_profile=style_profile,
+                    character_profiles=characters,
+                    world_view=world_view,
+                    knowledge_categories=knowledge_categories
+                )
+            except TypeError:
+                result = validator.validate_with_weights(
+                    text=content,
+                    target_word_count=target_word_count,
+                    chapter_outline=chapter_outline,
+                    style_profile=style_profile,
+                    character_profiles=characters,
+                    world_view=world_view
+                )
             
             if result and hasattr(result, 'total_weighted_score'):
                 # WeightedValidationResult → (total_score, dimension_scores, suggestions)
