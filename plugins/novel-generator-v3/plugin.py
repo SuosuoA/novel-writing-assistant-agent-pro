@@ -1088,7 +1088,8 @@ class NovelGeneratorPlugin(GeneratorPlugin):
             if _core:
                 hit = sum(1 for w in _core if w in content)
                 hit_rate = hit / len(_core)
-                scores['worldview'] = min(1.0, 0.45 + hit_rate * 0.9)
+                # V2.18校准：与quality-validator同源——命中30%核心词即充分贴合
+                scores['worldview'] = min(1.0, 0.45 + min(1.0, hit_rate / 0.3) * 0.55)
             else:
                 scores['worldview'] = 0.6
         else:

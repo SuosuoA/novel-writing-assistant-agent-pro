@@ -992,18 +992,37 @@ class QualityValidatorPlugin(ValidatorPlugin):
         return sum(consistency_scores) / len(consistency_scores)
 
     def _score_worldview_consistency(self, text: str, world_view: str) -> Tuple[float, bool]:
-        """世界观一致性评分（一票否决）"""
+        """世界观一致性评分（一票否决 + 核心词命中率）
+
+        V2.18修复（九维法证审计C4）：原实现除一票否决分支外恒返回1.0
+        ——喂赛博朋克设定给仙侠正文照样满分，维度是存根。移植V2.7
+        核心词Top-30命中率算法（与novel-generator内联版同源）：取设定
+        高频核心词（专有名词倾向），按正文命中率打分。
+        """
         if not world_view:
             return 0.7, False
 
-        # 检查严重违背
+        # 检查严重违背（一票否决，保留）
         if '现实' in world_view:
             fantasy_keywords = ['魔法', '法术', '异能', '修仙', '仙术']
             if any(kw in text for kw in fantasy_keywords):
                 self._logger.warning("检测到现实题材中出现魔法元素，严重违背世界观")
                 return 0.0, True
 
-        return 1.0, False
+        from collections import Counter
+        _stop = {'一个', '可以', '通过', '进行', '以及', '或者', '但是',
+                 '如果', '这个', '那个', '成为', '开始', '出现', '存在',
+                 '所有', '任何', '之间', '不同', '各种', '之后', '其中'}
+        _words = [w for w in re.findall(r'[一-龥]{2,4}', str(world_view))
+                  if w not in _stop]
+        _core = [w for w, _cnt in Counter(_words).most_common(30)]
+        if not _core:
+            return 0.7, False
+        hit = sum(1 for w in _core if w in text)
+        hit_rate = hit / len(_core)
+        # 校准：单章只覆盖世界观子集，命中30%核心词即视为充分贴合（1.0）；
+        # 零命中=脱设定（0.45底）。比线性0.45+rate*0.9区分度更陡。
+        return min(1.0, 0.45 + min(1.0, hit_rate / 0.3) * 0.55), False
 
     def _score_reverse_feedback(
         self,
@@ -1371,7 +1390,21 @@ class QualityValidatorPlugin(ValidatorPlugin):
         """
         issues = []
 
-        # 复用自然度评分的核心检测
+        # V2.18修复（九维法证审计C7）：原实现只用本地naturalness启发式，
+        # 从未接入 core/ai_feeling_detector 真检测器——纯AI腔文本（夜幕降临/
+        # 难以言喻/命运的齿轮…）反而得1.0。改为主用真检测器（与反AI指导
+        # 共享AI_COMMON_WORDS词表），本地启发式仅作检测器不可用时的降级。
+        try:
+            from core.ai_feeling_detector import detect_ai_feeling
+            report = detect_ai_feeling(text)
+            score = float(report.naturalness_score)
+            for it in (getattr(report, 'issues', None) or [])[:8]:
+                issues.append(str(getattr(it, 'description', None) or it))
+            return max(0.4, min(1.0, score)), issues
+        except Exception as e:
+            self._logger.warning(f"[质量验证器] AI感真检测器不可用，降级本地启发式: {e}")
+
+        # 降级路径：本地naturalness启发式 + 额外规则
         naturalness = self._score_naturalness(text)
 
         # 额外检测：过度正式
