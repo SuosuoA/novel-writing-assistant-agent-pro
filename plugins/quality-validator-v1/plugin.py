@@ -1012,16 +1012,29 @@ class QualityValidatorPlugin(ValidatorPlugin):
         from collections import Counter
         _stop = {'一个', '可以', '通过', '进行', '以及', '或者', '但是',
                  '如果', '这个', '那个', '成为', '开始', '出现', '存在',
-                 '所有', '任何', '之间', '不同', '各种', '之后', '其中'}
-        _words = [w for w in re.findall(r'[一-龥]{2,4}', str(world_view))
-                  if w not in _stop]
+                 '所有', '任何', '之间', '不同', '各种', '之后', '其中',
+                 '没有', '不是', '他们', '自己', '一种', '这些', '时代',
+                 '背景', '体系', '方向', '力量', '世界', '所谓', '最终',
+                 '真正', '其他', '一切', '对于'}
+        # V2.18.1：贪婪正则切词产出词组碎片（'后洪荒时'/'万界已历'），
+        # 正文数学上不可能命中→设定内章节仅10-13%命中率被误判脱设定。
+        # 改用jieba真分词（实测设定内章节命中23-40%、脱设定0），正则仅降级。
+        wv_text = str(world_view)
+        try:
+            import jieba
+            _words = [w for w in jieba.cut(wv_text)
+                      if 2 <= len(w) <= 4 and re.fullmatch(r'[一-龥]+', w)
+                      and w not in _stop]
+        except Exception:
+            _words = [w for w in re.findall(r'[一-龥]{2,4}', wv_text)
+                      if w not in _stop]
         _core = [w for w, _cnt in Counter(_words).most_common(30)]
         if not _core:
             return 0.7, False
         hit = sum(1 for w in _core if w in text)
         hit_rate = hit / len(_core)
         # 校准：单章只覆盖世界观子集，命中30%核心词即视为充分贴合（1.0）；
-        # 零命中=脱设定（0.45底）。比线性0.45+rate*0.9区分度更陡。
+        # 零命中=脱设定（0.45底）。实测四章23-40%、赛博朋克对照0%。
         return min(1.0, 0.45 + min(1.0, hit_rate / 0.3) * 0.55), False
 
     def _score_reverse_feedback(

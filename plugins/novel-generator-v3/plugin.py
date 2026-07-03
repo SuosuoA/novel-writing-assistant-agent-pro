@@ -1081,9 +1081,19 @@ class NovelGeneratorPlugin(GeneratorPlugin):
             from collections import Counter
             _stop = {'一个', '可以', '通过', '进行', '以及', '或者', '但是',
                      '如果', '这个', '那个', '成为', '开始', '出现', '存在',
-                     '所有', '任何', '之间', '不同', '各种', '之后', '其中'}
-            _words = [w for w in re.findall(r'[一-龥]{2,4}', worldview_text)
-                      if w not in _stop]
+                     '所有', '任何', '之间', '不同', '各种', '之后', '其中',
+                     '没有', '不是', '他们', '自己', '一种', '这些', '时代',
+                     '背景', '体系', '方向', '力量', '世界', '所谓', '最终',
+                     '真正', '其他', '一切', '对于'}
+            # V2.18.1：jieba真分词（与quality-validator同源），正则仅降级
+            try:
+                import jieba as _jieba
+                _words = [w for w in _jieba.cut(worldview_text)
+                          if 2 <= len(w) <= 4 and re.fullmatch(r'[一-龥]+', w)
+                          and w not in _stop]
+            except Exception:
+                _words = [w for w in re.findall(r'[一-龥]{2,4}', worldview_text)
+                          if w not in _stop]
             _core = [w for w, _cnt in Counter(_words).most_common(30)]
             if _core:
                 hit = sum(1 for w in _core if w in content)
