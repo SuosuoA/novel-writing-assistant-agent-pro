@@ -667,6 +667,14 @@ class NovelGeneratorPlugin(GeneratorPlugin):
                 parts.append(techniques_content)
             parts.append("")
         
+        # 降低AI感文风要求（V2.6：降级路径也覆盖，与主路径一致）
+        try:
+            from core.ai_feeling_detector import build_anti_ai_prompt_guidance
+            parts.append("")
+            parts.append(build_anti_ai_prompt_guidance())
+        except Exception:
+            pass
+
         parts.extend([
             "【重要要求】",
             f"1. 目标字数：{self.target_word_count}字（严格控制在±10%范围内，即{int(self.target_word_count*0.9)}-{int(self.target_word_count*1.1)}字）",
@@ -674,7 +682,7 @@ class NovelGeneratorPlugin(GeneratorPlugin):
             "3. 严格遵守人物设定和世界观设定",
             "4. 字数不足时扩展描写细节而非压缩；超出时精简而非增加新情节"
         ])
-        
+
         return "\n".join(parts)
     
     def _ensure_chapter_end_marker(self, prompt: str) -> str:

@@ -1159,7 +1159,16 @@ class ExpertPlugin(GeneratorPlugin):
         if technique_guidance:
             parts.append("")
             parts.append(f"【高级技巧指导】\n{technique_guidance}")
-        
+
+        # 降低AI感文风要求（V2.6：专家模式为主模式，追求以假乱真）
+        # 与AI感检测器共用同一份规避清单（core.ai_feeling_detector 单一真值来源）
+        try:
+            from core.ai_feeling_detector import build_anti_ai_prompt_guidance
+            parts.append("")
+            parts.append(build_anti_ai_prompt_guidance())
+        except Exception:
+            pass
+
         # V9.3修复：在prompt最末尾追加终极约束（LLM对最后内容注意力最高）
         parts.append("")
         parts.append(f"【终极检查清单（写作完成后逐条确认）】")

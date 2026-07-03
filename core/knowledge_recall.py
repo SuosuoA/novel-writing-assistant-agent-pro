@@ -263,9 +263,18 @@ class KnowledgeRecall:
             }
         }
         self._stats_lock = threading.RLock()
-        
+
+        # V2.5防幻觉：接入统一AI服务做语义级冲突检测（原_detect_conflicts仅3个
+        # 硬编码关键词，对真实幻觉几乎无检测力→"知识库引用"维度恒0.95虚高）。
+        # LLM不可用/失败时回退规则检测；带缓存避免评分循环内重复调用。
+        # 默认关闭：避免高频评分循环每轮多调一次LLM致成本翻倍；
+        # 深度知识审校/长篇场景可显式 use_llm=True 启用。
+        self._enable_llm_check = False
+        self._llm_conflict_cache = {}
+        self._llm_conflict_cache_cap = 128
+
         self._initialized = True
-    
+
     def _get_knowledge_retriever(self):
         """延迟获取知识库检索器"""
         if self._knowledge_retriever_instance is None:
@@ -379,16 +388,18 @@ class KnowledgeRecall:
         self,
         content: str,
         category: Optional[str] = None,
-        top_k: int = 10
+        top_k: int = 10,
+        use_llm: Optional[bool] = None
     ) -> ConsistencyCheckResult:
         """
         一致性检测：检测生成内容是否违反知识库
-        
+
         Args:
             content: 待检测内容
             category: 题材分类（如果未提供，自动识别）
             top_k: 召回知识点数量
-        
+            use_llm: 是否用 LLM 语义检测（None=按实例配置 _enable_llm_check）
+
         Returns:
             ConsistencyCheckResult: 一致性检测结果
         
@@ -415,9 +426,14 @@ class KnowledgeRecall:
             top_k=top_k
         )
         
-        # 4. 冲突检测
-        conflicts = self._detect_conflicts(content, recalled)
-        
+        # 4. 冲突检测（V2.5：优先LLM语义检测，不可用/失败回退规则兜底）
+        want_llm = self._enable_llm_check if use_llm is None else use_llm
+        conflicts = None
+        if want_llm:
+            conflicts = self._detect_conflicts_llm(content, recalled)
+        if conflicts is None:
+            conflicts = self._detect_conflicts(content, recalled)
+
         # 5. 计算一致性评分
         consistency_score = self._calculate_consistency_score(conflicts, recalled)
         
@@ -441,27 +457,106 @@ class KnowledgeRecall:
             domain=domain
         )
     
+    def _detect_conflicts_llm(
+        self,
+        content: str,
+        recalled: List[RecallResult]
+    ) -> Optional[List[KnowledgeConflict]]:
+        """基于召回知识点的 LLM 语义冲突检测（V2.5防幻觉核心）
+
+        把生成内容 + 召回的知识点交给统一 AI 服务，判断内容是否与这些
+        知识点矛盾（AI幻觉的典型形态：编造违反已知设定/常识的表述）。
+
+        Returns:
+            冲突列表；LLM 不可用或解析失败时返回 None（调用方回退规则检测）。
+        """
+        if not recalled:
+            return []
+        import hashlib
+        ids = ",".join(sorted(r.knowledge_id for r in recalled))
+        cache_key = hashlib.sha1((content[:800] + "|" + ids).encode("utf-8")).hexdigest()
+        if cache_key in self._llm_conflict_cache:
+            return [KnowledgeConflict(**c) for c in self._llm_conflict_cache[cache_key]]
+
+        try:
+            from core.ai_service_manager import get_ai_service_manager
+            manager = get_ai_service_manager()
+        except Exception as e:
+            self._logger.debug(f"[防幻觉] 统一AI服务不可用，回退规则: {e}")
+            return None
+
+        kb_lines = []
+        for i, r in enumerate(recalled[:8], 1):
+            kb_lines.append(f"{i}. [{r.title}] {r.content[:200]}")
+        kb_text = "\n".join(kb_lines)
+
+        prompt = (
+            "你是严谨的知识审校员。下面给出【知识库条目】与一段【小说正文】。\n"
+            "请判断正文中是否存在**违反或矛盾于知识库条目**的表述（即AI幻觉：\n"
+            "编造了与已知设定/常识相悖的内容）。只判断确凿的矛盾，不臆测。\n\n"
+            f"【知识库条目】\n{kb_text}\n\n"
+            f"【小说正文】\n{content[:1500]}\n\n"
+            "严格输出JSON（不要多余文字）：\n"
+            '{"conflicts":[{"knowledge_index":<条目序号>,"severity":"P0|P1|P2",'
+            '"description":"<矛盾点简述>","suggested_fix":"<修改建议>"}]}\n'
+            '若无矛盾，返回 {"conflicts":[]}。'
+        )
+        try:
+            resp = manager.generate_text(prompt=prompt)
+            if not getattr(resp, "success", False):
+                return None
+            text = getattr(resp, "text", "") or ""
+            import json as _json
+            import re as _re
+            m = _re.search(r'\{[\s\S]*\}', text)
+            if not m:
+                return None
+            data = _json.loads(m.group())
+        except Exception as e:
+            self._logger.debug(f"[防幻觉] LLM检测解析失败，回退规则: {e}")
+            return None
+
+        conflicts = []
+        for item in data.get("conflicts", []):
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("knowledge_index", 0)
+            ref = recalled[idx - 1] if isinstance(idx, int) and 1 <= idx <= len(recalled) else (recalled[0] if recalled else None)
+            sev = item.get("severity", "P1")
+            if sev not in ("P0", "P1", "P2"):
+                sev = "P1"
+            conflicts.append(KnowledgeConflict(
+                conflict_type=(ref.domain if ref else "knowledge"),
+                description=item.get("description", "内容与知识库存在矛盾"),
+                severity=sev,
+                knowledge_id=(ref.knowledge_id if ref else ""),
+                knowledge_title=(ref.title if ref else ""),
+                knowledge_content=(ref.content[:200] if ref else ""),
+                suggested_fix=item.get("suggested_fix"),
+            ))
+
+        if len(self._llm_conflict_cache) >= self._llm_conflict_cache_cap:
+            self._llm_conflict_cache.pop(next(iter(self._llm_conflict_cache)))
+        self._llm_conflict_cache[cache_key] = [c.model_dump() for c in conflicts]
+        return conflicts
+
     def _detect_conflicts(
         self,
         content: str,
         recalled: List[RecallResult]
     ) -> List[KnowledgeConflict]:
         """
-        检测知识冲突
-        
+        检测知识冲突（规则兜底：LLM 不可用时使用）
+
         Args:
             content: 待检测内容
             recalled: 召回的知识点列表
-        
+
         Returns:
             List[KnowledgeConflict]: 检测到的冲突列表
-        
-        检测逻辑（简化版，后续可接入LLM增强）：
-        - 物理冲突：检测是否违反基本物理定律
-        - 化学冲突：检测是否违反化学反应规则
-        - 生物冲突：检测是否违反生物学原理
-        - 历史冲突：检测是否与历史事实矛盾
-        - 宗教冲突：检测是否与宗教体系矛盾
+
+        覆盖有限（典型物理/历史违规关键词）。语义级检测走
+        _detect_conflicts_llm；此处为 LLM 不可用时的快速兜底。
         """
         conflicts = []
         

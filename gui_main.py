@@ -5563,8 +5563,21 @@ class MainWindow:
         tree_scrollbar_x = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL)
         tree_scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X)
         
+        # V2.5字体统一：知识库列表此前无显式字体→用ttk默认（与详情面板宋体、
+        # 页面标签楷体三者不一，视觉杂乱）。用独立 style 统一为文本字体，
+        # 不影响其它页面的 Treeview。
+        _kb_style = ttk.Style()
+        _kb_style.configure(
+            "Knowledge.Treeview",
+            font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_NORMAL),
+            rowheight=26)
+        _kb_style.configure(
+            "Knowledge.Treeview.Heading",
+            font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_NORMAL, "bold"))
+
         columns = ("id", "title", "category", "domain", "keywords", "preview")
         self._knowledge_tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=15,
+                                             style="Knowledge.Treeview",
                                              yscrollcommand=tree_scrollbar_y.set,
                                              xscrollcommand=tree_scrollbar_x.set)
         
@@ -5603,9 +5616,27 @@ class MainWindow:
         self._knowledge_detail = tk.Text(detail_container, wrap=tk.WORD, height=15,
                                           font=(GlassTheme.FONT_FAMILY_TEXT, GlassTheme.FONT_SIZE_NORMAL),
                                           bg=GlassTheme.GLASS_SURFACE, fg=GlassTheme.TEXT_PRIMARY,
+                                          spacing1=2, spacing3=2, padx=10, pady=8,
                                           yscrollcommand=detail_scrollbar.set)
         self._knowledge_detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         detail_scrollbar.config(command=self._knowledge_detail.yview)
+
+        # V2.5字体统一 + V2.6朴素化：详情用 tag 排版，全部同一字体族。
+        # 层级只靠字号/粗细区分，标题不上彩色——彩色强调标题是"一眼AI"的
+        # 典型观感，改用主文字色加粗，更像人手工排的资料文档。
+        _ft = GlassTheme.FONT_FAMILY_TEXT
+        self._knowledge_detail.tag_configure(
+            "kb_title", font=(_ft, GlassTheme.FONT_SIZE_SUBTITLE, "bold"),
+            foreground=GlassTheme.TEXT_PRIMARY, spacing1=4, spacing3=8)
+        self._knowledge_detail.tag_configure(
+            "kb_section", font=(_ft, GlassTheme.FONT_SIZE_NORMAL, "bold"),
+            foreground=GlassTheme.TEXT_PRIMARY, spacing1=12, spacing3=3)
+        self._knowledge_detail.tag_configure(
+            "kb_meta", font=(_ft, GlassTheme.FONT_SIZE_SMALL),
+            foreground=GlassTheme.TEXT_SECONDARY)
+        self._knowledge_detail.tag_configure(
+            "kb_body", font=(_ft, GlassTheme.FONT_SIZE_NORMAL), lmargin1=4, lmargin2=4)
+
         self._knowledge_detail.insert("1.0", "双击知识点查看详细内容...")
         self._knowledge_detail.config(state=tk.DISABLED)
         
@@ -5924,76 +5955,66 @@ class MainWindow:
         try:
             kp = self._knowledge_manager.get_knowledge(knowledge_id)
             if kp:
-                # 构建专业排版的详情
-                detail = f"{'═'*60}\n"
-                detail += f"【{kp.title}】\n"
-                detail += f"{'═'*60}\n\n"
-                
-                # 元信息区
-                detail += f"ID: {kp.knowledge_id}\n"
-                # 英文转中文显示
+                # V2.5字体统一：用 tag 排版取代 box-drawing 长墙分隔线
+                # （比例字体下参差不齐）。同一字体族，仅字号/粗细/色区分层级。
+                w = self._knowledge_detail
+                w.config(state=tk.NORMAL)
+                w.delete("1.0", tk.END)
+
+                def put(text, tag="kb_body"):
+                    w.insert(tk.END, text, tag)
+
                 category_cn = self._category_reverse_map.get(kp.category, kp.category)
                 domain_cn = self._domain_reverse_map.get(kp.domain, kp.domain)
-                detail += f"题材: {category_cn}  |  领域: {domain_cn}\n"
-                detail += f"难度: {kp.difficulty or 'intermediate'}\n"
-                detail += f"关键词: {', '.join(kp.keywords)}\n"
-                detail += f"{'─'*60}\n\n"
-                
-                # 核心概念解释（新增）
-                if hasattr(kp, 'explanation') and kp.explanation:
-                    detail += f"【核心概念】\n"
-                    detail += f"{'─'*60}\n"
-                    detail += f"{kp.explanation}\n\n"
-                
-                # 详细内容区
-                detail += f"【详细内容】\n"
-                detail += f"{'─'*60}\n"
-                detail += f"{kp.content}\n"
-                
-                # 经典案例应用（新增）
-                if hasattr(kp, 'classic_cases') and kp.classic_cases:
-                    detail += f"\n{'─'*60}\n"
-                    detail += f"【经典案例应用】\n"
-                    detail += f"{'─'*60}\n"
-                    detail += f"{kp.classic_cases}\n"
-                
-                # 示例列表
-                if hasattr(kp, 'examples') and kp.examples:
-                    detail += f"\n{'─'*60}\n"
-                    detail += f"【作品示例】\n"
-                    detail += f"{'─'*60}\n"
+
+                # 标题
+                put(f"{kp.title}\n", "kb_title")
+                # 元信息
+                put(f"ID {kp.knowledge_id}    题材 {category_cn} / {domain_cn}"
+                    f"    难度 {kp.difficulty or 'intermediate'}\n", "kb_meta")
+                if kp.keywords:
+                    put(f"关键词：{', '.join(kp.keywords)}\n", "kb_meta")
+
+                # 核心概念
+                if getattr(kp, 'explanation', None):
+                    put("核心概念\n", "kb_section")
+                    put(f"{kp.explanation}\n", "kb_body")
+
+                # 详细内容
+                put("详细内容\n", "kb_section")
+                put(f"{kp.content}\n", "kb_body")
+
+                # 经典案例应用
+                if getattr(kp, 'classic_cases', None):
+                    put("经典案例应用\n", "kb_section")
+                    put(f"{kp.classic_cases}\n", "kb_body")
+
+                # 作品示例
+                if getattr(kp, 'examples', None):
+                    put("作品示例\n", "kb_section")
                     for ex in kp.examples:
-                        detail += f"  ◆ {ex}\n"
-                
+                        put(f"　{ex}\n", "kb_body")
+
                 # 常见写作误区
-                if hasattr(kp, 'common_mistakes') and kp.common_mistakes:
-                    detail += f"\n{'─'*60}\n"
-                    detail += f"【常见写作误区】\n"
-                    detail += f"{'─'*60}\n"
+                if getattr(kp, 'common_mistakes', None):
+                    put("常见写作误区\n", "kb_section")
                     mistakes = kp.common_mistakes if isinstance(kp.common_mistakes, list) else [kp.common_mistakes]
                     for m in mistakes:
-                        detail += f"  ✗ {m}\n"
-                
+                        put(f"　{m}\n", "kb_body")
+
                 # 参考文献
-                if hasattr(kp, 'references') and kp.references:
-                    detail += f"\n{'─'*60}\n"
-                    detail += f"参考文献\n"
-                    detail += f"{'─'*60}\n"
+                if getattr(kp, 'references', None):
+                    put("参考文献\n", "kb_section")
                     refs = kp.references if isinstance(kp.references, list) else [kp.references]
                     for ref in refs:
-                        detail += f"  ○ {ref}\n"
-                
+                        put(f"　{ref}\n", "kb_body")
+
                 # 时间戳
-                detail += f"\n{'─'*60}\n"
-                detail += f"创建: {kp.created_at[:19] if kp.created_at else 'N/A'}\n"
-                detail += f"更新: {kp.updated_at[:19] if kp.updated_at else 'N/A'}\n"
-                detail += f"{'═'*60}\n"
-                
-                self._knowledge_detail.config(state=tk.NORMAL)
-                self._knowledge_detail.delete("1.0", tk.END)
-                self._knowledge_detail.insert("1.0", detail)
-                self._knowledge_detail.config(state=tk.DISABLED)
-                
+                put(f"\n创建 {kp.created_at[:19] if kp.created_at else 'N/A'}    "
+                    f"更新 {kp.updated_at[:19] if kp.updated_at else 'N/A'}\n", "kb_meta")
+
+                w.config(state=tk.DISABLED)
+
         except Exception as e:
             logger.error(f"查看知识点详情失败: {e}")
             # P2-003修复：用户友好错误提示

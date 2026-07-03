@@ -1840,7 +1840,7 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
         Returns:
             系统提示词
         """
-        return """你是一位专业的小说续写专家，擅长根据已有文本进行自然流畅的续写。
+        base = """你是一位专业的小说续写专家，擅长根据已有文本进行自然流畅的续写。
 
 核心能力：
 1. 深入理解原文风格、人物性格和情节脉络
@@ -1859,6 +1859,12 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
 - 人物对话要符合其性格特点和说话方式
 - 场景描写要服务于情节，不能喧宾夺主
 - 情感表达要真挚自然，避免刻意煽情"""
+        # 降低AI感文风要求（V2.6：续写也覆盖，与主路径一致）
+        try:
+            from core.ai_feeling_detector import build_anti_ai_prompt_guidance
+            return base + "\n\n" + build_anti_ai_prompt_guidance()
+        except Exception:
+            return base
     
     def _get_direction_instruction(
         self, 

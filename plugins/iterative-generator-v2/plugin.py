@@ -435,7 +435,7 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
                 total_score=total_score,
                 dimension_scores=dimension_scores,
                 has_chapter_end=has_chapter_end,
-                feedback=self._build_feedback_text(total_score, dimension_scores, has_chapter_end),
+                feedback=self._build_feedback_text(total_score, dimension_scores, has_chapter_end, generated_content),
                 suggestions=suggestions
             )
 
@@ -1025,12 +1025,17 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         self,
         total_score: float,
         dimension_scores: Dict[str, DimensionScore],
-        has_chapter_end: bool
+        has_chapter_end: bool,
+        content: str = ""
     ) -> str:
         """
         步骤5: 构建反馈文本（V2.1版本 - 新增知识库冲突显示）
 
-        格式：总评分 + 各维度评分 + 知识库冲突信息 + 问题描述(优先显示设定偏离问题) + 具体改进建议
+        格式：总评分 + 各维度评分 + 知识库冲突信息 + 问题描述(优先显示设定偏离问题)
+        + AI感专项(具体AI腔词句) + 具体改进建议
+
+        Args:
+            content: 本轮生成正文（用于AI感专项检测，列出具体AI腔词句要求改写）
         """
         feedback_parts = [
             f"【总评分】: {total_score:.3f} / 1.0",
@@ -1103,6 +1108,33 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             feedback_parts.append("  ✅ 检查世界观元素是否准确无误")
             feedback_parts.append("  ✅ 检查写作风格是否保持一致")
             feedback_parts.append("")
+
+        # 🔴 优先级2: AI感专项反馈（V2.6新增）——闭环去AI腔
+        # 当AI感维度偏低时，直接用AI感检测器扫出具体AI腔词句，逐条要求改写，
+        # 而非泛泛说"减少AI感"。让下一轮迭代精确消除这些痕迹。
+        ai_dim = dimension_scores.get('ai_feeling') or dimension_scores.get('AI感')
+        ai_low = (ai_dim is None) or (getattr(ai_dim, 'score', 1.0) < 0.75)
+        if content and ai_low:
+            try:
+                from core.ai_feeling_detector import detect_ai_feeling
+                report = detect_ai_feeling(content)
+                if report.issues:
+                    feedback_parts.append("=" * 60)
+                    feedback_parts.append("🔴 【AI感问题 - 请逐条消除以下AI腔】")
+                    feedback_parts.append("=" * 60)
+                    for issue in report.issues[:12]:
+                        pos = (issue.position or '')[:40]
+                        feedback_parts.append(f"  · [{issue.issue_type}] {pos}")
+                        if issue.suggestion:
+                            feedback_parts.append(f"    改法: {issue.suggestion}")
+                    feedback_parts.append("")
+                    feedback_parts.append("【修正要求】")
+                    feedback_parts.append("  ❌ 上述词句有明显AI腔（AI高频词/模板句式/空洞情感/机械过渡）")
+                    feedback_parts.append("  ✅ 逐条改写：用具体动作、细节、对白替代，不保留原句式")
+                    feedback_parts.append("  ✅ 目标：让文字读起来像资深人类作者写的（以假乱真）")
+                    feedback_parts.append("")
+            except Exception as _e:
+                logger.debug(f"[V2] AI感专项反馈生成失败（不影响主反馈）: {_e}")
 
         # 各维度评分
         feedback_parts.append("=" * 60)

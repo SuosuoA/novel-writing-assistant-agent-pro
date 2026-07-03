@@ -386,7 +386,12 @@ class ContextBuilderPlugin(GeneratorPlugin):
                 prompt_parts.append(context_summary)
                 prompt_parts.append("")
 
-        # ========== 第十部分：创作检查清单 ==========
+        # ========== 第十部分：文风要求（降低AI感，追求以假乱真）==========
+        # 闭环——AI感检测器（core/ai_feeling_detector）掌握AI痕迹清单，
+        # 此处把规避项前置注入生成指导，让模型从源头规避而非事后被扣分。
+        prompt_parts.append(self._build_anti_ai_guidance())
+
+        # ========== 第十一部分：创作检查清单 ==========
         prompt_parts.append("=" * 60)
         prompt_parts.append("创作检查清单")
         prompt_parts.append("=" * 60)
@@ -396,6 +401,7 @@ class ContextBuilderPlugin(GeneratorPlugin):
         prompt_parts.append(f"  [ ] 已熟悉本章涉及的人物特征")
         prompt_parts.append(f"  [ ] 已了解相关的世界观设定")
         prompt_parts.append(f"  [ ] 已确定写作风格和叙述语气")
+        prompt_parts.append(f"  [ ] 行文自然、避免AI腔（见文风要求）")
         prompt_parts.append(f"  [ ] 已记住【本章完】标记和字数要求")
         prompt_parts.append("")
         prompt_parts.append("=" * 60)
@@ -403,6 +409,18 @@ class ContextBuilderPlugin(GeneratorPlugin):
         prompt_parts.append("=" * 60)
 
         return "\n".join(prompt_parts)
+
+    def _build_anti_ai_guidance(self) -> str:
+        """降低AI感的文风要求（委托给单一真值来源 core.ai_feeling_detector）。
+
+        与AI感检测器共用同一份AI痕迹清单，全生成路径一致；导入失败回退空串
+        （不阻断生成）。
+        """
+        try:
+            from core.ai_feeling_detector import build_anti_ai_prompt_guidance
+            return build_anti_ai_prompt_guidance()
+        except Exception:
+            return ""
     
     def _retrieve_relevant_worldview(
         self,
