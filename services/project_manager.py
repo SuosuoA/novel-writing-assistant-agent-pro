@@ -444,6 +444,10 @@ class ProjectManager:
         if not isinstance(content, str) or not content.strip():
             logger.warning("[ProjectManager] 章节内容为空，跳过保存")
             return
+        # V2.7：章节完成态规范——续写/导入来源若缺【本章完】标记则补齐
+        # （生成来源由评分循环强制保障；标记是评分与后续检测的合规基线）
+        if source != "generation" and "【本章完】" not in content:
+            content = content.rstrip() + "\n\n【本章完】"
         chapters = self._chapter_list()
         entry = {
             'title': title or f'第{len(chapters) + 1}章',

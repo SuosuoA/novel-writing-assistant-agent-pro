@@ -563,6 +563,15 @@ class NovelGeneratorPlugin(GeneratorPlugin):
             stats = {'iterations': 0, 'scores': []}
 
         # === 步骤7: 输出保存 ===
+        # V2.7修复（《无极》实战）：模型偶把"# 第N章"标题写进正文行首——
+        # 污染正文、虚增字数。剥离开头的markdown/纯章节标题行。
+        if final_content:
+            _lines = final_content.lstrip().split('\n')
+            while _lines and re.match(r'^\s*#{0,6}\s*第[\d一二三四五六七八九十百千]+章\s*$',
+                                      _lines[0].strip()):
+                _lines.pop(0)
+            final_content = '\n'.join(_lines).lstrip('\n')
+
         if self._logger:
             self._logger.info(f"[V3] 生成完成，最终内容长度: {len(final_content)} 字符")
 
@@ -979,13 +988,26 @@ class NovelGeneratorPlugin(GeneratorPlugin):
         else:
             scores['character'] = 0.7
         
-        # 5. 世界观评分（V3.0修订：基于世界观关键词匹配率）
+        # 5. 世界观评分（V2.7修订：核心词命中率）
+        # 旧算法用设定全部词表与正文求交集比率——1500+字设定词表巨大，
+        # 2000字正文数学上不可能覆盖，比率天然<0.1（《无极》实测：正文
+        # 已用"混沌/无极"体系却只得0.42）。改为：取设定高频核心词Top-30
+        # （专有名词倾向），按核心词命中率打分。
         if world_view:
             worldview_text = str(world_view) if not isinstance(world_view, str) else world_view
-            worldview_keywords = set(re.findall(r'[\u4e00-\u9fa5]{2,4}', worldview_text))
-            content_keywords = set(re.findall(r'[\u4e00-\u9fa5]{2,4}', content))
-            overlap = len(worldview_keywords & content_keywords) / max(len(worldview_keywords), 1)
-            scores['worldview'] = min(1.0, overlap + 0.4)
+            from collections import Counter
+            _stop = {'一个', '可以', '通过', '进行', '以及', '或者', '但是',
+                     '如果', '这个', '那个', '成为', '开始', '出现', '存在',
+                     '所有', '任何', '之间', '不同', '各种', '之后', '其中'}
+            _words = [w for w in re.findall(r'[一-龥]{2,4}', worldview_text)
+                      if w not in _stop]
+            _core = [w for w, _cnt in Counter(_words).most_common(30)]
+            if _core:
+                hit = sum(1 for w in _core if w in content)
+                hit_rate = hit / len(_core)
+                scores['worldview'] = min(1.0, 0.45 + hit_rate * 0.9)
+            else:
+                scores['worldview'] = 0.6
         else:
             scores['worldview'] = 0.6  # 无世界观，稍低
         

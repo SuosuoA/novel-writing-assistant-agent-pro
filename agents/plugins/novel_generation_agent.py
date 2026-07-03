@@ -250,12 +250,48 @@ class NovelGenerationAgent(BaseAgent):
             # 提取参数
             chapter_title = payload.get("chapter_title", "")
             chapter_outline = payload.get("chapter_outline", "")
-            world_view = payload.get("world_view", "")
-            style = payload.get("style", "")
+            # V2.7修复（《无极》实战P0）：编排器payload键为 worldview/style_profile，
+            # 本处此前只读 world_view/style（不存在的键）→ 世界观与风格
+            # 从未到达生成插件！模型脱设定自由发挥（实测正文自创"玄天宗/灵根"
+            # 体系，与项目"无极之道"世界观整体脱节，逆向检出19处冲突的主源）。
+            world_view = payload.get("world_view", "") or payload.get("worldview", "")
+            # 形状归一化：世界观可能是 dict（结构化）或 list（条目集）——
+            # 下游 context_builder 按 str 处理（split段落），必须文本化
+            if isinstance(world_view, dict):
+                import json as _json
+                parts = []
+                for k, v in world_view.items():
+                    if isinstance(v, (list, dict)):
+                        v = _json.dumps(v, ensure_ascii=False)
+                    parts.append(f"{k}: {v}")
+                world_view = "\n\n".join(parts)
+            elif isinstance(world_view, list):
+                parts = []
+                for item in world_view:
+                    if isinstance(item, dict):
+                        name = item.get("name") or item.get("title") or ""
+                        desc = (item.get("description") or item.get("content") or "")
+                        parts.append(f"{name}: {desc}" if name else str(desc))
+                    else:
+                        parts.append(str(item))
+                world_view = "\n\n".join(p for p in parts if p)
+            elif not isinstance(world_view, str):
+                world_view = str(world_view or "")
+            style = payload.get("style", "") or ""
             characters = payload.get("characters", [])
             target_word_count = payload.get("target_word_count", 3500)
             style_profile = payload.get("style_profile")
             use_context_memory = payload.get("use_context_memory", True)
+
+            # V2.7修复：style 文本恒空但存在风格档案时，用档案要点填充
+            # （否则提示词"写作风格"段永远空白，风格维度只能靠碰运气）
+            if not style and isinstance(style_profile, dict) and style_profile:
+                _tags = style_profile.get("style_tags") or style_profile.get("tags")
+                if _tags:
+                    style = "、".join(str(t) for t in _tags[:8])
+                else:
+                    import json as _json
+                    style = _json.dumps(style_profile, ensure_ascii=False)[:600]
             
             # V2.12新增：提取知识库和写作技巧参数
             knowledge_categories = payload.get("knowledge_categories", [])
