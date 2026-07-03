@@ -864,12 +864,13 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
     # =========================================================================
     
     DEFAULT_TIMEOUT = 120           # 默认超时时间（秒）
-    MAX_TOKENS_LIMIT = 4096         # 最大token限制
+    MAX_TOKENS_LIMIT = 8192         # 最大token限制（V2.14：DeepSeek输出上限8k，4096会截断3500字以上章节）
     MAX_VERSIONS = 5                # 最大版本数
     MAX_RETRIES = 3                 # 最大重试次数
     DEFAULT_TEMPERATURE = 0.8       # 默认温度
     MIN_TOKENS = 500                # 最小token数
-    TOKEN_RATIO = 1.5               # 中文字符/token比例
+    TOKEN_RATIO = 1.0               # 中文字符/token比例（V2.14：实测DeepSeek中文≈1.1字/token，
+                                    # 原1.5假设使2000字仅分配1732 tokens→《无极》第4章末句截断实证）
     MAX_HISTORY_SIZE = 50           # 最大历史记录数
     HISTORY_KEEP_SIZE = 30          # 保留历史记录数
     MAX_KEY_SENTENCES = 5           # 概要最大关键句数

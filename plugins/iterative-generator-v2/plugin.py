@@ -616,10 +616,12 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
         # 中文约1.5字符/token，目标字数对应约 target/1.5 tokens
         # V6.0关键修复：max_tokens必须显著大于基础token数，否则API输出会被截断导致【本章完】无法写入
         # 公式：base = target/1.5(内容tokens), max = base*2.0(留100%余量给结束标记和溢出)
-        base_tokens = int(self.target_word_count / 1.5)  # 基础内容token数
+        # V2.14修复：实测DeepSeek中文≈1.1字/token（《无极》实证：3162字消耗
+        # ~2800 tokens），原/1.5假设低估30%；4096上限会截断3500字以上章节。
+        base_tokens = int(self.target_word_count / 1.0)  # 基础内容token数（保守1字/token）
         max_tokens = int(base_tokens * 2.0)  # 留出100%空间确保能写完【本章完】
         max_tokens = max(max_tokens, 1000)  # 最小1000 tokens
-        max_tokens = min(max_tokens, 4096)  # 最大4096 tokens（DeepSeek限制）
+        max_tokens = min(max_tokens, 8192)  # 最大8192 tokens（DeepSeek输出上限）
 
         # 根据策略设置温度
         temperature_map = {

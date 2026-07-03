@@ -446,8 +446,21 @@ class ProjectManager:
             return
         # V2.7：章节完成态规范——续写/导入来源若缺【本章完】标记则补齐
         # （生成来源由评分循环强制保障；标记是评分与后续检测的合规基线）
+        # V2.14：补标记前先裁悬尾——max_tokens截断产生的半截句若被直接盖上
+        # 【本章完】会掩盖残缺（《无极》第4章'…长老由归'实证）。仅当末尾
+        # 不以终止标点收束且残句较短（<120字）时回退到最后一个完整句。
         if source != "generation" and "【本章完】" not in content:
-            content = content.rstrip() + "\n\n【本章完】"
+            _terminal = ('。', '！', '？', '…', '”', '』', '】', '"', '）', ')')
+            _body = content.rstrip()
+            if _body and not _body.endswith(_terminal):
+                _cut = max(_body.rfind(ch) for ch in ('。', '！', '？', '…', '”', '』'))
+                _dangling = len(_body) - (_cut + 1)
+                if _cut > 0 and 0 < _dangling < 120:
+                    logger.warning(
+                        f"[ProjectManager] 检测到截断残句（{_dangling}字），"
+                        f"已裁剪至最后完整句: {_body[_cut + 1:][:40]!r}...")
+                    _body = _body[:_cut + 1]
+            content = _body + "\n\n【本章完】"
         chapters = self._chapter_list()
         entry = {
             'title': title or f'第{len(chapters) + 1}章',
