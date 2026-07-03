@@ -345,6 +345,13 @@ class ContextBuilderPlugin(GeneratorPlugin):
         relevant_characters = self._retrieve_relevant_characters(
             chapter_outline, characters
         )
+        # V2.17：压缩产物全空=形态断裂信号（V2.13曾静默丢弃人物块→模型
+        # 自造主角名）。全空时打显眼告警，不再无声跳过。
+        relevant_characters = [c for c in relevant_characters if str(c).strip()]
+        if characters and not relevant_characters:
+            (self._logger or logging.getLogger(__name__)).warning(
+                "[ContextBuilder] 人物档案存在但压缩产物全空——"
+                "疑似数据形态不兼容，人物块将缺失，请检查！")
         if relevant_characters:
             prompt_parts.append("=" * 60)
             prompt_parts.append("人物设定")
@@ -352,6 +359,19 @@ class ContextBuilderPlugin(GeneratorPlugin):
             prompt_parts.append("（本章涉及的主要人物）")
             for char_desc in relevant_characters:
                 prompt_parts.append(f"\n{char_desc}")
+            # V2.17：人名使用改为硬性约束（此前人物卡只是资料性描述，
+            # 模型可自行起名；实测约束缺失时主角名漂移）
+            _names = []
+            import re as _re
+            for c in relevant_characters:
+                m = _re.search(r'【([^】]{1,8})】', str(c))
+                if m:
+                    _names.append(m.group(1))
+            if _names:
+                prompt_parts.append(
+                    f"\n【人名硬性要求】本章人物必须从上述名单取用"
+                    f"（{'、'.join(_names)}），主角与已设定角色不得改名、"
+                    f"不得另创同定位新角色。")
             prompt_parts.append("")
 
         # ========== 第七部分：世界观背景 ==========

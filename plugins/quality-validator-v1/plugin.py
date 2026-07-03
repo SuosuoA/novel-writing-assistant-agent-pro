@@ -977,7 +977,19 @@ class QualityValidatorPlugin(ValidatorPlugin):
 
             consistency_scores.append(total_score)
 
-        return sum(consistency_scores) / len(consistency_scores) if consistency_scores else 0.7
+        # V2.17：配置了人物但正文一个名字都没命中 = 人设约束被整体忽略
+        # （或prompt人物块断裂）——给0.5判罚并区分于中性0.7，让此类静默
+        # 失效在评分上可见（V2.13的"魏央顶替林越"曾因两种情况同为0.7而隐身）。
+        if not consistency_scores:
+            _cfg_names = [
+                (c.get('name') or (c.get('basic_info') or {}).get('name', ''))
+                for c in character_profiles if isinstance(c, dict)]
+            _cfg_names = [n for n in _cfg_names if n][:5]
+            self._logger.warning(
+                "[质量验证器] 人设维度：配置人物名（%s）均未出现在正文，判罚0.5",
+                "、".join(_cfg_names) if _cfg_names else "?")
+            return 0.5
+        return sum(consistency_scores) / len(consistency_scores)
 
     def _score_worldview_consistency(self, text: str, world_view: str) -> Tuple[float, bool]:
         """世界观一致性评分（一票否决）"""
