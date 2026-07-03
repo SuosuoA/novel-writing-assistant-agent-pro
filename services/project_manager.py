@@ -14,7 +14,7 @@
 import json
 import os
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 from core.event_bus import EventBus
@@ -307,6 +307,176 @@ class ProjectManager:
     def is_project_open(self) -> bool:
         """是否有打开的项目"""
         return self._current_project is not None
+
+    # ========== 跨板块数据流兼容接口（V2.3新增，遵循"新增不改旧"） ==========
+    # 背景：GUI 的快捷创作导入、续写上下文/选章/保存、长篇检测选章共调用
+    # 12 个本类不存在的方法（旧版 ProjectManager 迁移时接口丢失）——
+    # 快捷→项目、项目→续写、续写→项目、项目→长篇检测四条跨板块数据流
+    # 全部 AttributeError 断裂。此处按现行数据模型补齐。
+    #
+    # 章节条目规范形状（completed_chapters 列表元素）：
+    #   {"title": str, "content": str, "word_count": int,
+    #    "source": "generation"|"continuation"|"import", "created_at": str}
+
+    @staticmethod
+    def _as_text(value: Any) -> str:
+        """把 dict/list 形状的设定归一化为文本（续写等消费方需要 str）"""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in ("content", "outline_content", "text", "summary"):
+                inner = value.get(key)
+                if isinstance(inner, str) and inner.strip():
+                    return inner
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except Exception:
+                return str(value)
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    name = item.get("name") or item.get("title") or ""
+                    desc = (item.get("description") or item.get("content")
+                            or item.get("summary") or "")
+                    parts.append(f"{name}: {desc}" if name else str(desc))
+                else:
+                    parts.append(str(item))
+            return "\n".join(p for p in parts if p)
+        return str(value)
+
+    # ---- 设定写入（快捷创作导入） ----
+
+    def set_worldview(self, worldview: Any) -> None:
+        """设置世界观设定（快捷创作导入路径）"""
+        self.sync_module_data('worldview', worldview)
+
+    def set_outline(self, outline: Any) -> None:
+        """设置大纲（快捷创作导入路径）"""
+        self.sync_module_data('outline', outline)
+
+    def set_characters(self, characters: Any) -> None:
+        """设置人物设定（快捷创作导入路径）"""
+        self.sync_module_data('characters', characters)
+
+    def set_plot(self, plot: Any) -> None:
+        """设置关键情节（快捷创作导入路径）"""
+        self.sync_module_data('plot', plot)
+
+    # ---- 设定读取（续写上下文构建，返回类型对齐 ContinuationRequest） ----
+
+    def get_outline(self) -> str:
+        """获取大纲文本（dict 形状自动归一化）"""
+        return self._as_text(self.get_module_data('outline'))
+
+    def get_worldview(self) -> str:
+        """获取世界观文本（list 形状自动归一化）"""
+        return self._as_text(self.get_module_data('worldview'))
+
+    def get_characters(self) -> List[Dict[str, Any]]:
+        """获取人物设定列表（归一化为 List[Dict]）"""
+        chars = self.get_module_data('characters')
+        if isinstance(chars, list):
+            return [c for c in chars if isinstance(c, dict)]
+        if isinstance(chars, dict):
+            result = []
+            for name, profile in chars.items():
+                if isinstance(profile, dict):
+                    entry = dict(profile)
+                    entry.setdefault('name', name)
+                    result.append(entry)
+                else:
+                    result.append({'name': str(name), 'description': str(profile)})
+            return result
+        if isinstance(chars, str) and chars.strip():
+            return [{'name': '设定文本', 'description': chars}]
+        return []
+
+    # ---- 章节访问（续写选章/长篇检测选章/前文参考） ----
+
+    def _chapter_list(self) -> List[Dict[str, Any]]:
+        """内部：获取规范化章节列表引用"""
+        if not self._current_project:
+            return []
+        chapters = self._current_project.setdefault('completed_chapters', [])
+        if not isinstance(chapters, list):
+            chapters = []
+            self._current_project['completed_chapters'] = chapters
+        return chapters
+
+    def list_chapters(self) -> List[Dict[str, Any]]:
+        """列出项目章节（title/word_count 供选择对话框展示）"""
+        result = []
+        for ch in self._chapter_list():
+            if isinstance(ch, dict) and ch.get('content'):
+                result.append({
+                    'title': ch.get('title', '未命名章节'),
+                    'word_count': ch.get('word_count', len(ch.get('content', ''))),
+                })
+        return result
+
+    def get_chapter_content(self, chapter_title: str) -> Optional[str]:
+        """按标题获取章节内容"""
+        for ch in self._chapter_list():
+            if isinstance(ch, dict) and ch.get('title') == chapter_title:
+                return ch.get('content', '')
+        return None
+
+    def get_recent_chapters(self, count: int = 5) -> List[str]:
+        """获取最近 N 章正文（前文上下文参考，上下文记忆前5章）"""
+        texts = [ch.get('content', '') for ch in self._chapter_list()
+                 if isinstance(ch, dict) and ch.get('content')]
+        return texts[-count:]
+
+    def add_chapter(self, title: str, content: str,
+                    source: str = "continuation") -> None:
+        """追加章节到项目（续写保存/生成沉淀路径）
+
+        同名章节覆盖内容（用户重复保存同一章的自然预期）。
+        """
+        if not self._current_project:
+            logger.warning("[ProjectManager] 没有当前项目，无法保存章节")
+            return
+        if not isinstance(content, str) or not content.strip():
+            logger.warning("[ProjectManager] 章节内容为空，跳过保存")
+            return
+        chapters = self._chapter_list()
+        entry = {
+            'title': title or f'第{len(chapters) + 1}章',
+            'content': content,
+            'word_count': len(content),
+            'source': source,
+            'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        for i, ch in enumerate(chapters):
+            if isinstance(ch, dict) and ch.get('title') == entry['title']:
+                chapters[i] = entry
+                break
+        else:
+            chapters.append(entry)
+        # 发布数据变更事件（与 sync_module_data 一致）
+        if self._event_bus:
+            self._event_bus.publish(
+                ProjectDataEvent('completed_chapters', entry, 'update'))
+        logger.info(f"[ProjectManager] 章节已保存: {entry['title']} "
+                    f"({entry['word_count']}字, {source})")
+
+    def update_current_chapter(self, content: str) -> None:
+        """更新最近一章内容（续写"追加到当前章节"路径）"""
+        chapters = self._chapter_list()
+        if not chapters:
+            self.add_chapter("第1章", content, source="continuation")
+            return
+        last = chapters[-1]
+        if isinstance(last, dict):
+            last['content'] = content
+            last['word_count'] = len(content)
+            last['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logger.info(f"[ProjectManager] 已更新章节: {last.get('title', '')}")
 
 
 # 全局单例

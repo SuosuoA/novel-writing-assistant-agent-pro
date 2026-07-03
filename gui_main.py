@@ -11167,6 +11167,39 @@ data/知识库验证器/backups/
         except Exception as e:
             pass  # 忽略UI更新错误
     
+    def _sediment_generated_chapter(self, content: str, stats: Dict) -> None:
+        """把生成完成的章节沉淀到项目（V2.3新增，设计流程第7步）
+
+        - 写入 completed_chapters（续写选章/长篇检测选章/前5章参考的数据源）
+        - 保存项目时随项目持久化；失败不影响结果显示
+        """
+        try:
+            if not content or not content.strip():
+                return
+            try:
+                chapter_no = int(self._start_chapter_var.get())
+                title = f"第{chapter_no}章"
+            except Exception:
+                title = "生成章节"
+            pm = getattr(self, '_project_manager', None)
+            if pm and pm.is_project_open():
+                pm.add_chapter(title, content, source="generation")
+                score = stats.get("weighted_total_score") if isinstance(stats, dict) else None
+                score_txt = f"（评分 {score:.2f}）" if isinstance(score, (int, float)) else ""
+                self._gen_log.insert(
+                    tk.END, f"章节已沉淀到项目：{title}{score_txt}，保存项目后持久化\n")
+            else:
+                # 未打开项目：至少落到内存态，保存项目时可带走
+                chapters = self.current_project.setdefault('completed_chapters', [])
+                if isinstance(chapters, list):
+                    chapters.append({
+                        'title': title, 'content': content,
+                        'word_count': len(content), 'source': 'generation',
+                    })
+                self._gen_log.insert(tk.END, f"章节已暂存（未打开项目）：{title}\n")
+        except Exception as e:
+            logger.error(f"章节沉淀失败（不影响结果显示）: {e}")
+
     def _on_generation_complete(self, result):
         """生成完成回调（UI线程安全）"""
         try:
@@ -11182,10 +11215,15 @@ data/知识库验证器/backups/
                     content = result.final_output.get("content", str(result.final_output))
                     self._gen_result.delete("1.0", tk.END)
                     self._gen_result.insert("1.0", content)
-                    
+
                     # 更新字数统计
                     word_count = len(content)
                     self._gen_log.insert(tk.END, f"实际字数: {word_count}\n")
+
+                    # V2.3新增：章节沉淀到项目（评分反馈循环第7步"完成并沉淀"）。
+                    # 修复前生成结果只显示不入项目——不手动复制就丢，
+                    # 且续写选章/长篇检测选章/前5章参考都取不到生成的章节。
+                    self._sediment_generated_chapter(content, result.final_output.get("stats", {}))
                     
                     # V3.0修订：显示九维度评分详情（从插件层获取已计算的评分，GUI不硬编码权重）
                     stats = result.final_output.get("stats", {})
@@ -11637,8 +11675,39 @@ data/知识库验证器/backups/
             return ""
     
     def _on_reverse_refresh_chapters(self):
-        """刷新章节列表"""
-        # 重新统计并更新列表
+        """刷新章节列表
+
+        V2.3修复：原先只重算已上传章节的统计——项目里生成/续写沉淀的章节
+        （completed_chapters）不会出现，用户必须手动重新上传自己刚生成的章节。
+        现在刷新时把项目章节并入列表（按标题去重）。
+        """
+        # 1. 并入项目沉淀章节（生成→逆向数据流）
+        try:
+            pm = getattr(self, '_project_manager', None)
+            if pm and pm.is_project_open():
+                existing_titles = {c.get('title') for c in self._reverse_chapters.values()}
+                for ch in pm.get_project_data().get('completed_chapters', []) or []:
+                    if not isinstance(ch, dict) or not ch.get('content'):
+                        continue
+                    title = ch.get('title', '未命名章节')
+                    if title in existing_titles:
+                        continue
+                    item_id = self._completed_chapters_tree.insert("", tk.END, values=(
+                        len(self._reverse_chapters) + 1, title,
+                        f"{ch.get('word_count', len(ch['content']))}字",
+                        "已完成", ch.get('source', '项目')))
+                    self._reverse_chapters[item_id] = {
+                        'title': title,
+                        'content': ch['content'],
+                        'words': ch.get('word_count', len(ch['content'])),
+                        'status': '已完成',
+                        'file_path': None,
+                    }
+                    existing_titles.add(title)
+        except Exception as e:
+            logger.warning(f"并入项目章节失败（仅影响列表补全）: {e}")
+
+        # 2. 重新统计并更新已有行
         for item in self._completed_chapters_tree.get_children():
             if item in self._reverse_chapters:
                 chapter_data = self._reverse_chapters[item]
@@ -11646,7 +11715,7 @@ data/知识库验证器/backups/
                 values[2] = f"{chapter_data['words']}字"
                 values[3] = chapter_data['status']
                 self._completed_chapters_tree.item(item, values=values)
-        
+
         total_words = sum(c['words'] for c in self._reverse_chapters.values())
         self._set_status(f"已刷新列表，共 {len(self._reverse_chapters)} 章，{total_words} 字")
     
