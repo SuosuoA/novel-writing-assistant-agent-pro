@@ -483,6 +483,16 @@ class QualityValidatorPlugin(ValidatorPlugin):
         # 构建详细结果
         has_ending_marker = "【本章完】" in text
 
+        # V2.16：句子完整性判罚——标记盖在截断悬句上视为未真正完结
+        # （《无极》第4章'…长老由归'+【本章完】实证：残缺曾被标记掩盖、
+        # 评分满分放行）。检测标记前正文是否以终止标点收束。
+        _terminal_punct = ('。', '！', '？', '…', '”', '』', '】', '"', '）', ')')
+        ending_truncated = False
+        if has_ending_marker:
+            _inner = text.rstrip()
+            _inner = _inner[:_inner.rfind('【本章完】')].rstrip()
+            ending_truncated = bool(_inner) and not _inner.endswith(_terminal_punct)
+
         word_count_score = self._score_word_count(text, target_word_count)
 
         if chapter_outline:
@@ -513,15 +523,20 @@ class QualityValidatorPlugin(ValidatorPlugin):
             passed = False
         else:
             total_score = validation_scores.total_score
-            passed = (total_score >= 0.8 and has_ending_marker)
+            # V2.16：截断悬句不放行（完整性是达标的前置条件）
+            passed = (total_score >= 0.8 and has_ending_marker
+                      and not ending_truncated)
 
         # 构建反馈（V3.0版本 - 9维度，使用英文key作为唯一真值来源）
         # V6.0关键修复：feedback必须使用与get_dimension_display_map()一致的英文key，
         # 否则GUI层的dim_display.get(key)查找失败，导致维度名无法正确显示！
         feedback = {
             'chapter_end': {
-                'score': 1.0 if has_ending_marker else 0.0,
-                'details': '✓ 包含【本章完】' if has_ending_marker else '✗ 缺少【本章完】'
+                # V2.16：截断悬句+标记=0.3判罚（真实完结才给满分）
+                'score': 0.3 if ending_truncated else (1.0 if has_ending_marker else 0.0),
+                'details': ('✗ 末句在句中截断，【本章完】盖在残句上（需真实补完结尾）'
+                            if ending_truncated else
+                            ('✓ 包含【本章完】' if has_ending_marker else '✗ 缺少【本章完】'))
             },
             'worldview': {
                 'score': validation_scores.worldview_score,
@@ -568,6 +583,9 @@ class QualityValidatorPlugin(ValidatorPlugin):
 
         if not has_ending_marker:
             suggestions.insert(0, "缺少【本章完】结束标记，请在章节末尾添加【本章完】")
+        if ending_truncated:
+            suggestions.insert(0, "章节末句在句中截断（【本章完】盖在残句上），"
+                                  "请将结尾场景真实写完后再收束")
 
         return WeightedValidationResult(
             word_count_score=word_count_score,
@@ -951,8 +969,11 @@ class QualityValidatorPlugin(ValidatorPlugin):
             dialog_score = 0.1 if any(m in text for m in ['"', '"', '「', '」']) else 0.0
 
             # 总分
+            # V2.16修复量纲倒挂：人名命中（用了配置人设）的地板不得低于
+            # 无人物可查的中性兜底0.7——旧地板0.5使"名字命中但性格词零匹配"
+            # 得0.6，反而比完全没配置人物（0.7）更低，惩罚了正确行为。
             total_score = min(1.0, base_score + keyword_score + behavior_score + dialog_score)
-            total_score = max(0.5, total_score)
+            total_score = max(0.7, total_score)
 
             consistency_scores.append(total_score)
 

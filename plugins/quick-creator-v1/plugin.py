@@ -753,22 +753,94 @@ class QuickCreationPlugin(BasePlugin):
         
         system_prompt, user_prompt = self._render_prompt(template, variables)
         
-        max_tokens_map = {"quick": 3000, "standard": 5000, "detailed": 8000}
-        max_tokens = max_tokens_map.get(generation_type, 5000)
-        
+        # V2.16：预算对齐64K输出上限（旧5000会截断多章大纲——《无极》实证
+        # 大纲在第二章中途断裂）；费用按实际生成计，宽松无额外成本
+        max_tokens_map = {"quick": 8000, "standard": 16000, "detailed": 32000}
+        max_tokens = max_tokens_map.get(generation_type, 16000)
+
         response = self._call_llm(system_prompt, user_prompt, max_tokens=max_tokens)
-        
+
         # 缓存生成结果
         self._generation_history["outline"] = response
-        
+
         logger.info("大纲生成完成")
-        
+
+        # V2.16：真实解析章节（旧实现 chapters=[{"content": response}] 缺
+        # chapter_num/title 字段 → get_full_text 渲染"第?章：待定"，完整
+        # 大纲文本被整体丢弃，仅剩 synopsis[:500] 截断残篇——大纲衰减根因）
+        chapters = self._parse_outline_chapters(response)
+        synopsis = self._extract_outline_synopsis(response)
         return OutlineResult(
             title=theme,
             theme=theme,
-            synopsis=response[:500] if len(response) > 500 else response,
-            chapters=[{"content": response}]  # 简化处理，实际应解析章节
+            synopsis=synopsis,
+            chapters=chapters,
+            total_chapters=len(chapters)
         )
+
+    _CN_NUM = {'零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
+               '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '百': 100}
+
+    @classmethod
+    def _cn_to_int(cls, s: str) -> int:
+        """中文数字转int（支持到几百；失败返回0）"""
+        s = s.strip()
+        if s.isdigit():
+            return int(s)
+        section, num = 0, 0
+        for ch in s:
+            v = cls._CN_NUM.get(ch)
+            if v is None:
+                return 0
+            if v == 100:
+                section = (num or 1) * 100
+                num = 0
+            elif v == 10:
+                num = (num or 1) * 10
+            else:
+                num += v
+        return section + num
+
+    @classmethod
+    def _parse_outline_chapters(cls, response: str) -> List[Dict[str, Any]]:
+        """从LLM大纲markdown中解析结构化章节列表（V2.16）
+
+        兼容标题形态：`## 第一章：标题`、`### 第2章 标题`、行首`第N章：标题`。
+        解析失败时回退为单章承载全文——绝不产出【待定】占位、绝不丢文本。
+        """
+        import re as _re
+        # V2.16.1：标题允许粗体星号（实测LLM常写"### **第一章 矿脉微光**"）
+        pattern = _re.compile(
+            r'^[#\s*]*第([\d零一二两三四五六七八九十百]+)章[：:\s*]*(.*)$', _re.M)
+        matches = list(pattern.finditer(response or ""))
+        chapters: List[Dict[str, Any]] = []
+        for i, m in enumerate(matches):
+            num = cls._cn_to_int(m.group(1)) or (i + 1)
+            title = (m.group(2) or "").strip().strip('*#：:').strip() or f"第{num}章"
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(response)
+            body = response[start:end].strip()
+            key_events = [ln.strip('-•* \t')
+                          for ln in body.split('\n')
+                          if ln.strip().startswith(('-', '•', '*')) and 6 <= len(ln.strip()) <= 120][:6]
+            chapters.append({
+                "chapter_num": num,
+                "title": title,
+                "summary": body,
+                "key_events": key_events,
+            })
+        if not chapters and (response or "").strip():
+            chapters = [{"chapter_num": 1, "title": "全书大纲",
+                         "summary": response.strip(), "key_events": []}]
+        return chapters
+
+    @staticmethod
+    def _extract_outline_synopsis(response: str) -> str:
+        """提取梗概：优先章节标题前的导语段，否则取前400字（V2.16）"""
+        import re as _re
+        m = _re.search(r'^[#\s]*第[\d零一二两三四五六七八九十百]+章', response or "", _re.M)
+        head = response[:m.start()].strip() if m else (response or "").strip()
+        return head[:600] if head else (response or "")[:400]
     
     def generate_character(
         self,
@@ -1121,11 +1193,32 @@ class QuickCreationPlugin(BasePlugin):
         try:
             text = outline.get_full_text() if outline else ""
             import re as _re
-            # "陈元（主角…）" / "陆横（矿场监工…）" 形态
+            # V2.16.1：形态扩充——实测LLM还常写"**林默**：主角，…"与
+            # "林默：主角"；同时过滤角色名词误捕（如"监工修士（配角）"）。
+            _ROLE_TOKENS = ('修士', '弟子', '长老', '执事', '真君', '道主',
+                            '殿主', '宗主', '监工', '少年', '意志', '掌门',
+                            '道盟', '配角', '人物',
+                            # markdown字段标签（"**主题**："形态的误捕来源）
+                            '主题', '事件', '情节', '建议', '标题', '字数',
+                            '梗概', '设定', '背景', '出场', '呼应', '伏笔',
+                            '章节', '目标', '结局', '主线', '支线', '矿籍')
+            def _clean_add(raw: str, is_lead: bool = False):
+                n = str(raw).strip().strip('*')
+                if any(t in n for t in _ROLE_TOKENS):
+                    return
+                _add(n, is_lead)
+            # 主角优先形态
             for m in _re.finditer(r'([一-龥]{2,4})（(主角|男主|女主)', text):
-                _add(m.group(1), is_lead=True)
+                _clean_add(m.group(1), is_lead=True)
+            for m in _re.finditer(r'\*\*([一-龥]{2,4})\*\*[：:]\s*(主角|男主|女主)', text):
+                _clean_add(m.group(1), is_lead=True)
+            for m in _re.finditer(r'^[-•\s]*([一-龥]{2,4})[：:]\s*(主角|男主|女主)', text, _re.M):
+                _clean_add(m.group(1), is_lead=True)
+            # 一般人物形态
             for m in _re.finditer(r'([一-龥]{2,4})（[^）]{0,12}）', text):
-                _add(m.group(1))
+                _clean_add(m.group(1))
+            for m in _re.finditer(r'\*\*([一-龥]{2,4})\*\*[：:]', text):
+                _clean_add(m.group(1))
         except Exception:
             pass
 

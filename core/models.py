@@ -620,6 +620,12 @@ class OutlineResult(BaseModel):
         if self.chapters:
             parts.append(f"\n## 章节大纲\n")
             for ch in self.chapters:
+                # V2.16防御：旧数据只有content字段（无chapter_num/title）时
+                # 直出全文，不再渲染"第?章：待定"丢弃正文
+                if not ch.get('title') and not ch.get('summary') and ch.get('content'):
+                    parts.append(str(ch['content']))
+                    parts.append("")
+                    continue
                 parts.append(f"第{ch.get('chapter_num', '?')}章：{ch.get('title', '待定')}")
                 if ch.get('summary'):
                     parts.append(f"  摘要：{ch['summary']}")
