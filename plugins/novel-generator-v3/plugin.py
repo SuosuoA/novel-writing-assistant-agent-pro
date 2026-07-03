@@ -892,23 +892,56 @@ class NovelGeneratorPlugin(GeneratorPlugin):
             return None
 
     def _get_quality_validator(self):
-        """获取quality-validator-v1插件实例"""
+        """获取quality-validator-v1插件实例
+
+        V2.8修复（《无极》实战评分审计）：原实现只查注册表——无头/独立进程
+        注册表为空 → 恒 None → 九维评分恒降级到内联规则分（character 0.5/
+        style 0.6 等低天花板，0.8阈值实际不可达，5轮迭代必然全跑满）。
+        补 context-builder 同款本地实例兜底（importlib+initialize+缓存）。
+        """
+        # 缓存命中
+        if getattr(self, '_quality_validator_cached', None) is not None:
+            return self._quality_validator_cached
+
+        validator = None
         try:
             if self._context and hasattr(self._context, 'plugin_registry'):
                 registry = self._context.plugin_registry
                 if registry:
-                    # 尝试从PluginRegistry获取
-                    validator = None
                     if hasattr(registry, 'get_plugin'):
                         validator = registry.get_plugin('quality-validator-v1')
                     elif hasattr(registry, 'get_plugin_info'):
                         info = registry.get_plugin_info('quality-validator-v1')
                         if info and hasattr(info, 'instance') and info.instance:
                             validator = info.instance
-                    if validator and hasattr(validator, 'validate'):
-                        return validator
         except Exception:
-            pass
+            validator = None
+
+        # 本地实例兜底（与 _context_builder 同款策略）
+        if validator is None or not hasattr(validator, 'validate'):
+            try:
+                import importlib
+                _qv_mod = importlib.import_module("plugins.quality-validator-v1.plugin")
+                inst = _qv_mod.QualityValidatorPlugin()
+                try:
+                    from core.plugin_interface import PluginContext
+                    inst.initialize(PluginContext(
+                        event_bus=getattr(self._context, 'event_bus', None) if self._context else None,
+                        service_locator=getattr(self._context, 'service_locator', None) if self._context else None,
+                        config_manager=getattr(self._context, 'config_manager', None) if self._context else None,
+                        plugin_registry=getattr(self._context, 'plugin_registry', None) if self._context else None,
+                    ))
+                except Exception as ie:
+                    logger.debug(f"[V3] 质量验证器本地初始化未完成（降级可用性）: {ie}")
+                validator = inst
+                logger.info("[V3] 创建本地QualityValidatorPlugin实例（九维评分归位）")
+            except Exception as e:
+                logger.warning(f"[V3] 质量验证器本地兜底失败，将用内联规则分: {e}")
+                return None
+
+        if validator is not None and hasattr(validator, 'validate'):
+            self._quality_validator_cached = validator
+            return validator
         return None
 
     def _validate_content(

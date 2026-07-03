@@ -7169,7 +7169,7 @@ data/知识库验证器/backups/
 
             # 更新评分
             score = version.get("score", 0)
-            self._score_label.configure(text=f"评分：{score:.2f}")
+            self._score_label.configure(text=f"连贯评分：{score:.2f}")
 
             # 更新版本信息（勿用emoji：configure不经emoji拦截器）
             total = len(self._continue_versions)
@@ -13299,7 +13299,7 @@ data/知识库验证器/backups/
             ttk.Label(
                 dialog,
                 text=f"将保存评分最高的版本 V{best_index + 1}/{total_versions}"
-                     f"（评分：{best_score:.2f}）",
+                     f"（连贯评分：{best_score:.2f}）",
                 foreground="#10B981",
             ).pack(pady=(10, 0))
 
