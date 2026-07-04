@@ -141,7 +141,9 @@ def phase2(chapter_no: int):
         chapter_title=f"第{chapter_no}章", chapter_number=chapter_no,
         target_word_count=TARGET_WORDS,
         outline_content=ctx.get("outline_content", ""),
-        chapter_outline=ctx.get("chapter_outline", ""),
+        # V2.20.3：chapter_outline为空时回退全书大纲——否则循环内outline
+        # 恒中性0.7（无情节点可比对），循环判分系统性低于统一口径
+        chapter_outline=ctx.get("chapter_outline") or ctx.get("outline_content", ""),
         style_sample_path="", style_profile=ctx.get("style_profile") or {},
         characters=ctx.get("characters") or [],
         worldview=ctx.get("worldview") or {},
@@ -472,6 +474,31 @@ def phase9():
     log(f"[Phase9 完成] {summary}")
 
 
+def score9_cli(title: str):
+    """子进程隔离的统一九维评分（打印SCORE=行）"""
+    pm = get_pm()
+    content = pm.get_chapter_content(title) or ""
+    if not content:
+        print("SCORE=-1")
+        return
+    s = _score9(content, pm)
+    print(f"SCORE={s:.6f}")
+
+
+def _score9_isolated(title: str) -> float:
+    """经子进程执行score9，父进程不触碰LanceDB（防跨进程锁）"""
+    import subprocess
+    r = subprocess.run([sys.executable, os.path.abspath(__file__), "score9", title],
+                       env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                       cwd=ROOT, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=900)
+    for line in reversed((r.stdout or "").splitlines()):
+        if line.startswith("SCORE="):
+            return float(line.split("=", 1)[1])
+    log(f"[评分子进程异常] rc={r.returncode} tail={(r.stdout or '')[-200:]}")
+    return -1.0
+
+
 def phase9b():
     """定向补轮：以当前各章为保底基线，只接受更优；达0.9即停（不降标准）"""
     import subprocess
@@ -502,7 +529,7 @@ def phase9b():
         title = f"第{no}章"
         pm0 = get_pm()
         best_c = pm0.get_chapter_content(title) or ""
-        best_s = _score9(best_c, pm0) if best_c else -1.0
+        best_s = _score9_isolated(title) if best_c else -1.0
         log(f"[基线] {title} = {best_s:.4f}")
         if best_s >= target:
             summary[title] = round(best_s, 4)
@@ -521,10 +548,12 @@ def phase9b():
                 continue
             pm2 = get_pm()
             content = pm2.get_chapter_content(title) or ""
-            s = _score9(content, pm2)
+            s = _score9_isolated(title)
             log(f"[补轮评] {title} 轮{att} 统一九维={s:.4f} 字数={len(content)}")
             if s > best_s:
                 best_s, best_c = s, content
+                # 抗中断快照：最优稿即时落盘
+                (LOG_DIR / f"best_{title}_{s:.4f}.txt").write_text(content, encoding="utf-8")
             if best_s >= target:
                 break
         _finalize(title, best_c, "continuation" if no == 4 else "generation")
@@ -550,6 +579,8 @@ if __name__ == "__main__":
         phase9()
     elif phase == "phase9b":
         phase9b()
+    elif phase == "score9":
+        score9_cli(sys.argv[2])
     else:
         log("用法: phase1 | phase2 <章号> | phase3 | phase4")
         sys.exit(2)
