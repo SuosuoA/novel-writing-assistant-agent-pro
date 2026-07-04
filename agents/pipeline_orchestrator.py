@@ -626,6 +626,8 @@ class PipelineOrchestrator:
             "knowledge_categories": config.knowledge_categories,  # V2.12新增
             "knowledge_domains": config.knowledge_domains,        # V2.12新增
             "writing_techniques": config.writing_techniques,      # V2.12新增
+            "quality_threshold": config.validation_threshold,     # V2.20修复
+            "max_iterations": config.max_iterations,              # V2.20修复
         })
         
         return context
@@ -669,6 +671,10 @@ class PipelineOrchestrator:
             "knowledge_categories": config.knowledge_categories,  # V2.12新增
             "knowledge_domains": config.knowledge_domains,        # V2.12新增
             "writing_techniques": config.writing_techniques,      # V2.12新增
+            # V2.20修复：阈值/迭代数此前只存在于编排器本地，从未进payload
+            # → 插件循环永远用默认0.8，上层配置的阈值静默失效
+            "quality_threshold": config.validation_threshold,
+            "max_iterations": config.max_iterations,
             # 从上下文获取之前的结果
             "shared_memory": context.shared_memory,
         }

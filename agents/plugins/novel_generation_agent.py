@@ -308,6 +308,33 @@ class NovelGenerationAgent(BaseAgent):
             if previous_chapters and hasattr(self._plugin, "seed_previous_chapters"):
                 self._plugin.seed_previous_chapters(previous_chapters)
 
+            # V2.20修复：阈值/迭代数从payload下发到插件与迭代器
+            # （此前编排器config.validation_threshold从未到达循环，上层设
+            # 0.9循环仍按默认0.8判停——配置静默失效，处方反馈无从触发）
+            _qt = payload.get("quality_threshold")
+            if _qt:
+                try:
+                    _qt = float(_qt)
+                    if hasattr(self._plugin, "quality_threshold"):
+                        self._plugin.quality_threshold = _qt
+                    _ig = getattr(self._plugin, "_iterative_generator", None)
+                    if _ig is not None and hasattr(_ig, "quality_threshold"):
+                        _ig.quality_threshold = _qt
+                    self._logger.info(f"[{self.AGENT_TYPE}] 质量阈值下发: {_qt}")
+                except (TypeError, ValueError):
+                    pass
+            _mi = payload.get("max_iterations")
+            if _mi:
+                try:
+                    _mi = int(_mi)
+                    if hasattr(self._plugin, "max_iterations"):
+                        self._plugin.max_iterations = _mi
+                    _ig = getattr(self._plugin, "_iterative_generator", None)
+                    if _ig is not None and hasattr(_ig, "max_iterations"):
+                        _ig.max_iterations = _mi
+                except (TypeError, ValueError):
+                    pass
+
             # 调用插件进行生成
             final_content, stats = self._plugin.generate_chapter(
                 chapter_title=chapter_title,
