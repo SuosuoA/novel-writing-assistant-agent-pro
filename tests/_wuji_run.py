@@ -525,10 +525,28 @@ def phase9b():
         (PROJ_DIR / "小说" / f"{ch_title}.txt").write_text(content, encoding="utf-8")
 
     import re
+    # V2.20.5修复：开跑前全量快照基线——早期章节补轮的修剪会把后续章节
+    # 从项目清掉，逐章现读基线会拿到-1（保底失效，实测第2章基线-1）
+    baseline = {}
+    pm_init = get_pm()
+    for no in (1, 2, 3, 4):
+        t = f"第{no}章"
+        c = pm_init.get_chapter_content(t) or ""
+        if c:
+            (LOG_DIR / f"baseline_{t}.txt").write_text(c, encoding="utf-8")
+            baseline[t] = c
+    final = dict(baseline)  # 前章用已定稿最优，本章用基线
     for no in (1, 2, 3, 4):
         title = f"第{no}章"
-        pm0 = get_pm()
-        best_c = pm0.get_chapter_content(title) or ""
+        best_c = baseline.get(title, "")
+        if best_c:
+            pmb = get_pm()
+            chs = [{"title": f"第{i}章", "content": final[f"第{i}章"],
+                    "word_count": len(final[f"第{i}章"]),
+                    "source": "continuation" if i == 4 else "generation"}
+                   for i in range(1, no + 1) if final.get(f"第{i}章")]
+            pmb.get_project_data()["completed_chapters"] = chs
+            pmb.save_project()
         best_s = _score9_isolated(title) if best_c else -1.0
         log(f"[基线] {title} = {best_s:.4f}")
         if best_s >= target:
@@ -557,12 +575,141 @@ def phase9b():
             if best_s >= target:
                 break
         _finalize(title, best_c, "continuation" if no == 4 else "generation")
+        final[title] = best_c
         summary[title] = round(best_s, 4)
         log(f"[补轮定稿] {title} best={best_s:.4f}")
 
     save_evidence("phase9b_补轮汇总.json", {"target": target, "rounds": rounds,
                                             "best_scores": summary})
     log(f"[Phase9b 完成] {summary}")
+
+
+def _revision_prescriptions(title: str) -> str:
+    """取当前稿的各维分数与处方（供精修指令）"""
+    import importlib
+    from core.plugin_interface import PluginContext
+    pm = get_pm()
+    text = pm.get_chapter_content(title) or ""
+    pd = pm.get_project_data()
+    wv = pd.get("worldview") or ""
+    if not isinstance(wv, str):
+        wv = json.dumps(wv, ensure_ascii=False)
+    qv_mod = importlib.import_module("plugins.quality-validator-v1.plugin")
+    v = qv_mod.QualityValidatorPlugin()
+    v.initialize(PluginContext(event_bus=None, service_locator=None,
+                               config_manager=None, plugin_registry=None))
+    r = v.validate_with_weights(
+        text=text, target_word_count=TARGET_WORDS,
+        chapter_outline=pm.get_outline() or "",
+        style_profile=pd.get("style") or {},
+        character_profiles=pm.get_characters() or [],
+        world_view=wv, knowledge_categories=["xuanhuan"])
+    lines = []
+    for k, d in sorted(r.feedback.items(), key=lambda x: x[1]["score"]):
+        if k == 'chapter_end' or d["score"] >= 0.9:
+            continue
+        lines.append(f"- {k}（当前{d['score']:.2f}）：{d['details']}")
+    return chr(10).join(lines)
+
+
+def phase9c():
+    """精修轮（hill-climbing）：现稿+各维处方→外科手术式修订，只升不降"""
+    import importlib
+    target = float(os.environ.get("WUJI_THRESHOLD", "0.9"))
+    rounds = int(os.environ.get("WUJI_ROUNDS", "4"))
+    log(f"===== Phase 9c：精修轮至{target}（每章≤{rounds}次修订，只升不降）=====")
+    from core.ai_service_manager import get_ai_service_manager
+    m = get_ai_service_manager()
+
+    gmod = importlib.import_module("plugins.novel-generator-v3.plugin")
+    from core.plugin_interface import PluginContext
+    gen = gmod.NovelGeneratorPlugin()
+    gen.initialize(PluginContext(event_bus=None, service_locator=None,
+                                 config_manager=None, plugin_registry=None))
+
+    pm = get_pm()
+    pd = pm.get_project_data()
+    trait_req = gmod.NovelGeneratorPlugin._build_trait_requirement(pm.get_characters())
+    vocab_hint = gmod.NovelGeneratorPlugin._build_style_vocab_hint(pd.get("style"))
+
+    summary = {}
+    for no in (1, 2, 3, 4):
+        title = f"第{no}章"
+        pm = get_pm()
+        best_c = pm.get_chapter_content(title) or ""
+        if not best_c:
+            continue
+        best_s = _score9_isolated(title)
+        log(f"[精修基线] {title} = {best_s:.4f}")
+        for att in range(1, rounds + 1):
+            if best_s >= target:
+                break
+            presc = _revision_prescriptions(title)
+            prev_tail = ""
+            if no > 1:
+                prev = get_pm().get_chapter_content(f"第{no-1}章") or ""
+                prev_tail = prev[-400:]
+            NL = chr(10)
+            parts = [
+                f"你是本书的责任编辑兼作者。以下是《无极》{title}现稿"
+                f"（当前综合评分{best_s:.2f}，全文{len(best_c)}字），"
+                f"请做一次【净零编辑】的外科手术式精修：",
+                f"最高优先级约束：修订后总字数不得超过{len(best_c)}字（现稿字数）"
+                f"且不得超过{int(TARGET_WORDS*1.15)}字——每插入一句就必须删除或"
+                f"精炼等量文字，用替换而非增写满足下列要求：",
+                "保持情节、场景结构与既有优点完全不变，只针对下列短板做替换式润色：",
+                presc, "",
+            ]
+            if prev_tail:
+                parts += ["【上一章结尾（供衔接参考）】", prev_tail, ""]
+            if trait_req:
+                parts.append(trait_req)
+            if vocab_hint:
+                parts.append(vocab_hint)
+            parts += [
+                f"【硬性约束】修订后全文{int(TARGET_WORDS*0.9)}-{int(TARGET_WORDS*1.1)}字；"
+                f"人名不变；最后一行【本章完】。", "",
+                "【现稿】", best_c, "",
+                "只输出修订后的完整正文，不要任何说明。",
+            ]
+            prompt = NL.join(parts)
+            try:
+                # V4 Pro推理token计入完成额度（实测max_tokens=5时usage=593），
+                # 整章修订思考量大，预算须覆盖推理+正文
+                r = m.generate_text(prompt, max_tokens=40000)
+                new_c = (getattr(r, "text", "") or "").strip()
+            except Exception as e:
+                log(f"[精修失败] {title} 第{att}次: {e}")
+                continue
+            if not new_c or len(new_c) < 800:
+                log(f"[精修弃用] {title} 第{att}次 产出过短({len(new_c)})")
+                continue
+            if "【本章完】" not in new_c:
+                new_c = new_c.rstrip() + NL + NL + "【本章完】"
+            # 写入项目→隔离评分
+            pmw = get_pm()
+            pmw.add_chapter(title, new_c, source="continuation" if no == 4 else "generation")
+            pmw.save_project()
+            s = _score9_isolated(title)
+            log(f"[精修评] {title} 第{att}次 {s:.4f} 字数={len(new_c)}")
+            if s > best_s:
+                best_s, best_c = s, new_c
+                (LOG_DIR / f"best_{title}_{s:.4f}.txt").write_text(new_c, encoding="utf-8")
+            else:
+                # 回滚到最优
+                pmr = get_pm()
+                pmr.add_chapter(title, best_c, source="continuation" if no == 4 else "generation")
+                pmr.save_project()
+        # 定稿
+        pmf = get_pm()
+        pmf.add_chapter(title, best_c, source="continuation" if no == 4 else "generation")
+        pmf.save_project()
+        (PROJ_DIR / "小说" / f"{title}.txt").write_text(best_c, encoding="utf-8")
+        summary[title] = round(best_s, 4)
+        log(f"[精修定稿] {title} best={best_s:.4f}")
+
+    save_evidence("phase9c_精修汇总.json", {"target": target, "best_scores": summary})
+    log(f"[Phase9c 完成] {summary}")
 
 
 if __name__ == "__main__":
@@ -581,6 +728,8 @@ if __name__ == "__main__":
         phase9b()
     elif phase == "score9":
         score9_cli(sys.argv[2])
+    elif phase == "phase9c":
+        phase9c()
     else:
         log("用法: phase1 | phase2 <章号> | phase3 | phase4")
         sys.exit(2)

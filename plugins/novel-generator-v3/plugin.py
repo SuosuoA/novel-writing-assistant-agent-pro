@@ -535,6 +535,20 @@ class NovelGeneratorPlugin(GeneratorPlugin):
             if extra_parts:
                 base_prompt = base_prompt + "\n\n" + "\n".join(extra_parts)
 
+        # V2.20.4：人设特质词收尾硬性要求（模型对结尾指令服从度最高；
+        # 中段的人物卡处方实测常被忽略——character恒0.7地板的最后一击）。
+        # 词表与 quality-validator 人设评分同一提取算法（对称原则）。
+        trait_req = self._build_trait_requirement(characters)
+        if trait_req:
+            base_prompt = base_prompt + "\n\n" + trait_req
+
+        # V2.20.6：风格词汇对称注入——style维度的词汇分量拿学习档案高频词
+        # 对照正文，但prompt此前只给风格标签不给词表（考词汇不发词汇表）。
+        # 这些本就是本书已有章节的高频词，注入=风格一致性的正当指引。
+        style_vocab = self._build_style_vocab_hint(style_profile)
+        if style_vocab:
+            base_prompt = base_prompt + "\n" + style_vocab
+
         # 强制附加【本章完】要求（百分百保证）
         base_prompt = self._ensure_chapter_end_marker(base_prompt)
 
@@ -730,6 +744,73 @@ class NovelGeneratorPlugin(GeneratorPlugin):
 
         return "\n".join(parts)
     
+    @staticmethod
+    def _build_style_vocab_hint(style_profile) -> str:
+        """风格常用词提示（V2.20.6，与quality-validator风格词汇分量同源）"""
+        try:
+            if not isinstance(style_profile, dict) or not style_profile:
+                return ""
+            words = []
+            vd = style_profile.get('vocabulary_depth') or {}
+            for item in (vd.get('high_frequency_words') or [])[:15]:
+                w = item[0] if isinstance(item, (list, tuple)) and item else item
+                if isinstance(w, str) and len(w) >= 2:
+                    words.append(w)
+            if not words:
+                vp = style_profile.get('vocabulary_profile') or {}
+                for item in (vp.get('most_common_words') or [])[:15]:
+                    w = item[0] if isinstance(item, (list, tuple)) and item else item
+                    if isinstance(w, str) and len(w) >= 2:
+                        words.append(w)
+            if not words:
+                return ""
+            return ("【风格词汇参考】本书既有章节的高频用词（保持全书语感一致，"
+                    f"自然使用其中一部分，勿堆砌）：{'、'.join(words)}")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _build_trait_requirement(characters) -> str:
+        """构建人设特质词收尾硬性要求（V2.20.4）
+
+        与 quality-validator._score_character_consistency 的特质token提取
+        同一算法：jieba 2-4字实义词。收尾位置=模型最高服从区。
+        """
+        try:
+            import jieba as _jieba
+            _stop = {'表面', '实则', '内心', '一个', '有些', '非常', '十分',
+                     '深藏', '藏着', '带着', '却又', '像一', '一团', '视为', '极深'}
+            char_list = characters or []
+            if isinstance(char_list, dict):
+                char_list = [dict(v, name=v.get('name', k)) if isinstance(v, dict)
+                             else {'name': k} for k, v in char_list.items()]
+            lines = []
+            for c in char_list[:3]:
+                if not isinstance(c, dict):
+                    continue
+                name = c.get('name') or (c.get('basic_info') or {}).get('name', '')
+                pers = c.get('personality') or (c.get('basic_info') or {}).get('personality', '')
+                if not name or not pers:
+                    continue
+                clean = re.sub(r'\*\*[^*]+\*\*[:：]', '', str(pers))
+                toks = []
+                for t in _jieba.cut(clean):
+                    t = t.strip()
+                    if (2 <= len(t) <= 4 and re.fullmatch(r'[一-龥]+', t)
+                            and t not in _stop and t not in toks):
+                        toks.append(t)
+                if toks:
+                    lines.append(f"  - {name}：{'、'.join(toks[:5])}")
+            if not lines:
+                return ""
+            return ("【人设特质词硬性要求】以下人物如在本章出场，其特质词中"
+                    "至少两个必须以原词形式出现在对其的描写中（行动/心理/"
+                    "对话皆可，须自然不生硬）：\n" + "\n".join(lines)
+                    + "\n【字数纪律】以上全部强化要求必须在目标字数±10%内完成"
+                      "——用精炼替换而非增写来满足要求，超字数同样不达标。")
+        except Exception:
+            return ""
+
     def _ensure_chapter_end_marker(self, prompt: str) -> str:
         """
         确保提示词中包含【本章完】要求
