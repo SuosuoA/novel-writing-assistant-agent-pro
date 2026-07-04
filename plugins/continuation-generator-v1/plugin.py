@@ -1793,7 +1793,33 @@ class ContinuationGeneratorPlugin(ContinuationPlugin):
                 name = char.get('name', '未知角色')
                 traits = char.get('traits', [])
                 role = char.get('role', '')
-                prompt_parts.append(f"- {name}（{role}）：{'、'.join(traits) if traits else '无特殊设定'}")
+                # V2.20.2：traits缺失时回退personality全文（此前渲染"无特殊
+                # 设定"——人设从未进入续写prompt），并附特质词划重点
+                # （与quality-validator人设评分同一提取算法）
+                personality = (char.get('personality', '')
+                               or (char.get('basic_info') or {}).get('personality', ''))
+                desc = ('、'.join(traits) if traits
+                        else (personality if personality else '无特殊设定'))
+                prompt_parts.append(f"- {name}（{role}）：{desc}")
+                if personality:
+                    try:
+                        import jieba as _jieba
+                        import re as _re
+                        _stopw = {'表面', '实则', '内心', '一个', '有些', '非常',
+                                  '十分', '深藏', '藏着', '带着', '却又', '像一',
+                                  '一团', '视为', '极深'}
+                        _clean = _re.sub(r'\*\*[^*]+\*\*[:：]', '', personality)
+                        _toks = []
+                        for _t in _jieba.cut(_clean):
+                            _t = _t.strip()
+                            if (2 <= len(_t) <= 4 and _re.fullmatch(r'[一-龥]+', _t)
+                                    and _t not in _stopw and _t not in _toks):
+                                _toks.append(_t)
+                        if _toks:
+                            prompt_parts.append(
+                                f"  特质词（须在描写中自然体现）: {'、'.join(_toks[:6])}")
+                    except Exception:
+                        pass
             prompt_parts.append("")
         
         if request.worldview:

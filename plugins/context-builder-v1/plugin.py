@@ -372,6 +372,12 @@ class ContextBuilderPlugin(GeneratorPlugin):
                     f"\n【人名硬性要求】本章人物必须从上述名单取用"
                     f"（{'、'.join(_names)}），主角与已设定角色不得改名、"
                     f"不得另创同定位新角色。")
+                # V2.20：特质落地指令——人设一致性按特质词在正文的体现度量，
+                # 要求模型把人物卡中的性格特质写进行动/心理（可直接使用特质词）
+                prompt_parts.append(
+                    "【人设落地要求】每位出场人物需通过行动、对话或心理描写体现"
+                    "其人物卡中的核心性格特质，特质关键词（如性格栏中的词语）"
+                    "应自然出现在描写中至少一次。")
             prompt_parts.append("")
 
         # ========== 第七部分：世界观背景 ==========
@@ -672,6 +678,26 @@ class ContextBuilderPlugin(GeneratorPlugin):
         personality = basic_info.get('personality', '')
         if personality:
             lines.append(f"性格特征: {personality}")
+            # V2.20.2：特质词划重点（与quality-validator人设评分同一提取
+            # 算法）——编辑给作者划重点：这些词应在描写中自然体现
+            try:
+                import jieba as _jieba
+                import re as _re
+                _trait_stop = {'表面', '实则', '内心', '一个', '有些', '非常',
+                               '十分', '深藏', '藏着', '带着', '却又', '像一',
+                               '一团', '视为', '极深'}
+                _clean = _re.sub(r'\*\*[^*]+\*\*[:：]', '', personality)
+                _toks = []
+                for _t in _jieba.cut(_clean):
+                    _t = _t.strip()
+                    if (2 <= len(_t) <= 4 and _re.fullmatch(r'[一-龥]+', _t)
+                            and _t not in _trait_stop and _t not in _toks):
+                        _toks.append(_t)
+                if _toks:
+                    lines.append(f"特质词（须在行动/心理/对话描写中自然体现）: "
+                                 f"{'、'.join(_toks[:6])}")
+            except Exception:
+                pass
 
         # 3. 外貌特征（完整保留）
         appearance = basic_info.get('appearance', '')

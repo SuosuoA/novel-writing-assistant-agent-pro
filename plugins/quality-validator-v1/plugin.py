@@ -953,18 +953,36 @@ class QualityValidatorPlugin(ValidatorPlugin):
             base_score = 0.5
 
             # 提取性格关键词
+            # V2.20.2效度修复：旧法按标点切短语且丢弃>10字片段——24字人设
+            # 只剩1个长短语（'外冷内热的压抑者'），整串/子词都难命中，
+            # character恒0.7地板。改为jieba特质token提取（2-4字实义词），
+            # 与context-builder人物卡【特质词】同一算法（两侧对称）。
             personality_keywords = []
             personality = char_profile.get('personality', '') or basic_info.get('personality', '')
             if personality:
                 clean_personality = re.sub(r'\*\*[^*]+\*\*[:：]', '', personality)
-                keywords = re.split(r'[,，。、；;\\n]+\s*', clean_personality)
-                personality_keywords.extend([kw.strip() for kw in keywords if 2 <= len(kw.strip()) <= 10])
+                _trait_stop = {'表面', '实则', '内心', '一个', '有些', '非常',
+                               '十分', '深藏', '藏着', '带着', '却又', '像一',
+                               '一团', '视为', '极深'}
+                if HAS_JIEBA:
+                    for t in jieba.cut(clean_personality):
+                        t = t.strip()
+                        if (2 <= len(t) <= 4 and re.fullmatch(r'[一-龥]+', t)
+                                and t not in _trait_stop
+                                and t not in personality_keywords):
+                            personality_keywords.append(t)
+                else:
+                    keywords = re.split(r'[,，。、；;\\n]+\s*', clean_personality)
+                    personality_keywords.extend(
+                        [kw.strip() for kw in keywords if 2 <= len(kw.strip()) <= 10])
 
             traits = char_profile.get('traits', []) or basic_info.get('traits', [])
             if isinstance(traits, list):
-                personality_keywords.extend([t for t in traits if t and 2 <= len(t) <= 10])
+                for t in traits:
+                    if t and 2 <= len(str(t)) <= 10 and t not in personality_keywords:
+                        personality_keywords.append(str(t))
 
-            personality_keywords = list(set(personality_keywords))[:5]
+            personality_keywords = personality_keywords[:6]
 
             # 关键词匹配
             # V2.20效度修复：性格描述多为长短语（"习惯隐忍"/"灼热的渴望"），

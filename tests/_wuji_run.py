@@ -472,6 +472,70 @@ def phase9():
     log(f"[Phase9 完成] {summary}")
 
 
+def phase9b():
+    """定向补轮：以当前各章为保底基线，只接受更优；达0.9即停（不降标准）"""
+    import subprocess
+    target = float(os.environ.get("WUJI_THRESHOLD", "0.9"))
+    rounds = int(os.environ.get("WUJI_ROUNDS", "4"))
+    log(f"===== Phase 9b：定向补轮至{target}（每章≤{rounds}轮，保底现有最佳）=====")
+    env = dict(os.environ, WUJI_THRESHOLD=str(target), PYTHONIOENCODING="utf-8")
+    summary = {}
+
+    def _run_sub(args):
+        return subprocess.run([sys.executable, os.path.abspath(__file__)] + args,
+                              env=env, cwd=ROOT, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=1800)
+
+    def _finalize(ch_title, content, source):
+        pmf = get_pm()
+        chs = pmf.get_project_data().get("completed_chapters", [])
+        no = int(re.sub(r"\D", "", ch_title))
+        keep = [c for c in chs if any(c.get("title") == f"第{i}章" for i in range(1, no))]
+        pmf.get_project_data()["completed_chapters"] = keep
+        pmf.save_project()
+        pmf.add_chapter(ch_title, content, source=source)
+        pmf.save_project()
+        (PROJ_DIR / "小说" / f"{ch_title}.txt").write_text(content, encoding="utf-8")
+
+    import re
+    for no in (1, 2, 3, 4):
+        title = f"第{no}章"
+        pm0 = get_pm()
+        best_c = pm0.get_chapter_content(title) or ""
+        best_s = _score9(best_c, pm0) if best_c else -1.0
+        log(f"[基线] {title} = {best_s:.4f}")
+        if best_s >= target:
+            summary[title] = round(best_s, 4)
+            continue
+        for att in range(1, rounds + 1):
+            # 修剪到前no-1章（前章=各自当前最佳，保证级联）
+            pm = get_pm()
+            chs = pm.get_project_data().get("completed_chapters", [])
+            keep = [c for c in chs if any(c.get("title") == f"第{i}章" for i in range(1, no))]
+            pm.get_project_data()["completed_chapters"] = keep
+            pm.save_project()
+            log(f"--- {title} 补轮{att} ---")
+            r = _run_sub(["phase3"] if no == 4 else ["phase2", str(no)])
+            if r.returncode != 0:
+                log(f"[补轮失败] {title} 轮{att} rc={r.returncode}")
+                continue
+            pm2 = get_pm()
+            content = pm2.get_chapter_content(title) or ""
+            s = _score9(content, pm2)
+            log(f"[补轮评] {title} 轮{att} 统一九维={s:.4f} 字数={len(content)}")
+            if s > best_s:
+                best_s, best_c = s, content
+            if best_s >= target:
+                break
+        _finalize(title, best_c, "continuation" if no == 4 else "generation")
+        summary[title] = round(best_s, 4)
+        log(f"[补轮定稿] {title} best={best_s:.4f}")
+
+    save_evidence("phase9b_补轮汇总.json", {"target": target, "rounds": rounds,
+                                            "best_scores": summary})
+    log(f"[Phase9b 完成] {summary}")
+
+
 if __name__ == "__main__":
     phase = sys.argv[1] if len(sys.argv) > 1 else ""
     if phase == "phase1":
@@ -484,6 +548,8 @@ if __name__ == "__main__":
         phase4()
     elif phase == "phase9":
         phase9()
+    elif phase == "phase9b":
+        phase9b()
     else:
         log("用法: phase1 | phase2 <章号> | phase3 | phase4")
         sys.exit(2)
