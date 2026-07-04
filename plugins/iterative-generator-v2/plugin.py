@@ -1176,6 +1176,21 @@ class IterativeGeneratorPlugin(GeneratorPlugin):
             feedback_parts.append("  ✅ 检查写作风格是否保持一致")
             feedback_parts.append("")
 
+        # V2.20：强化处方区——设定三维在合格线上但未达优（0.7≤分<0.9）时，
+        # 把validator带来的具体处方（未体现特质词/未融入核心设定词）直接
+        # 交给下一轮，让"越写越好"有明确抓手（此前这些details只在<0.7才展示）。
+        enhance_lines = []
+        for dim_name in priority_dims:
+            ds = dimension_scores.get(dim_name)
+            if ds and 0.7 <= ds.score < 0.9 and ds.details and '处方' in ds.details:
+                enhance_lines.append(f"◆ {dim_name}({ds.score:.2f}): {ds.details}")
+        if enhance_lines:
+            feedback_parts.append("=" * 60)
+            feedback_parts.append("🟡 【强化处方 - 冲优指令】(在保持已达标内容的基础上强化)")
+            feedback_parts.append("=" * 60)
+            feedback_parts.extend(enhance_lines)
+            feedback_parts.append("")
+
         # 🔴 优先级2: AI感专项反馈（V2.6新增）——闭环去AI腔
         # 当AI感维度偏低时，直接用AI感检测器扫出具体AI腔词句，逐条要求改写，
         # 而非泛泛说"减少AI感"。让下一轮迭代精确消除这些痕迹。

@@ -540,11 +540,23 @@ class QualityValidatorPlugin(ValidatorPlugin):
             },
             'worldview': {
                 'score': validation_scores.worldview_score,
-                'details': '是否符合世界观设定' + ('（一票否决）' if worldview_violation else '')
+                # V2.20处方化：点名未命中的设定核心词，反馈循环可直接执行
+                'details': ('是否符合世界观设定'
+                            + ('（一票否决）' if worldview_violation else '')
+                            + ((' ｜强化处方：请在情节中自然融入这些设定元素→'
+                                + '、'.join(getattr(self, '_last_worldview_notes', [])[:8]))
+                               if getattr(self, '_last_worldview_notes', None)
+                               and validation_scores.worldview_score < 0.9 else ''))
             },
             'character': {
                 'score': validation_scores.character_score,
-                'details': '人物行为是否符合设定'
+                # V2.20处方化：逐人点名未体现的性格特质词
+                'details': ('人物行为是否符合设定'
+                            + ((' ｜强化处方：请通过行动/对话体现→'
+                                + '；'.join(f"{n}:{('、'.join(kws))}"
+                                            for n, kws in list(getattr(self, '_last_character_notes', {}).items())[:3]))
+                               if getattr(self, '_last_character_notes', None)
+                               and validation_scores.character_score < 0.9 else ''))
             },
             'outline': {
                 'score': validation_scores.outline_score,
@@ -568,7 +580,11 @@ class QualityValidatorPlugin(ValidatorPlugin):
             },
             'context_coherence': {
                 'score': validation_scores.context_coherence_score,
-                'details': '与前文的衔接连贯性'
+                # V2.20处方化：给出可执行的衔接强化指令
+                'details': ('与前文的衔接连贯性'
+                            + ((' ｜强化处方：开头直接承接前文最后场景，首段自然出现'
+                                '主角名，并使用时间/空间过渡（如【次日】【回到】）')
+                               if validation_scores.context_coherence_score < 0.9 else ''))
             },
             'ai_feeling': {
                 'score': validation_scores.ai_feeling_score,
@@ -920,6 +936,7 @@ class QualityValidatorPlugin(ValidatorPlugin):
 
     def _score_character_consistency(self, text: str, character_profiles: List[Dict]) -> float:
         """人设一致性评分"""
+        self._last_character_notes = {}  # V2.20：本次调用的未命中特质词处方
         if not character_profiles:
             return 0.7
 
@@ -950,15 +967,36 @@ class QualityValidatorPlugin(ValidatorPlugin):
             personality_keywords = list(set(personality_keywords))[:5]
 
             # 关键词匹配
+            # V2.20效度修复：性格描述多为长短语（"习惯隐忍"/"灼热的渴望"），
+            # 整串子串匹配天然难中。用jieba子词展开——短语中任一实义子词
+            # （≥2字，非停用词）出现即算体现该特质（特质仍须真实在正文中）。
+            _kw_stop = {'表面', '实则', '内心', '一个', '有些', '非常', '十分'}
+            def _kw_hit(kw: str) -> bool:
+                if kw in text:
+                    return True
+                if HAS_JIEBA:
+                    for tk in jieba.cut(kw):
+                        if len(tk) >= 2 and tk not in _kw_stop and tk in text:
+                            return True
+                return False
+
             keyword_score = 0.0
             matched_count = 0
+            unmatched_kws = []
             for keyword in personality_keywords:
-                if keyword in text:
+                if _kw_hit(keyword):
                     matched_count += 1
+                else:
+                    unmatched_kws.append(keyword)
 
             if personality_keywords:
                 match_ratio = matched_count / len(personality_keywords)
                 keyword_score = match_ratio * 0.3
+            if unmatched_kws:
+                _notes_map = getattr(self, '_last_character_notes', None)
+                if _notes_map is None or not isinstance(_notes_map, dict):
+                    self._last_character_notes = {}
+                self._last_character_notes[char_name] = unmatched_kws[:4]
 
             # 行为描写
             action_patterns = ['说', '做', '走', '看', '想']
@@ -1031,8 +1069,11 @@ class QualityValidatorPlugin(ValidatorPlugin):
         _core = [w for w, _cnt in Counter(_words).most_common(30)]
         if not _core:
             return 0.7, False
-        hit = sum(1 for w in _core if w in text)
+        _unhit = [w for w in _core if w not in text]
+        hit = len(_core) - len(_unhit)
         hit_rate = hit / len(_core)
+        # V2.20：未命中核心词作为强化处方（反馈循环点名可融入的设定元素）
+        self._last_worldview_notes = _unhit[:10]
         # 校准：单章只覆盖世界观子集，命中30%核心词即视为充分贴合（1.0）；
         # 零命中=脱设定（0.45底）。实测四章23-40%、赛博朋克对照0%。
         return min(1.0, 0.45 + min(1.0, hit_rate / 0.3) * 0.55), False

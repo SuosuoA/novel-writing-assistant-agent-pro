@@ -145,7 +145,8 @@ def phase2(chapter_no: int):
         style_sample_path="", style_profile=ctx.get("style_profile") or {},
         characters=ctx.get("characters") or [],
         worldview=ctx.get("worldview") or {},
-        max_iterations=5, validation_threshold=0.8,
+        max_iterations=5,
+        validation_threshold=float(os.environ.get("WUJI_THRESHOLD", "0.8")),
         previous_chapter_text=(prev[-1] if prev else ""),
         previous_chapters=prev,
         knowledge_categories=["xuanhuan"], knowledge_domains=[],
@@ -370,6 +371,107 @@ def phase4():
     log("[Phase4 完成]")
 
 
+def _score9(text: str, pm) -> float:
+    """统一九维评分（与主链完全同口径）"""
+    import importlib
+    from core.plugin_interface import PluginContext
+    qv_mod = importlib.import_module("plugins.quality-validator-v1.plugin")
+    v = qv_mod.QualityValidatorPlugin()
+    v.initialize(PluginContext(event_bus=None, service_locator=None,
+                               config_manager=None, plugin_registry=None))
+    pd = pm.get_project_data()
+    wv = pd.get("worldview") or ""
+    if not isinstance(wv, str):
+        wv = json.dumps(wv, ensure_ascii=False)
+    r = v.validate_with_weights(
+        text=text, target_word_count=TARGET_WORDS,
+        chapter_outline=pm.get_outline() or "",
+        style_profile=pd.get("style") or {},
+        character_profiles=pm.get_characters() or [],
+        world_view=wv, knowledge_categories=["xuanhuan"])
+    return float(r.total_weighted_score)
+
+
+def _trim_to(pm, upto_exclusive: int):
+    """裁剪章节列表到第N章之前（干净级联：本章重生成不被旧版本锚定）"""
+    chs = pm.get_project_data().get("completed_chapters", [])
+    keep = [c for c in chs
+            if any(c.get("title") == f"第{i}章" for i in range(1, upto_exclusive))]
+    pm.get_project_data()["completed_chapters"] = keep
+    pm.save_project()
+
+
+def phase9():
+    """冲9：阈值0.9多轮循环（不降标准；每轮子进程隔离防状态污染）"""
+    import subprocess
+    target = float(os.environ.get("WUJI_THRESHOLD", "0.9"))
+    rounds = int(os.environ.get("WUJI_ROUNDS", "3"))
+    log(f"===== Phase 9：冲{target}（每章≤{rounds}轮×每轮≤5迭代）=====")
+    env = dict(os.environ, WUJI_THRESHOLD=str(target), PYTHONIOENCODING="utf-8")
+    summary = {}
+
+    def _run_sub(args):
+        return subprocess.run([sys.executable, os.path.abspath(__file__)] + args,
+                              env=env, cwd=ROOT, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=1800)
+
+    for ch in (1, 2, 3):
+        best_c, best_s = "", -1.0
+        for att in range(1, rounds + 1):
+            pm = get_pm()
+            _trim_to(pm, ch)  # 只保留前 ch-1 章
+            log(f"--- 第{ch}章 第{att}轮生成 ---")
+            r = _run_sub(["phase2", str(ch)])
+            if r.returncode != 0:
+                log(f"[轮失败] 第{ch}章第{att}轮 rc={r.returncode} tail={r.stdout[-200:]}")
+                continue
+            pm2 = get_pm()
+            content = pm2.get_chapter_content(f"第{ch}章") or ""
+            s = _score9(content, pm2)
+            log(f"[轮评] 第{ch}章 第{att}轮 统一九维={s:.4f} 字数={len(content)}")
+            if s > best_s:
+                best_s, best_c = s, content
+            if best_s >= target:
+                break
+        pmf = get_pm()
+        _trim_to(pmf, ch)
+        pmf.add_chapter(f"第{ch}章", best_c, source="generation")
+        pmf.save_project()
+        (PROJ_DIR / "小说" / f"第{ch}章.txt").write_text(best_c, encoding="utf-8")
+        summary[f"第{ch}章"] = round(best_s, 4)
+        log(f"[定稿] 第{ch}章 best={best_s:.4f}")
+
+    # 第4章（续写多版本，本身即一轮3版本择优；再包一层冲9轮次）
+    best_c, best_s = "", -1.0
+    for att in range(1, rounds + 1):
+        pm = get_pm()
+        _trim_to(pm, 4)
+        log(f"--- 第4章续写 第{att}轮 ---")
+        r = _run_sub(["phase3"])
+        if r.returncode != 0:
+            log(f"[轮失败] 第4章第{att}轮 rc={r.returncode}")
+            continue
+        pm4 = get_pm()
+        content = pm4.get_chapter_content("第4章") or ""
+        s = _score9(content, pm4)
+        log(f"[轮评] 第4章 第{att}轮 统一九维={s:.4f} 字数={len(content)}")
+        if s > best_s:
+            best_s, best_c = s, content
+        if best_s >= target:
+            break
+    pmf = get_pm()
+    _trim_to(pmf, 4)
+    pmf.add_chapter("第4章", best_c, source="continuation")
+    pmf.save_project()
+    (PROJ_DIR / "小说" / "第4章.txt").write_text(best_c, encoding="utf-8")
+    summary["第4章"] = round(best_s, 4)
+    log(f"[定稿] 第4章 best={best_s:.4f}")
+
+    save_evidence("phase9_冲9汇总.json", {"target": target, "rounds": rounds,
+                                          "best_scores": summary})
+    log(f"[Phase9 完成] {summary}")
+
+
 if __name__ == "__main__":
     phase = sys.argv[1] if len(sys.argv) > 1 else ""
     if phase == "phase1":
@@ -380,6 +482,8 @@ if __name__ == "__main__":
         phase3()
     elif phase == "phase4":
         phase4()
+    elif phase == "phase9":
+        phase9()
     else:
         log("用法: phase1 | phase2 <章号> | phase3 | phase4")
         sys.exit(2)
